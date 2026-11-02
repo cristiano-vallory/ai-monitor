@@ -68,6 +68,13 @@ fn run_process(
                 cmd.env(key, value);
             }
         }
+        // systemctl --user/journalctl --user precisam do barramento do usuário.
+        #[cfg(target_os = "linux")]
+        for key in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
     }
     #[cfg(unix)]
     {

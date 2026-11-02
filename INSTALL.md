@@ -331,5 +331,5 @@ Com Rust estável: `cargo build --release`. Com bandeja disponível, o binário 
 
 - Com bandeja (StatusNotifierItem), o app mostra somente um ícone — clique esquerdo abre o painel; fechar a janela mantém o monitor rodando na bandeja; abrir uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, o app volta ao modo janela: abre direto e fechar encerra.
 - No GNOME/Ubuntu é exigida a extensão AppIndicator (ativa por padrão no Ubuntu ≥ 22.04); no Omarchy 4, o widget de bandeja da barra Quickshell.
-- Não há backend LaunchAgent nem serviço systemd na aba de serviço local — somente o backend Docker.
+- Na aba de serviço local há os backends Docker e **systemd (usuário)**: controla a unit `ai-memory.service` instalada por `ai-memory setup` (iniciar, parar, reiniciar, logs do journal, atualização nativa com backup e SHA-256). Units de sistema (system-wide) estão fora de escopo. O backend precisa do barramento do usuário (`XDG_RUNTIME_DIR` e `DBUS_SESSION_BUS_ADDRESS`), presente em sessões gráficas; numa sessão sem login gráfico (SSH, headless), habilite antes `loginctl enable-linger <usuário>`.
 - `.deb` (Ubuntu), `PKGBUILD` (Omarchy/Arch), entrada `.desktop` e ícone ficam para a fase 4.

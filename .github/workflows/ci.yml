@@ -110,6 +110,13 @@ jobs:
           code=$?
           set -e
           if [ "$code" -ne 0 ]; then exit "$code"; fi
+      - name: systemd --user integration test
+        run: |
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+          for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          cargo test --locked -- --ignored systemd_backend_full_lifecycle
       - name: Fallback smoke (no tray host)
         run: |
           set +e
