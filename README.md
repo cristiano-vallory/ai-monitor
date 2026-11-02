@@ -80,7 +80,7 @@ Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repo
 
 ## Conexão e coleta
 
-Padrões: `http://127.0.0.1:49374`, contêiner `ai-memory`, recursos a cada 2 s, API a cada 10 s e inventário de imagens a cada 15 s. O intervalo da API é contado após cada varredura para evitar sobrecarregar o servidor. A execução de uma consulta pode alongar o intervalo; a interface informa a idade de cada coleta. O app reconecta automaticamente. `Pausar tela` congela a visualização; os coletores continuam trabalhando.
+Padrões: `http://127.0.0.1:49374`, contêiner `ai-memory`, recursos a cada 2 s, API a cada 60 s e inventário de imagens a cada 15 s. O intervalo da API é contado após cada varredura para evitar sobrecarregar o servidor. A execução de uma consulta pode alongar o intervalo; a interface informa a idade de cada coleta. O app reconecta automaticamente. `Pausar tela` congela a visualização; os coletores continuam trabalhando.
 
 Abra **Conexão**, ajuste os campos e clique em **Salvar e conectar**.
 
@@ -91,7 +91,7 @@ Abra **Conexão**, ajuste os campos e clique em **Salvar e conectar**.
 | Contêiner ai-memory | `ai-memory` | Nome exato no contexto Docker monitorado |
 | Executável Docker | Detecção de caminhos usuais | Aceita caminho absoluto personalizado |
 | Recursos | 2 segundos | Entre 1 e 60 segundos |
-| Sessões/handoffs | 10 segundos | Entre 5 e 300 segundos; espera após cada varredura |
+| Sessões/handoffs | 60 segundos | Entre 5 e 300 segundos; espera após cada varredura |
 
 Configurações são salvas em `~/Library/Application Support/AI Monitor/config.json`, fora do projeto. **O token não entra no JSON.** Pode ser guardado opcionalmente no Keychain, separado por endereço de servidor. URLs com usuário, senha, query ou fragmento são recusadas. Tokens em servidores fora de loopback exigem HTTPS. Redirecionamentos HTTP são recusados. O app não depende do PATH do Finder para encontrar as instalações usuais do Docker Desktop.
 
