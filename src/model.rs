@@ -61,7 +61,7 @@ impl Default for Config {
                 .unwrap_or("docker")
                 .into(),
             resource_seconds: 2,
-            api_seconds: 10,
+            api_seconds: 60,
             token: String::new(),
             human: None,
             remember_token: false,
@@ -528,6 +528,46 @@ mod tests {
         assert_eq!(loaded.container, "custom-ai");
         assert_eq!(loaded.resource_seconds, 5);
         assert_eq!(loaded.token, "synthetic-env-token");
+    }
+
+    #[test]
+    fn api_interval_defaults_to_60_s_and_respects_saved_values() {
+        assert_eq!(
+            Config::default().api_seconds,
+            60,
+            "default API interval must be 60 s"
+        );
+        // `container` diferente do padrão prova que a config do disco foi
+        // carregada, e não descartada em favor do padrão.
+        let loaded = Config::from_sources(Some(br#"{"container":"custom-ai"}"#), None, None);
+        assert_eq!(loaded.container, "custom-ai");
+        assert_eq!(
+            loaded.api_seconds, 60,
+            "missing key falls back to the default"
+        );
+        let loaded = Config::from_sources(
+            Some(br#"{"container":"custom-ai","api_seconds":10}"#),
+            None,
+            None,
+        );
+        assert_eq!(loaded.container, "custom-ai");
+        assert_eq!(
+            loaded.api_seconds, 10,
+            "a saved choice is kept, no migration"
+        );
+        for edge in [5, 300] {
+            let disk = format!(r#"{{"container":"custom-ai","api_seconds":{edge}}}"#);
+            let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+            assert_eq!(loaded.api_seconds, edge, "limit {edge} is accepted");
+        }
+        // Fora de 5–300 a config do disco inteira é descartada (mesmo caminho
+        // do resource_seconds inválido): vale o padrão, inclusive o contêiner.
+        for invalid in [0, 4, 301] {
+            let disk = format!(r#"{{"container":"custom-ai","api_seconds":{invalid}}}"#);
+            let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+            assert_eq!(loaded.api_seconds, 60, "api_seconds={invalid}");
+            assert_eq!(loaded.container, "ai-memory", "api_seconds={invalid}");
+        }
     }
 
     #[test]
