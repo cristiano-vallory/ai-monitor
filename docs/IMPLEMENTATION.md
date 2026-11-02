@@ -82,6 +82,8 @@ não existe fallback em texto puro.
 - Fase 3 — **concluída (PR #9)**: backend systemd `--user` para
   `ai-memory.service` (a unit que `ai-memory setup` instala no Linux), em
   substituição ao LaunchAgent.
-- Fase 4 — **empacotamento e release v0.6.0 (este PR)**: `.deb` (Ubuntu) +
+- Fase 4 — **concluída (PR #10, release v0.6.0)**: `.deb` (Ubuntu) +
   `PKGBUILD` (Omarchy/Arch) + pipeline de release. Validação final na VM
   Omarchy pendente (decisão do usuário: testar ao fim das 4 fases).
+- v0.6.1 — **em andamento (este PR)**: migração de identificadores para
+  `cristiano_vallory`/`cristiano-vallory` e correções acumuladas do port.

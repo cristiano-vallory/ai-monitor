@@ -221,10 +221,10 @@ pub fn sample_resources(config: &Config, system: &mut System) -> ResourceSnapsho
             .exe()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // Processes inside containers are visible on the host; only the
-        // ai-memory name match pays the /proc/<pid>/cgroup read.
+        // Processes inside containers are visible on the host; only the names
+        // that depend on cgroup to classify pay the /proc/<pid>/cgroup read.
         #[cfg(target_os = "linux")]
-        let cgroup = (name == "ai-memory")
+        let cgroup = needs_cgroup(&name)
             .then(|| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok())
             .flatten();
         #[cfg(not(target_os = "linux"))]
@@ -277,18 +277,32 @@ fn classify(name: &str, exe: &str, _cgroup: Option<&str>) -> Option<&'static str
 }
 
 #[cfg(target_os = "linux")]
+fn needs_cgroup(name: &str) -> bool {
+    name == "ai-memory" || is_engine(name)
+}
+
+#[cfg(target_os = "linux")]
+fn is_engine(name: &str) -> bool {
+    matches!(
+        name,
+        "dockerd" | "containerd" | "docker-proxy" | "rootlesskit"
+    ) || name.starts_with("containerd-shim")
+}
+
+#[cfg(target_os = "linux")]
 fn classify(name: &str, _exe: &str, cgroup: Option<&str>) -> Option<&'static str> {
     // sysinfo name() is the kernel comm, truncated to 15 bytes; every prefix
     // below is short enough to survive that truncation.
     if name.starts_with("com.docker.") {
         return Some("Docker Desktop");
     }
-    if matches!(
-        name,
-        "dockerd" | "containerd" | "docker-proxy" | "rootlesskit"
-    ) || name.starts_with("containerd-shim")
-    {
-        return Some("Docker Engine");
+    if is_engine(name) {
+        // Rodando dentro de contêiner, esses nomes não são o engine do host.
+        return if containerized(cgroup) {
+            None
+        } else {
+            Some("Docker Engine")
+        };
     }
     if name == "ai-memory" && !containerized(cgroup) {
         return Some("ai-memory");
@@ -298,6 +312,9 @@ fn classify(name: &str, _exe: &str, cgroup: Option<&str>) -> Option<&'static str
 
 #[cfg(any(target_os = "linux", test))]
 fn containerized(cgroup: Option<&str>) -> bool {
+    // hidepid esconde /proc de processos alheios por inteiro; um cgroup visível
+    // mas ilegível é um caso raro — contar como host é a escolha conservadora
+    // para a aba de processos.
     let Some(cgroup) = cgroup else {
         return false;
     };
@@ -508,6 +525,45 @@ mod tests {
             assert!(!containerized(Some(&cgroup)), "host: {cgroup}");
         }
         assert!(!containerized(None), "unreadable cgroup means host");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn needs_cgroup_covers_whole_domain() {
+        for name in [
+            "ai-memory",
+            "dockerd",
+            "containerd",
+            "docker-proxy",
+            "rootlesskit",
+            "containerd-shim",
+            "containerd-shim-ru", // comm truncado a 15 bytes
+        ] {
+            assert!(needs_cgroup(name), "{name} must read cgroup");
+        }
+        for name in ["docker", "com.docker.dev-envs", "firefox", "shim"] {
+            assert!(!needs_cgroup(name), "{name} must not read cgroup");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_classify_engine_names_respect_container_boundary() {
+        let inside = "0::/docker/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let host = "0::/system.slice/containerd.service";
+        assert_eq!(classify("dockerd", "/usr/bin/dockerd", Some(inside)), None);
+        assert_eq!(
+            classify("dockerd", "/usr/bin/dockerd", Some(host)),
+            Some("Docker Engine")
+        );
+        assert_eq!(
+            classify("containerd-shim", "/usr/bin/shim", Some(host)),
+            Some("Docker Engine")
+        );
+        assert_eq!(
+            classify("containerd-shim", "/usr/bin/shim", Some(inside)),
+            None
+        );
     }
 
     #[test]
