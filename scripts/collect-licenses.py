@@ -95,6 +95,8 @@ def main():
     texts = {}
 
     def reference(content):
+        if not content:
+            raise RuntimeError("Empty or missing license text from upstream")
         normalized = "\n".join(line.rstrip() for line in content.splitlines()).strip()
         if normalized not in texts:
             texts[normalized] = f"L{len(texts) + 1:03}"
@@ -109,7 +111,11 @@ def main():
     output.extend(["\n" + "=" * 72, "Rust standard library — MIT OR Apache-2.0", "Source: https://github.com/rust-lang/rust"])
     for name in ("LICENSE-MIT", "LICENSE-APACHE"):
         # Standard license texts, not any local toolchain paths or configuration.
-        output.append(f"License text [{reference(download(f'https://raw.githubusercontent.com/rust-lang/rust/1.99.1/{name}'))}]: {name}")
+        std_text = (
+            download(f"https://raw.githubusercontent.com/rust-lang/rust/1.99.1/{name}")
+            or download(f"https://raw.githubusercontent.com/rust-lang/rust/master/{name}")
+        )
+        output.append(f"License text [{reference(std_text)}]: {name}")
     for content, label in texts.items():
         output.extend(["\n" + "=" * 72, f"[{label}]", content])
     (ROOT / "packaging/THIRD_PARTY_NOTICES.txt").write_text("\n".join(output).rstrip() + "\n")

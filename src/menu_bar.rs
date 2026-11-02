@@ -174,38 +174,46 @@ mod native {
                 )
             };
             let mut previous = state.previous.borrow_mut();
-            if previous
-                .as_ref()
-                .is_none_or(|old| old.title != reading.title)
-                && let Some(button) = state.status.button(self.mtm())
-            {
-                button.setTitle(&NSString::from_str(&reading.title));
-            }
-            state.ai.setTitle(&NSString::from_str(&reading.ai));
-            state.docker.setTitle(&NSString::from_str(&reading.docker));
-            state
-                .freshness
-                .setTitle(&NSString::from_str(&reading.freshness));
-            if let Some(button) = state.status.button(self.mtm()) {
-                button.setToolTip(Some(&NSString::from_str(&format!("AI Monitor\n{}\n{}\n{}\nCPU: 100% = 1 núcleo. M/G = MiB/GiB. Docker inclui ai-memory.",reading.ai,reading.docker,reading.freshness))));
-                if state.trace_remaining.get() > 0 {
-                    state.trace_remaining.set(state.trace_remaining.get() - 1);
-                    // Opt-in, bounded diagnostics read the actual AppKit state;
-                    // no prompts, handoffs, credentials or paths are included.
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "at":Utc::now(),"menu_title":button.title().to_string(),
-                            "status_visible":state.status.isVisible(),
-                            "panel_visible":NSApplication::sharedApplication(self.mtm()).windows().iter()
-                                .any(|w|w.title().to_string()=="AI Monitor"&&w.isVisible()),
-                            "history_samples":state.shared.history.try_lock().ok().map(|h|h.len()),
-                            "freshness":reading.freshness,
-                        })
-                    );
+            if previous.as_ref() != Some(&reading) {
+                if previous
+                    .as_ref()
+                    .is_none_or(|old| old.title != reading.title)
+                    && let Some(button) = state.status.button(self.mtm())
+                {
+                    button.setTitle(&NSString::from_str(&reading.title));
                 }
+                state.ai.setTitle(&NSString::from_str(&reading.ai));
+                state.docker.setTitle(&NSString::from_str(&reading.docker));
+                state
+                    .freshness
+                    .setTitle(&NSString::from_str(&reading.freshness));
+                if let Some(button) = state.status.button(self.mtm()) {
+                    button.setToolTip(Some(&NSString::from_str(&format!("AI Monitor\n{}\n{}\n{}\nCPU: 100% = 1 núcleo. M/G = MiB/GiB. Docker inclui ai-memory.",reading.ai,reading.docker,reading.freshness))));
+                }
+                *previous = Some(reading);
             }
-            *previous = Some(reading);
+            if let Some(button) = state.status.button(self.mtm())
+                && state.trace_remaining.get() > 0
+            {
+                state.trace_remaining.set(state.trace_remaining.get() - 1);
+                let freshness = previous
+                    .as_ref()
+                    .map(|r| r.freshness.as_str())
+                    .unwrap_or("");
+                // Opt-in, bounded diagnostics read the actual AppKit state;
+                // no prompts, handoffs, credentials or paths are included.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "at":Utc::now(),"menu_title":button.title().to_string(),
+                        "status_visible":state.status.isVisible(),
+                        "panel_visible":NSApplication::sharedApplication(self.mtm()).windows().iter()
+                            .any(|w|w.title().to_string()=="AI Monitor"&&w.isVisible()),
+                        "history_samples":state.shared.history.try_lock().ok().map(|h|h.len()),
+                        "freshness":freshness,
+                    })
+                );
+            }
         }
     }
 

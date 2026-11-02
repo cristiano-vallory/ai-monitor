@@ -56,7 +56,15 @@ struct HandoffList {
 }
 
 pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
+    collect_until(config, || stop.load(Ordering::Relaxed))
+}
+
+pub fn collect_until(config: &Config, cancel: impl Fn() -> bool + Sync) -> ApiSnapshot {
     let mut result = ApiSnapshot::default();
+    if cancel() {
+        result.error = Some("Coleta interrompida.".into());
+        return result;
+    }
     let client = match Client::builder()
         .timeout(Duration::from_secs(8))
         .connect_timeout(Duration::from_secs(2))
@@ -79,12 +87,17 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
             return result;
         }
     };
+    if cancel() {
+        result.error = Some("Coleta interrompida.".into());
+        return result;
+    }
     result.version = endpoint(&config.endpoint, &["identity"])
         .and_then(|url| get::<serde_json::Value>(&client, config, url))
         .ok()
         .and_then(|v| v["version"].as_str().map(str::to_owned))
         .unwrap_or_default();
     let deadline = Instant::now() + Duration::from_secs(30);
+    let cancel = &cancel;
     let chunks = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..4)
             .map(|worker| {
@@ -94,15 +107,16 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
                     let mut sessions = Vec::new();
                     let mut handoffs = Vec::new();
                     let mut errors = Vec::new();
-                    let mut handoff_total=Some(0usize);
-                    let mut warnings=Vec::new();
+                    let mut handoff_total = Some(0usize);
+                    let mut warnings = Vec::new();
                     for project in projects.iter().skip(worker).step_by(4) {
-                        if stop.load(Ordering::Relaxed) {
+                        if cancel() {
+                            handoff_total = None;
                             break;
                         }
                         if Instant::now() > deadline {
                             errors.push("Coleta parcial: limite de 30 s atingido.".into());
-                            handoff_total=None;
+                            handoff_total = None;
                             break;
                         }
                         let name = format!("{} / {}", project.workspace_name, project.project_name);
@@ -124,18 +138,31 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
                         });
                         match hs {
                             Ok(list) => {
-                                let count=if list.handoffs.len()==200 {
+                                let count = if list.handoffs.len() >= 200 {
                                     warnings.push(format!("{name}: lista limitada aos 200 handoffs mais recentes; total consultado separadamente."));
-                                    let mut count_path=base.to_vec();count_path.push("briefing");
-                                    match endpoint(&config.endpoint,&count_path).and_then(|mut u| {
-                                        u.query_pairs_mut().append_pair("limit","1");
-                                        get::<serde_json::Value>(client,config,u)
-                                    }).and_then(|v|v["pending_handoff_count"].as_u64().map(|n|n as usize).ok_or("Total de handoffs ausente na API.".into())) {
-                                        Ok(n)=>Some(n),
-                                        Err(e)=>{errors.push(format!("{name}: {e}"));None}
+                                    let mut count_path = base.to_vec();
+                                    count_path.push("briefing");
+                                    match endpoint(&config.endpoint, &count_path)
+                                        .and_then(|mut u| {
+                                            u.query_pairs_mut().append_pair("limit", "1");
+                                            get::<serde_json::Value>(client, config, u)
+                                        })
+                                        .and_then(|v| {
+                                            v["pending_handoff_count"]
+                                                .as_u64()
+                                                .map(|n| n as usize)
+                                                .ok_or("Total de handoffs ausente na API.".into())
+                                        }) {
+                                        Ok(n) => Some(n),
+                                        Err(e) => {
+                                            errors.push(format!("{name}: {e}"));
+                                            None
+                                        }
                                     }
-                                } else {Some(list.handoffs.iter().filter(|h|h.state=="open").count())};
-                                handoff_total=handoff_total.zip(count).map(|(a,b)|a+b);
+                                } else {
+                                    Some(list.handoffs.iter().filter(|h| h.state == "open").count())
+                                };
+                                handoff_total = handoff_total.zip(count).map(|(a, b)| a + b);
                                 handoffs.extend(
                                     list.handoffs.into_iter().filter(|h| h.state == "open").map(
                                         |mut h| {
@@ -145,24 +172,37 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
                                     ),
                                 );
                             }
-                            Err(e) => {errors.push(format!("{name}: {e}"));handoff_total=None;},
+                            Err(e) => {
+                                errors.push(format!("{name}: {e}"));
+                                handoff_total = None;
+                            }
                         }
                         if project.session_count == Some(0) {
                             continue;
                         }
+                        if cancel() {
+                            handoff_total = None;
+                            break;
+                        }
                         path.pop();
                         path.push("sessions");
-                        if Instant::now()>deadline {
+                        if Instant::now() > deadline {
                             errors.push(format!("{name}: sessões não coletadas nesta rodada."));
                             continue;
                         }
-                        let ss=endpoint(&config.endpoint,&path).and_then(|mut u| {
-                            u.query_pairs_mut().append_pair("include_open","true").append_pair("limit","100").append_pair("offset","0");
-                            get::<SessionList>(client,config,u)
+                        let ss = endpoint(&config.endpoint, &path).and_then(|mut u| {
+                            u.query_pairs_mut()
+                                .append_pair("include_open", "true")
+                                .append_pair("limit", "100")
+                                .append_pair("offset", "0");
+                            get::<SessionList>(client, config, u)
                         });
                         match ss {
-                            Ok(list)=>sessions.extend(list.sessions.into_iter().map(|mut s|{s.scope=name.clone();s})),
-                            Err(e)=>errors.push(format!("{name}: {e}")),
+                            Ok(list) => sessions.extend(list.sessions.into_iter().map(|mut s| {
+                                s.scope = name.clone();
+                                s
+                            })),
+                            Err(e) => errors.push(format!("{name}: {e}")),
                         }
                     }
                     (sessions, handoffs, errors, handoff_total, warnings)
@@ -171,6 +211,11 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
             .collect();
         handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
     });
+    if cancel() {
+        result.error = Some("Coleta interrompida.".into());
+        result.handoff_total = None;
+        return result;
+    }
     result.handoff_total = Some(0);
     for chunk in chunks {
         match chunk {
@@ -191,9 +236,10 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
     result
         .sessions
         .sort_by_key(|s| std::cmp::Reverse(DateTime::parse_from_rfc3339(&s.started_at).ok()));
+    let mut seen_sessions = std::collections::HashSet::new();
     result
         .sessions
-        .dedup_by(|a, b| a.scope == b.scope && a.session_id == b.session_id);
+        .retain(|s| seen_sessions.insert((s.scope.clone(), s.session_id.clone())));
     result
         .handoffs
         .sort_by_key(|h| std::cmp::Reverse(DateTime::parse_from_rfc3339(&h.at).ok()));
@@ -228,16 +274,19 @@ mod tests {
                         thread::sleep(Duration::from_millis(2));
                         continue;
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
                     let mut req = Vec::new();
                     let mut byte = [0u8; 1];
                     while !req.ends_with(b"\r\n\r\n") && req.len() < 8192 {
-                        if stream.read(&mut byte).unwrap_or(0) == 0 {
-                            break;
+                        match stream.read(&mut byte) {
+                            Ok(0) => break,
+                            Ok(_) => req.push(byte[0]),
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(_) => break,
                         }
-                        req.push(byte[0]);
                     }
                     let req = String::from_utf8(req).unwrap();
                     captured.lock().unwrap().push(req.clone());
@@ -434,5 +483,63 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn deduplicates_non_adjacent_sessions_and_rejects_stopped_collection() {
+        let server = Mock::new(|path| {
+            if path == "/identity" {
+                return (200, json!({"version":"3.3.0"}));
+            }
+            if path == "/api/v1/projects" {
+                return (
+                    200,
+                    json!([
+                        {"workspace_name":"w","project_name":"a","session_count":2},
+                        {"workspace_name":"w","project_name":"b","session_count":1}
+                    ]),
+                );
+            }
+            if path.contains("/handoffs?") {
+                return (200, json!({"handoffs":[]}));
+            }
+            if path.contains("/a/sessions") {
+                // Two entries for the same session_id in scope "w / a", separated in time or order
+                return (
+                    200,
+                    json!({"sessions":[
+                        {"session_id":"dup-1","agent_kind":"codex","started_at":"2026-01-01T00:00:02Z","ended_at":null,"observation_count":5},
+                        {"session_id":"dup-1","agent_kind":"codex","started_at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:01:00Z","observation_count":2}
+                    ]}),
+                );
+            }
+            // Project b has a session with timestamp between the two "dup-1" entries (00:00:01Z),
+            // so after sorting by started_at descending, the two "dup-1" entries are NOT adjacent!
+            (
+                200,
+                json!({"sessions":[
+                    {"session_id":"interleaved","agent_kind":"claude","started_at":"2026-01-01T00:00:01Z","ended_at":null,"observation_count":1}
+                ]}),
+            )
+        });
+        let config = Config {
+            endpoint: server.url.clone(),
+            ..Default::default()
+        };
+        let result = collect(&config, &Arc::new(AtomicBool::new(false)));
+        assert_eq!(
+            result.sessions.len(),
+            2,
+            "duplicate (scope, session_id) separated by another timestamp must be deduplicated"
+        );
+        assert_eq!(result.sessions[0].session_id, "dup-1");
+        assert!(result.sessions[0].ended_at.is_none());
+        assert_eq!(result.sessions[1].session_id, "interleaved");
+
+        // A stopped collection must not pretend to be a valid complete snapshot with 0 handoffs.
+        let stopped = collect(&config, &Arc::new(AtomicBool::new(true)));
+        assert!(stopped.at.is_none());
+        assert!(stopped.handoff_total.is_none());
+        assert!(stopped.error.is_some());
     }
 }
