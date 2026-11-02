@@ -1,7 +1,10 @@
 //! Status-bar presentation is independent of the dashboard's paint loop.
+#[cfg(any(target_os = "macos", test))]
 use crate::model::{ResourceSnapshot, Usage, bytes};
+#[cfg(any(target_os = "macos", test))]
 use chrono::{DateTime, Utc};
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, PartialEq)]
 pub struct MenuReading {
     pub title: String,
@@ -11,6 +14,7 @@ pub struct MenuReading {
     pub activity: String,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl MenuReading {
     pub fn from_snapshot(
         snapshot: &ResourceSnapshot,
@@ -91,11 +95,13 @@ impl MenuReading {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn compact(usage: Option<&Usage>) -> String {
     usage
         .map(|u| format!("{:.0}% {}", u.cpu, compact_bytes(u.memory)))
         .unwrap_or("—% —".into())
 }
+#[cfg(any(target_os = "macos", test))]
 fn compact_bytes(n: u64) -> String {
     if n >= 1 << 30 {
         format!("{:.1}G", n as f64 / (1u64 << 30) as f64)
@@ -103,6 +109,7 @@ fn compact_bytes(n: u64) -> String {
         format!("{:.0}M", n as f64 / (1u64 << 20) as f64)
     }
 }
+#[cfg(any(target_os = "macos", test))]
 fn detail(name: &str, usage: Option<&Usage>) -> String {
     usage
         .map(|u| format!("{name} · CPU {:.1}% · memória {}", u.cpu, bytes(u.memory)))

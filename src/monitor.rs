@@ -221,11 +221,15 @@ pub fn sample_resources(config: &Config, system: &mut System) -> ResourceSnapsho
             .exe()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let group = if name == "ai-memory" {
-            "ai-memory"
-        } else if name.starts_with("com.docker.") || exe.contains("/Docker.app/") {
-            "Docker Desktop"
-        } else {
+        // Processes inside containers are visible on the host; only the
+        // ai-memory name match pays the /proc/<pid>/cgroup read.
+        #[cfg(target_os = "linux")]
+        let cgroup = (name == "ai-memory")
+            .then(|| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok())
+            .flatten();
+        #[cfg(not(target_os = "linux"))]
+        let cgroup: Option<String> = None;
+        let Some(group) = classify(&name, &exe, cgroup.as_deref()) else {
             continue;
         };
         result.processes.push(HostProcess {
@@ -261,6 +265,79 @@ pub fn sample_resources(config: &Config, system: &mut System) -> ResourceSnapsho
     result
 }
 
+#[cfg(not(target_os = "linux"))]
+fn classify(name: &str, exe: &str, _cgroup: Option<&str>) -> Option<&'static str> {
+    if name == "ai-memory" {
+        Some("ai-memory")
+    } else if name.starts_with("com.docker.") || exe.contains("/Docker.app/") {
+        Some("Docker Desktop")
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn classify(name: &str, _exe: &str, cgroup: Option<&str>) -> Option<&'static str> {
+    // sysinfo name() is the kernel comm, truncated to 15 bytes; every prefix
+    // below is short enough to survive that truncation.
+    if name.starts_with("com.docker.") {
+        return Some("Docker Desktop");
+    }
+    if matches!(
+        name,
+        "dockerd" | "containerd" | "docker-proxy" | "rootlesskit"
+    ) || name.starts_with("containerd-shim")
+    {
+        return Some("Docker Engine");
+    }
+    if name == "ai-memory" && !containerized(cgroup) {
+        return Some("ai-memory");
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn containerized(cgroup: Option<&str>) -> bool {
+    let Some(cgroup) = cgroup else {
+        return false;
+    };
+    cgroup.lines().any(|line| {
+        let Some(path) = line.splitn(3, ':').nth(2) else {
+            return false;
+        };
+        path.split('/').any(|segment| {
+            if segment.starts_with("kubepods") {
+                return true;
+            }
+            let mut id = segment;
+            for prefix in ["docker-", "libpod-", "cri-containerd-", "crio-"] {
+                if let Some(rest) = id.strip_prefix(prefix) {
+                    id = rest;
+                    break;
+                }
+            }
+            let id = id.strip_suffix(".scope").unwrap_or(id);
+            id.len() == 64
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_threads(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Threads:"))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+#[cfg(target_os = "linux")]
+fn thread_count(pid: u32) -> Option<u64> {
+    parse_threads(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
+}
+
 #[cfg(target_os = "macos")]
 fn thread_count(pid: u32) -> Option<u64> {
     // Layout of proc_taskinfo in the macOS SDK's sys/proc_info.h.
@@ -286,7 +363,7 @@ fn thread_count(pid: u32) -> Option<u64> {
     let read = unsafe { proc_pidinfo(pid as i32, 4, 0, (&mut info as *mut TaskInfo).cast(), size) };
     (read == size && info.counters[9] >= 0).then_some(info.counters[9] as u64)
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn thread_count(_: u32) -> Option<u64> {
     None
 }
@@ -376,5 +453,104 @@ mod tests {
             "inventory error must enforce backoff until next_inventory"
         );
         assert!(should_poll_inventory(future, future, true, true));
+    }
+
+    #[test]
+    fn parse_threads_reads_first_threads_line_only() {
+        assert_eq!(
+            parse_threads("Name:\tai-memory\nThreads:\t42\nPid:\t1\n"),
+            Some(42)
+        );
+        assert_eq!(parse_threads("Threads:  7 \nThreads: 99\n"), Some(7));
+        assert_eq!(parse_threads("Threads:\t\t5\n"), Some(5));
+        assert_eq!(parse_threads(""), None);
+        assert_eq!(parse_threads("Pid:\t1\n"), None);
+        assert_eq!(parse_threads("Threads: abc\n"), None);
+        assert_eq!(parse_threads("Threads: 18446744073709551616\n"), None);
+        // A malformed first line wins: a later valid line must not be used.
+        assert_eq!(parse_threads("Threads: abc\nThreads: 5\n"), None);
+        assert_eq!(
+            parse_threads("Threads: 18446744073709551615\n"),
+            Some(u64::MAX)
+        );
+    }
+
+    const H64: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn containerized_detects_container_runtimes_in_cgroup_paths() {
+        let ok = [
+            format!("0::/system.slice/docker-{H64}.scope"),
+            format!("0::/docker/{H64}"),
+            format!(
+                "0::/user.slice/user-1000.slice/user@1000.service/user.slice/docker-{H64}.scope"
+            ),
+            format!("0::/user.slice/libpod-{H64}.scope"),
+            format!("0::/kubepods.slice/kubepods-burstable.slice/cri-containerd-{H64}.scope"),
+            // cgroup v1: several lines, any container path is enough.
+            format!("1:name=systemd:/user.slice\n0::/docker/{H64}"),
+        ];
+        for cgroup in ok {
+            assert!(containerized(Some(&cgroup)), "container: {cgroup}");
+        }
+        let host = [
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/ai-memory.service".into(),
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-Hyprland-kitty-1234.scope".into(),
+            "0::/".to_owned(),
+            "0::/init.scope".to_owned(),
+            String::new(),
+            // Boundaries: 63/65 hex chars and uppercase are not container IDs.
+            format!("0::/docker/{}", &H64[..63]),
+            format!("0::/docker/{H64}x"),
+            format!("0::/docker/{}", H64.to_uppercase()),
+        ];
+        for cgroup in host {
+            assert!(!containerized(Some(&cgroup)), "host: {cgroup}");
+        }
+        assert!(!containerized(None), "unreadable cgroup means host");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_classify_covers_the_whole_process_domain() {
+        let container = format!("0::/system.slice/docker-{H64}.scope");
+        assert_eq!(classify("ai-memory", "", None), Some("ai-memory"));
+        assert_eq!(
+            classify("ai-memory", "", Some(&container)),
+            None,
+            "containerized ai-memory must not count as a host process"
+        );
+        for name in [
+            "dockerd",
+            "containerd",
+            "docker-proxy",
+            "rootlesskit",
+            "containerd-shim-runc-v2",
+            "containerd-shim",
+        ] {
+            assert_eq!(classify(name, "", None), Some("Docker Engine"), "{name}");
+        }
+        for name in ["com.docker.backend", "com.docker.back"] {
+            assert_eq!(classify(name, "", None), Some("Docker Desktop"), "{name}");
+        }
+        assert_eq!(classify("docker", "", None), None, "docker CLI is a client");
+        assert_eq!(classify("ai-memory-x", "", None), None);
+        assert_eq!(classify("kitty", "", None), None);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn classify_keeps_the_macos_rule() {
+        assert_eq!(classify("ai-memory", "", None), Some("ai-memory"));
+        assert_eq!(
+            classify("com.docker.backend", "", None),
+            Some("Docker Desktop")
+        );
+        assert_eq!(
+            classify("helper", "/Applications/Docker.app/Contents/x", None),
+            Some("Docker Desktop")
+        );
+        assert_eq!(classify("dockerd", "", None), None);
+        assert_eq!(classify("kitty", "", None), None);
     }
 }

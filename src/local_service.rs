@@ -55,7 +55,7 @@ impl Operation {
     pub fn fields(&self) -> Vec<(&'static str, &'static str)> {
         let mut v = match self.backend {
             Backend::Docker => vec![
-                ("context", "Contexto Docker local (ex.: desktop-linux)"),
+                ("context", crate::platform::DOCKER_CONTEXT_LABEL),
                 ("container", "Nome ou ID do contêiner ai-memory"),
             ],
             Backend::LaunchAgent => vec![(
@@ -253,10 +253,20 @@ impl Operation {
         preview: bool,
         cancelled: impl Fn() -> bool,
     ) -> Result<Value, Error> {
+        #[cfg(not(target_os = "macos"))]
+        if self.backend == Backend::LaunchAgent {
+            return Err(Error::Invalid(
+                "LaunchAgent existe somente no macOS. O serviço systemd chega numa próxima versão."
+                    .into(),
+            ));
+        }
         self.validate()?;
         let url = reqwest::Url::parse(&c.endpoint).map_err(|_| Error::Format)?;
         if !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) {
-            return Err(Error::Invalid("Controle local desabilitado para conexão remota. Selecione explicitamente o servidor deste Mac.".into()));
+            return Err(Error::Invalid(format!(
+                "Controle local desabilitado para conexão remota. Selecione explicitamente o servidor deste {}.",
+                crate::platform::HOST
+            )));
         }
         if cancelled() {
             return Err(Error::Cancelled);
@@ -849,6 +859,7 @@ esac
         std::fs::create_dir(&dir).unwrap();
         dir
     }
+    #[cfg(target_os = "macos")]
     fn plist_with(entries: &[(&str, &str)]) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = unique_temp_dir("logs");
         let pairs: String = entries
@@ -865,6 +876,7 @@ esac
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn launch_agent_logs_reports_missing_streams_without_failing() {
         let dir = unique_temp_dir("logs");
         let out = dir.join("out.log");
@@ -893,6 +905,7 @@ esac
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn launch_agent_logs_rejects_dangling_symlink() {
         let dir = unique_temp_dir("logs");
         let out = dir.join("out.log");
@@ -917,6 +930,7 @@ esac
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn launch_agent_logs_error_lists_each_stream_reason() {
         let (dir, plist) = plist_with(&[]);
         let Err(Error::Invalid(msg)) = launch_agent_logs(plist.to_str().unwrap()) else {
@@ -928,6 +942,7 @@ esac
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn launch_agent_logs_rejects_relative_log_path() {
         let (dir, plist) = plist_with(&[("StandardOutPath", "relative.log")]);
         let Err(Error::Invalid(msg)) = launch_agent_logs(plist.to_str().unwrap()) else {
@@ -1008,6 +1023,7 @@ esac
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn log_read_keeps_opened_file_when_path_is_replaced() {
         let dir = unique_temp_dir("log-rotation");
         let out = dir.join("out.log");
@@ -1129,5 +1145,22 @@ esac
             digest,
             "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
         );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn launch_agent_is_refused_on_non_macos_before_any_command() {
+        let cfg = Config::default();
+        for preview in [true, false] {
+            let mut op = Operation::new(Backend::LaunchAgent, Kind::Status);
+            op.values.insert("plist".into(), "/tmp/agent.plist".into());
+            let Err(Error::Invalid(msg)) = op.execute(&cfg, preview, || false) else {
+                panic!("LaunchAgent must be refused on this platform");
+            };
+            assert!(
+                msg.contains("somente no macOS"),
+                "preview={preview}, got: {msg}"
+            );
+        }
     }
 }

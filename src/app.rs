@@ -238,9 +238,13 @@ impl MonitorApp {
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.label(
-                        RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), "  ·  Rust / macOS"))
-                            .size(11.)
-                            .color(MUTED),
+                        RichText::new(format!(
+                            "v{}  ·  Rust / {}",
+                            env!("CARGO_PKG_VERSION"),
+                            crate::platform::OS
+                        ))
+                        .size(11.)
+                        .color(MUTED),
                     );
                     ui.add_space(8.);
                     ui.separator();
@@ -839,7 +843,11 @@ impl MonitorApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.docker_tab, 0, "Contêineres");
             ui.selectable_value(&mut self.docker_tab, 1, "Imagens");
-            ui.selectable_value(&mut self.docker_tab, 2, "Processos no Mac");
+            ui.selectable_value(
+                &mut self.docker_tab,
+                2,
+                format!("Processos no {}", crate::platform::HOST),
+            );
         });
         ui.horizontal(|ui| {
             ui.add(
@@ -978,7 +986,11 @@ impl MonitorApp {
                     });
                 });
         } else {
-            ui.label(RichText::new("Processos do Docker Desktop e clientes ai-memory no macOS. RSS pode compartilhar páginas; não some ao consumo dos contêineres.").small().color(MUTED));
+            ui.label(
+                RichText::new(crate::platform::PROCESSES_CAPTION)
+                    .small()
+                    .color(MUTED),
+            );
             TableBuilder::new(ui)
                 .striped(true)
                 .column(Column::initial(80.))
@@ -1055,9 +1067,9 @@ impl MonitorApp {
                 if ui.selectable_value(&mut self.draft.proposal_watch,None,"Desativado").clicked(){ui.close();}
                 for p in &self.api.projects {let scope=crate::client::Scope{workspace:p.workspace_name.clone(),project:p.project_name.clone()};let label=scope.label();if ui.selectable_value(&mut self.draft.proposal_watch,Some(scope),label).clicked(){ui.close();}}
             });
-            ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,"Guardar o Bearer no Keychain para este servidor (opcional)");
+            ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,format!("Guardar o Bearer no {} para este servidor (opcional)",crate::platform::SECRET_STORE));
             ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(MUTED));
-            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new("Carregar Bearer do Keychain deste endereço")).clicked(){
+            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new(format!("Carregar Bearer do {} deste endereço",crate::platform::SECRET_STORE))).clicked(){
                 self.draft.normalize();
                 match crate::keychain::load(&self.draft.endpoint){
                     Ok(Some(token))=>{self.draft.token=token.trim().into();self.settings_message="Token carregado no campo. Salve para conectar.".into();},

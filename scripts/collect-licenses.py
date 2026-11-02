@@ -46,14 +46,31 @@ def upstream(pkg, directory):
     return base
 
 
-def main():
-    packages = {}
-    for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
-        metadata = json.loads(subprocess.check_output(
-            [CARGO, "metadata", "--locked", "--format-version", "1", "--filter-platform", target],
-            cwd=ROOT,
-        ))
-        packages.update({p["id"]: p for p in metadata["packages"] if p["source"]})
+def activated(targets):
+    selected = set()
+    for target in targets:
+        tree = subprocess.check_output(
+            [CARGO, "tree", "--locked", "--target", target,
+             "-e", "normal,build", "--prefix", "none", "-f", "{p}"],
+            cwd=ROOT, text=True,
+        )
+        for line in tree.splitlines():
+            match = re.match(r"^(\S+) v(\S+)", line.strip())
+            if match:
+                selected.add((match.group(1), match.group(2)))
+    return selected
+
+
+def notices(platform, targets):
+    metadata = json.loads(subprocess.check_output(
+        [CARGO, "metadata", "--locked", "--format-version", "1"], cwd=ROOT,
+    ))
+    selected = activated(targets)
+    packages = {
+        p["id"]: p
+        for p in metadata["packages"]
+        if p["source"] and (p["name"], p["version"]) in selected
+    }
 
     records, missing = {}, {}
     for identifier, pkg in packages.items():
@@ -90,7 +107,7 @@ def main():
 
     digest = hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest()
     output = ["AI Monitor — third-party notices", f"Cargo.lock SHA-256: {digest}",
-              "Inventory of resolved macOS dependencies, including build-time components.",
+              f"Inventory of resolved {platform} dependencies, including build-time components.",
               "License texts are reproduced from published crates or their recorded upstream commits."]
     texts = {}
 
@@ -118,8 +135,24 @@ def main():
         output.append(f"License text [{reference(std_text)}]: {name}")
     for content, label in texts.items():
         output.extend(["\n" + "=" * 72, f"[{label}]", content])
-    (ROOT / "packaging/THIRD_PARTY_NOTICES.txt").write_text("\n".join(output).rstrip() + "\n")
-    print(f"Generated license notices for {len(packages)} dependency packages.")
+    return output, len(packages)
+
+
+def main():
+    macos, count = notices(
+        "macOS", ("aarch64-apple-darwin", "x86_64-apple-darwin")
+    )
+    (ROOT / "packaging/THIRD_PARTY_NOTICES.txt").write_text(
+        "\n".join(macos).rstrip() + "\n"
+    )
+    print(f"Generated macOS license notices for {count} dependency packages.")
+    linux, count = notices(
+        "Linux", ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
+    )
+    (ROOT / "packaging/THIRD_PARTY_NOTICES-linux.txt").write_text(
+        "\n".join(linux).rstrip() + "\n"
+    )
+    print(f"Generated Linux license notices for {count} dependency packages.")
 
 
 if __name__ == "__main__":

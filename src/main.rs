@@ -15,6 +15,7 @@ mod menu_bar;
 mod model;
 mod monitor;
 mod operations_ui;
+mod platform;
 mod queries;
 #[cfg(test)]
 mod test_support;
@@ -54,13 +55,16 @@ fn main() -> eframe::Result {
     }
     let show_dashboard =
         !cfg!(target_os = "macos") || std::env::args().any(|a| a == "--show-dashboard");
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([1320., 860.])
+        .with_min_inner_size([960., 680.])
+        .with_title("AI Monitor")
+        .with_visible(show_dashboard)
+        .with_active(show_dashboard);
+    #[cfg(target_os = "linux")]
+    let viewport = viewport.with_app_id("ai-monitor");
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1320., 860.])
-            .with_min_inner_size([960., 680.])
-            .with_title("AI Monitor")
-            .with_visible(show_dashboard)
-            .with_active(show_dashboard),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

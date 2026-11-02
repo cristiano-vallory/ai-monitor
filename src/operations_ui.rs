@@ -116,7 +116,11 @@ impl Panel {
         ui.add_enabled_ui(!self.busy, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.local_tab, false, "Servidor · administração");
-                ui.selectable_value(&mut self.local_tab, true, "Serviço deste Mac");
+                ui.selectable_value(
+                    &mut self.local_tab,
+                    true,
+                    format!("Serviço deste {}", crate::platform::HOST),
+                );
             });
         });
         if previous != self.local_tab {
@@ -295,6 +299,7 @@ impl Panel {
         let old = (self.local.backend, self.local.kind);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.local.backend, Backend::Docker, "Docker");
+            #[cfg(target_os = "macos")]
             ui.selectable_value(&mut self.local.backend, Backend::LaunchAgent, "LaunchAgent");
         });
         egui::ComboBox::from_id_salt("local-operation")
@@ -323,7 +328,7 @@ impl Panel {
             self.clear();
         }
         ui.label(local_service::WARNING);
-        ui.small("Configure explicitamente o serviço. Docker usa contexto com socket Unix e fixa o ID revisado. LaunchAgent aceita o plist oficial; atualização nativa exige serviço parado, binário novo e SHA-256. Campos não são gravados em disco.");
+        ui.small(crate::platform::LOCAL_SERVICE_HINT);
         if self.local.kind == LocalKind::Update {
             ui.label("Backup é obrigatório; o app verifica arquivo gzip privado, sem garantir sua restaurabilidade. Docker usa a imagem definida no Compose. O modo nativo mantém cópia do binário anterior e permanece parado até iniciar explicitamente.");
         }
