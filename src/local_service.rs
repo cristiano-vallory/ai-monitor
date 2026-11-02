@@ -11,6 +11,7 @@ pub const WARNING: &str = "Ações no serviço podem interromper agentes conecta
 pub enum Backend {
     Docker,
     LaunchAgent,
+    Systemd,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -62,6 +63,10 @@ impl Operation {
                 "plist",
                 "Caminho absoluto do LaunchAgent ai-memory (.plist)",
             )],
+            Backend::Systemd => vec![(
+                "unit",
+                "Caminho absoluto da unit ai-memory.service (systemd --user)",
+            )],
         };
         if self.kind == Kind::Update {
             v.push(("backup", "Backup privado já salvo (.tar.gz)"));
@@ -70,7 +75,7 @@ impl Operation {
                     ("compose", "Arquivo Compose absoluto já configurado"),
                     ("service", "Nome exato do serviço no Compose"),
                 ]),
-                Backend::LaunchAgent => v.extend([
+                Backend::LaunchAgent | Backend::Systemd => v.extend([
                     (
                         "replacement",
                         "Novo binário ai-memory, obtido de fonte confiável",
@@ -102,7 +107,7 @@ impl Operation {
                     "Preencha todos os campos locais com valores explícitos válidos.".into(),
                 ));
             }
-            if ["plist", "backup", "compose", "replacement", "data"].contains(&key)
+            if ["plist", "unit", "backup", "compose", "replacement", "data"].contains(&key)
                 && !Path::new(v).is_absolute()
             {
                 return Err(Error::Invalid(
@@ -121,8 +126,18 @@ impl Operation {
         {
             return Err(Error::Invalid("Identificador Docker inválido.".into()));
         }
+        if self.backend == Backend::Systemd
+            && Path::new(self.s("unit"))
+                .file_name()
+                .and_then(|n| n.to_str())
+                != Some("ai-memory.service")
+        {
+            return Err(Error::Invalid(
+                "A unit precisa se chamar exatamente ai-memory.service.".into(),
+            ));
+        }
         if self.kind == Kind::Update
-            && self.backend == Backend::LaunchAgent
+            && matches!(self.backend, Backend::LaunchAgent | Backend::Systemd)
             && (self.s("sha256").len() != 64
                 || !self.s("sha256").bytes().all(|b| b.is_ascii_hexdigit()))
         {
@@ -221,7 +236,68 @@ impl Operation {
                     json!({"domain":domain,"target":target,"loaded":loaded,"binary":binary,"plist_sha256":hash(self.s("plist"))?,"binary_sha256":hash(&binary)?}),
                 )
             }
+            Backend::Systemd => self.inspect_systemd(),
         }
+    }
+    #[cfg(target_os = "linux")]
+    fn inspect_systemd(&self) -> Result<Value, Error> {
+        regular(self.s("unit"))?;
+        let out = run(
+            "/usr/bin/systemctl",
+            &[
+                "--user",
+                "show",
+                "ai-memory.service",
+                "--no-pager",
+                "-p",
+                "LoadState",
+                "-p",
+                "FragmentPath",
+                "-p",
+                "DropInPaths",
+                "-p",
+                "NeedDaemonReload",
+                "-p",
+                "ExecStart",
+                "-p",
+                "ActiveState",
+                "-p",
+                "SubState",
+                "-p",
+                "MainPID",
+            ],
+            false,
+            6,
+        )?;
+        let show = parse_systemd_show(&out, self.s("unit"))?;
+        regular(&show.binary)?;
+        let dropin_sha256: Vec<Value> = show
+            .dropins
+            .iter()
+            .map(|d| {
+                json!({
+                    "path": d,
+                    "sha256": hash(d).map(Value::String).unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "unit": self.s("unit"),
+            "fragment": show.fragment,
+            "dropins": show.dropins,
+            "dropin_sha256": dropin_sha256,
+            "exec_start": show.exec_start,
+            "active_state": show.active_state,
+            "sub_state": show.sub_state,
+            "main_pid": show.main_pid,
+            "binary": show.binary,
+            "unit_sha256": hash(self.s("unit"))?,
+            "binary_sha256": hash(&show.binary)?,
+        }))
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn inspect_systemd(&self) -> Result<Value, Error> {
+        Err(Error::Invalid("systemd existe somente no Linux.".into()))
     }
     fn compose_digest(&self, c: &Config, project: &str) -> Result<String, Error> {
         use sha2::{Digest, Sha256};
@@ -256,9 +332,13 @@ impl Operation {
         #[cfg(not(target_os = "macos"))]
         if self.backend == Backend::LaunchAgent {
             return Err(Error::Invalid(
-                "LaunchAgent existe somente no macOS. O serviço systemd chega numa próxima versão."
+                "LaunchAgent existe somente no macOS. No Linux, use o backend systemd (usuário)."
                     .into(),
             ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        if self.backend == Backend::Systemd {
+            return Err(Error::Invalid("systemd existe somente no Linux.".into()));
         }
         self.validate()?;
         let url = reqwest::Url::parse(&c.endpoint).map_err(|_| Error::Format)?;
@@ -278,6 +358,9 @@ impl Operation {
         }
         if let Some(m) = binding.as_object_mut() {
             m.remove("loaded");
+            m.remove("active_state");
+            m.remove("sub_state");
+            m.remove("main_pid");
         }
         if self.kind == Kind::Update {
             backup(self.s("backup"))?;
@@ -307,6 +390,19 @@ impl Operation {
                     }
                     if state["loaded"] != false {
                         return Err(Error::Invalid("Pare o LaunchAgent pelo app antes de substituir o binário. Ele ficará parado até você iniciar novamente.".into()));
+                    }
+                    binding["replacement_sha256"] = json!(digest);
+                }
+                Backend::Systemd => {
+                    regular(self.s("replacement"))?;
+                    let digest = hash(self.s("replacement"))?;
+                    if !digest.eq_ignore_ascii_case(self.s("sha256")) {
+                        return Err(Error::Invalid(
+                            "SHA-256 do novo binário não confere.".into(),
+                        ));
+                    }
+                    if !systemd_update_allowed(state["active_state"].as_str().unwrap_or("")) {
+                        return Err(Error::Invalid("Pare o serviço pelo app antes de substituir o binário. Ele ficará parado até você iniciar novamente.".into()));
                     }
                     binding["replacement_sha256"] = json!(digest);
                 }
@@ -444,6 +540,67 @@ impl Operation {
                     _ => {}
                 }
             }
+            Backend::Systemd => match self.kind {
+                Kind::Logs => {
+                    let raw = run(
+                        "/usr/bin/journalctl",
+                        &[
+                            "--user",
+                            "-u",
+                            "ai-memory.service",
+                            "-n",
+                            "300",
+                            "--no-pager",
+                            "-o",
+                            "short-iso",
+                        ],
+                        true,
+                        15,
+                    )?;
+                    return Ok(
+                        json!({"logs":tail(&raw),"notice":"Últimas 300 linhas do journal do usuário; até 100 KiB. Logs podem conter dados privados."}),
+                    );
+                }
+                Kind::Start => {
+                    run(
+                        "/usr/bin/systemctl",
+                        &["--user", "start", "ai-memory.service"],
+                        false,
+                        60,
+                    )?;
+                }
+                Kind::Stop => {
+                    run(
+                        "/usr/bin/systemctl",
+                        &["--user", "stop", "ai-memory.service"],
+                        false,
+                        60,
+                    )?;
+                }
+                Kind::Restart => {
+                    run(
+                        "/usr/bin/systemctl",
+                        &["--user", "restart", "ai-memory.service"],
+                        false,
+                        90,
+                    )?;
+                }
+                Kind::Update => {
+                    let ps = run("/usr/bin/ps", &["-e", "-o", "comm="], false, 6)?;
+                    if ps.lines().any(|s| {
+                        Path::new(s.trim()).file_name().and_then(|x| x.to_str())
+                            == Some("ai-memory")
+                    }) {
+                        return Err(Error::Invalid("Ainda existe processo ai-memory ativo. Pare todas as instâncias antes da troca.".into()));
+                    }
+                    return replace(
+                        state["binary"].as_str().ok_or(Error::Format)?,
+                        self.s("replacement"),
+                        self.s("sha256"),
+                    );
+                }
+                _ => {}
+            },
         }
         Ok(
             json!({"command_completed":true,"next":"Consulte o estado e a saúde do servidor para verificar o resultado. A resposta do comando não prova que o serviço está saudável."}),
@@ -452,6 +609,165 @@ impl Operation {
 }
 fn run(binary: &str, args: &[&str], logs: bool, secs: u64) -> Result<String, Error> {
     local_command(binary, args, Duration::from_secs(secs), logs).map_err(Error::Invalid)
+}
+#[cfg(target_os = "linux")]
+pub struct SystemdShow {
+    pub fragment: String,
+    pub dropins: Vec<String>,
+    pub exec_start: String,
+    pub binary: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub main_pid: String,
+}
+#[cfg(target_os = "linux")]
+fn split_words(s: &str) -> Result<Vec<String>, Error> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    let mut has_word = false;
+    for ch in s.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_quotes => escaped = true,
+            '"' => {
+                in_quotes = !in_quotes;
+                has_word = true;
+            }
+            ' ' | '\t' if !in_quotes => {
+                if has_word || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    has_word = false;
+                }
+            }
+            _ => {
+                cur.push(ch);
+                has_word = true;
+            }
+        }
+    }
+    if escaped || in_quotes {
+        return Err(Error::Format);
+    }
+    if has_word || !cur.is_empty() {
+        out.push(cur);
+    }
+    Ok(out)
+}
+pub fn systemd_update_allowed(active_state: &str) -> bool {
+    matches!(active_state, "inactive" | "failed")
+}
+#[cfg(target_os = "linux")]
+pub fn parse_systemd_show(text: &str, unit: &str) -> Result<SystemdShow, Error> {
+    let mut fields = BTreeMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            fields.insert(key.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    let get = |key: &str| fields.get(key).cloned().unwrap_or_default();
+    match get("LoadState").as_str() {
+        "loaded" => {}
+        other => {
+            return Err(Error::Invalid(format!(
+                "A unit ai-memory.service não está carregada no gerenciador do usuário (LoadState={other}). Recarregue com: systemctl --user daemon-reload"
+            )));
+        }
+    }
+    if get("FragmentPath") != unit {
+        return Err(Error::Invalid(
+            "A unit carregada não corresponde ao arquivo informado (FragmentPath difere).".into(),
+        ));
+    }
+    if get("NeedDaemonReload") == "yes" {
+        return Err(Error::Invalid(
+            "A unit mudou desde o último carregamento. Execute: systemctl --user daemon-reload"
+                .into(),
+        ));
+    }
+    let exec = get("ExecStart");
+    if exec.is_empty() {
+        return Err(Error::Invalid(
+            "A unit ai-memory.service não define ExecStart.".into(),
+        ));
+    }
+    // Cada comando aparece como um grupo { ... } na saída de systemctl show.
+    let groups = exec.matches("{ path=").count();
+    if groups != 1 {
+        return Err(Error::Invalid(
+            "A unit ai-memory.service precisa definir exatamente um comando ExecStart.".into(),
+        ));
+    }
+    // systemd executa `path=`, não argv[0]; os dois precisam coincidir para
+    // que o binário validado seja o binário executado (sem prefixo @).
+    let path_field = exec
+        .split("path=")
+        .nth(1)
+        .and_then(|rest| rest.split(" ; ").next())
+        .and_then(|rest| rest.split(' ').next())
+        .ok_or(Error::Format)?;
+    let argv_field = exec
+        .split("argv[]=")
+        .nth(1)
+        .and_then(|rest| rest.split(" ; ").next())
+        .ok_or(Error::Format)?;
+    let argv = split_words(argv_field)?;
+    let binary = path_field.to_owned();
+    let argv0 = argv.first().cloned().ok_or(Error::Format)?;
+    if !Path::new(&binary).is_absolute()
+        || Path::new(&binary).file_name().and_then(|n| n.to_str()) != Some("ai-memory")
+    {
+        return Err(Error::Invalid(
+            "A unit deve executar um binário ai-memory em caminho absoluto.".into(),
+        ));
+    }
+    if binary != argv0 {
+        return Err(Error::Invalid(
+            "A unit deve executar diretamente o binário ai-memory (path e argv[0] diferem).".into(),
+        ));
+    }
+    // Subcomando = primeira palavra que não é opção nem valor de --data-dir/--config.
+    let mut i = 1;
+    let mut subcommand = None;
+    while i < argv.len() {
+        let w = &argv[i];
+        if w == "--data-dir" || w == "--config" {
+            i += 2;
+            continue;
+        }
+        if w.starts_with("--data-dir=") || w.starts_with("--config=") {
+            i += 1;
+            continue;
+        }
+        if w.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        subcommand = Some(w.clone());
+        break;
+    }
+    if subcommand.as_deref() != Some("serve") {
+        return Err(Error::Invalid(
+            "A unit ai-memory.service deve executar o subcomando serve.".into(),
+        ));
+    }
+    Ok(SystemdShow {
+        fragment: get("FragmentPath"),
+        dropins: get("DropInPaths")
+            .split_whitespace()
+            .map(|d| d.to_owned())
+            .collect(),
+        exec_start: exec,
+        binary,
+        active_state: get("ActiveState"),
+        sub_state: get("SubState"),
+        main_pid: get("MainPID"),
+    })
 }
 #[cfg(unix)]
 fn open_nofollow(path: &str) -> std::io::Result<std::fs::File> {
@@ -1145,6 +1461,372 @@ esac
             digest,
             "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
         );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn systemd_is_refused_on_non_linux_before_any_command() {
+        let cfg = Config::default();
+        for preview in [true, false] {
+            let mut op = Operation::new(Backend::Systemd, Kind::Status);
+            op.values
+                .insert("unit".into(), "/tmp/ai-memory.service".into());
+            let Err(Error::Invalid(msg)) = op.execute(&cfg, preview, || false) else {
+                panic!("Systemd must be refused on this platform");
+            };
+            assert!(
+                msg.contains("somente no Linux"),
+                "preview={preview}, got: {msg}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn show(lines: &[(&str, &str)]) -> String {
+        lines
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    #[cfg(target_os = "linux")]
+    fn good_show() -> String {
+        show(&[
+            ("LoadState", "loaded"),
+            (
+                "FragmentPath",
+                "/home/u/.config/systemd/user/ai-memory.service",
+            ),
+            ("DropInPaths", ""),
+            ("NeedDaemonReload", "no"),
+            (
+                "ExecStart",
+                "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory --data-dir /home/u/.local/share/ai-memory --config /home/u/.config/ai-memory/config.toml serve --transport http --enable-web ; ignore_errors=no ; start_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+            ),
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+        ])
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn systemd_parser_accepts_official_renderings() {
+        for exec in [
+            "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory --data-dir /home/u/d --config /home/u/c serve --transport http --enable-web ; pid=0 }",
+            "{ path=/usr/bin/ai-memory ; argv[]=\"/usr/bin/ai-memory\" \"--data-dir\" \"/home/u/d\" \"--config\" \"/home/u/c\" \"serve\" \"--transport\" \"http\" \"--enable-web\" ; pid=0 }",
+            "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory --data-dir=/home/u/d --config=/home/u/c serve ; pid=0 }",
+            "{ path=/opt/ai-memory ; argv[]=/opt/ai-memory --verbose serve ; pid=0 }",
+        ] {
+            let text = show(&[
+                ("LoadState", "loaded"),
+                ("FragmentPath", "/u/ai-memory.service"),
+                ("NeedDaemonReload", "no"),
+                ("ExecStart", exec),
+                ("ActiveState", "active"),
+                ("SubState", "running"),
+                ("MainPID", "42"),
+            ]);
+            let parsed = parse_systemd_show(&text, "/u/ai-memory.service").unwrap();
+            assert_eq!(parsed.active_state, "active");
+            assert_eq!(parsed.main_pid, "42");
+            assert!(parsed.binary.ends_with("/ai-memory"), "{exec}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn systemd_parser_refuses_bad_units() {
+        let base = [
+            ("LoadState", "loaded"),
+            ("FragmentPath", "/u/ai-memory.service"),
+            ("NeedDaemonReload", "no"),
+        ];
+        let exec = |e: &str| {
+            show(
+                &base
+                    .iter()
+                    .cloned()
+                    .chain([
+                        ("ExecStart", e),
+                        ("ActiveState", "inactive"),
+                        ("SubState", "dead"),
+                        ("MainPID", "0"),
+                    ])
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for (text, why) in [
+            (
+                exec("{ path=/usr/bin/ai-memory ; argv[]=ai-memory serve ; }"),
+                "relative argv0",
+            ),
+            (
+                exec("{ path=/usr/bin/other ; argv[]=/usr/bin/other serve ; }"),
+                "wrong basename",
+            ),
+            (
+                exec("{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory ; }"),
+                "no subcommand",
+            ),
+            (
+                exec("{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory reindex ; }"),
+                "wrong subcommand",
+            ),
+            (exec(""), "empty ExecStart"),
+            (
+                exec(
+                    "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; } { path=/bin/true ; argv[]=/bin/true ; }",
+                ),
+                "two commands",
+            ),
+            (
+                exec(
+                    "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory \"unterminated serve ; }",
+                ),
+                "unbalanced quote",
+            ),
+            (
+                exec("{ path=/usr/bin/other ; argv[]=/home/u/ai-memory serve ; }"),
+                "@-prefix: path is not ai-memory while argv[0] is",
+            ),
+            (
+                exec("{ path=/usr/bin/ai-memory ; argv[]=/home/u/ai-memory serve ; }"),
+                "path differs from argv[0] even with matching basename",
+            ),
+        ] {
+            assert!(
+                parse_systemd_show(&text, "/u/ai-memory.service").is_err(),
+                "must refuse: {why}"
+            );
+        }
+        for (fields, why) in [
+            (
+                vec![
+                    ("LoadState", "not-found"),
+                    ("FragmentPath", "/u/ai-memory.service"),
+                    ("NeedDaemonReload", "no"),
+                    (
+                        "ExecStart",
+                        "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; }",
+                    ),
+                ],
+                "not-found",
+            ),
+            (
+                vec![
+                    ("LoadState", "masked"),
+                    ("FragmentPath", "/u/ai-memory.service"),
+                    ("NeedDaemonReload", "no"),
+                    (
+                        "ExecStart",
+                        "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; }",
+                    ),
+                ],
+                "masked",
+            ),
+            (
+                vec![
+                    ("LoadState", "loaded"),
+                    ("FragmentPath", "/other/ai-memory.service"),
+                    ("NeedDaemonReload", "no"),
+                    (
+                        "ExecStart",
+                        "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; }",
+                    ),
+                ],
+                "fragment mismatch",
+            ),
+            (
+                vec![
+                    ("LoadState", "loaded"),
+                    ("FragmentPath", "/u/ai-memory.service"),
+                    ("NeedDaemonReload", "yes"),
+                    (
+                        "ExecStart",
+                        "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; }",
+                    ),
+                ],
+                "daemon-reload needed",
+            ),
+        ] {
+            let text = show(&fields.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>());
+            assert!(
+                parse_systemd_show(&text, "/u/ai-memory.service").is_err(),
+                "must refuse: {why}"
+            );
+        }
+        let parsed = parse_systemd_show(
+            &good_show(),
+            "/home/u/.config/systemd/user/ai-memory.service",
+        )
+        .unwrap();
+        assert_eq!(parsed.sub_state, "dead");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn systemd_update_only_when_inactive_or_failed() {
+        // ActiveState domain; only inactive|failed may bind an update.
+        for (state, allowed) in [
+            ("inactive", true),
+            ("failed", true),
+            ("active", false),
+            ("reloading", false),
+            ("activating", false),
+            ("deactivating", false),
+            ("", false),
+        ] {
+            assert_eq!(systemd_update_allowed(state), allowed, "{state}");
+        }
+    }
+
+    #[test]
+    fn systemd_unit_must_be_absolute_and_named_ai_memory_service() {
+        let mut op = Operation::new(Backend::Systemd, Kind::Status);
+        for bad in [
+            "relative.service",
+            "/tmp/other.service",
+            "ai-memory.service",
+        ] {
+            op.values.insert("unit".into(), bad.into());
+            assert!(op.validate().is_err(), "must refuse unit={bad}");
+        }
+        op.values.insert(
+            "unit".into(),
+            "/home/u/.config/systemd/user/ai-memory.service".into(),
+        );
+        assert!(op.validate().is_ok());
+    }
+
+    #[test]
+    #[ignore = "requer um gerenciador systemd --user real (linger ativo, barramento do usuário)"]
+    #[cfg(target_os = "linux")]
+    fn systemd_backend_full_lifecycle_against_real_user_manager() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var("HOME").expect("HOME");
+        let dir = unique_temp_dir("systemd-it");
+        let bin = dir.join("ai-memory");
+        std::fs::write(&bin, "#!/bin/sh\necho fake-ai-memory-v1\nexec sleep 3600\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let unit_dir = std::path::Path::new(&home).join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let unit = unit_dir.join("ai-memory.service");
+        std::fs::write(
+            &unit,
+            format!(
+                "[Unit]\nDescription=ai-memory test\n[Service]\nExecStart={} --data-dir={}/data --config={}/config.toml serve --transport http --enable-web\n[Install]\nWantedBy=default.target\n",
+                bin.display(),
+                dir.display(),
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let cleanup = |dir: &std::path::Path, unit: &std::path::Path| {
+            let _ = std::process::Command::new("/usr/bin/systemctl")
+                .args(["--user", "stop", "ai-memory.service"])
+                .status();
+            let _ = std::fs::remove_file(unit);
+            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::process::Command::new("/usr/bin/systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+        };
+        std::process::Command::new("/usr/bin/systemctl")
+            .args(["--user", "daemon-reload"])
+            .status()
+            .unwrap();
+        // Aufräumen vorab: ein abgebrochener Lauf könnte den Dienst aktiv lassen.
+        let _ = std::process::Command::new("/usr/bin/systemctl")
+            .args(["--user", "stop", "ai-memory.service"])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let cfg = Config::default();
+        let op = |kind| {
+            let mut op = Operation::new(Backend::Systemd, kind);
+            op.values
+                .insert("unit".into(), unit.to_str().unwrap().into());
+            op
+        };
+        let run = |kind, preview| op(kind).execute(&cfg, preview, || false);
+        let run_bound = |kind| {
+            let mut o = op(kind);
+            let preview = o.execute(&cfg, true, || false).unwrap();
+            o.bind(&preview).unwrap();
+            o.execute(&cfg, false, || false)
+        };
+        // Status enquanto parado.
+        let state = run(Kind::Status, false).unwrap();
+        assert_eq!(state["active_state"], "inactive", "{state}");
+        // Start com preview + binding.
+        run_bound(Kind::Start).unwrap();
+        for _ in 0..50 {
+            if run(Kind::Status, false).unwrap()["active_state"] == "active" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let state = run(Kind::Status, false).unwrap();
+        assert_eq!(state["active_state"], "active", "{state}");
+        // Logs devem conter a linha do binário falso.
+        let logs = run(Kind::Logs, false).unwrap();
+        assert!(
+            logs["logs"].as_str().unwrap().contains("fake-ai-memory-v1"),
+            "{logs}"
+        );
+        run_bound(Kind::Restart).unwrap();
+        // Update recusado com o serviço ativo.
+        let update_refused = op(Kind::Update);
+        assert!(update_refused.execute(&cfg, true, || false).is_err());
+        run_bound(Kind::Stop).unwrap();
+        for _ in 0..50 {
+            if run(Kind::Status, false).unwrap()["active_state"] == "inactive" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Update com binário novo + SHA-256 + backup gzip privado.
+        let replacement = dir.join("ai-memory-new");
+        std::fs::write(
+            &replacement,
+            "#!/bin/sh\necho fake-ai-memory-v2\nexec sleep 3600\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let backup_path = dir.join("backup.tar.gz");
+        std::fs::write(&backup_path, b"\x1f\x8bbackup").unwrap();
+        std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let digest = hash(replacement.to_str().unwrap()).unwrap();
+        let mut update = op(Kind::Update);
+        update
+            .values
+            .insert("backup".into(), backup_path.to_str().unwrap().into());
+        update
+            .values
+            .insert("replacement".into(), replacement.to_str().unwrap().into());
+        update.values.insert("sha256".into(), digest);
+        let preview = update.execute(&cfg, true, || false).unwrap();
+        update.bind(&preview).unwrap();
+        let result = update.execute(&cfg, false, || false).unwrap();
+        assert_eq!(result["binary_replaced"], true, "{result}");
+        assert!(
+            std::fs::read_to_string(&bin).unwrap().contains("v2"),
+            "installed binary must be the replacement"
+        );
+        // Start com o binário novo funciona.
+        run_bound(Kind::Start).unwrap();
+        for _ in 0..50 {
+            if run(Kind::Status, false).unwrap()["active_state"] == "active" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let logs = run(Kind::Logs, false).unwrap();
+        assert!(
+            logs["logs"].as_str().unwrap().contains("fake-ai-memory-v2"),
+            "{logs}"
+        );
+        cleanup(&dir, &unit);
     }
 
     #[test]

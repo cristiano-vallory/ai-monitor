@@ -301,6 +301,12 @@ impl Panel {
             ui.selectable_value(&mut self.local.backend, Backend::Docker, "Docker");
             #[cfg(target_os = "macos")]
             ui.selectable_value(&mut self.local.backend, Backend::LaunchAgent, "LaunchAgent");
+            #[cfg(target_os = "linux")]
+            ui.selectable_value(
+                &mut self.local.backend,
+                Backend::Systemd,
+                "systemd (usuário)",
+            );
         });
         egui::ComboBox::from_id_salt("local-operation")
             .width(460.)

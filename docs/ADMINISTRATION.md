@@ -219,8 +219,17 @@ staging ao lado do executável e substituição atômica; conserva cópia privad
 binário anterior. O serviço permanece parado até **Iniciar**. Arquivos de manutenção
 com symlink são recusados. Um digest confere bytes, não a autenticidade do fornecedor.
 
+systemd (usuário, Linux) aceita a unit oficial `ai-memory.service`, valida
+LoadState, FragmentPath, daemon-reload pendente e o ExecStart efetivo
+(binário ai-memory absoluto + subcomando `serve`). Atua somente no gerenciador
+do usuário, sem sudo; units de sistema estão fora de escopo. Atualização exige
+serviço inativo/failed, nenhum processo ai-memory ativo, backup privado e
+SHA-256 do novo binário. Usa o mesmo staging atômico do LaunchAgent e conserva
+o binário anterior.
+
 Logs são privados: Docker lê até 300 linhas de stdout/stderr (streams concatenados);
-LaunchAgent lê até 150 de cada arquivo indicado no plist. Texto limitado a 100 KiB
+LaunchAgent lê até 150 de cada arquivo indicado no plist; systemd lê até 300
+linhas do journal do usuário (`journalctl --user -u ai-memory.service`). Texto limitado a 100 KiB
 por resultado/stream, sem exportação automática. Erros de comandos não reproduzem
 stderr. Comandos têm prazo de 6–300 s, não repetem automaticamente e podem deixar
 estado incerto após timeout: consulte status e saúde antes de repetir.

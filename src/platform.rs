@@ -34,7 +34,7 @@ pub const PROCESSES_CAPTION: &str = "Processos do Docker Engine (dockerd, contai
 #[cfg(target_os = "macos")]
 pub const LOCAL_SERVICE_HINT: &str = "Configure explicitamente o serviço. Docker usa contexto com socket Unix e fixa o ID revisado. LaunchAgent aceita o plist oficial; atualização nativa exige serviço parado, binário novo e SHA-256. Campos não são gravados em disco.";
 #[cfg(not(target_os = "macos"))]
-pub const LOCAL_SERVICE_HINT: &str = "Configure explicitamente o serviço. Docker usa contexto com socket Unix e fixa o ID revisado. Campos não são gravados em disco.";
+pub const LOCAL_SERVICE_HINT: &str = "Configure explicitamente o serviço. Docker usa contexto com socket Unix e fixa o ID revisado. systemd aceita a unit oficial ai-memory.service; atualização nativa exige serviço parado, binário novo e SHA-256. Campos não são gravados em disco.";
 
 #[cfg(target_os = "macos")]
 pub const PROPOSAL_WATCH_LABEL: &str =

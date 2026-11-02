@@ -73,10 +73,13 @@ não existe fallback em texto puro.
 - Fase 1 — **concluída (PR #7)**: compila e executa como janela normal no
   Linux; CI Linux (fmt, testes, clippy, integração Secret Service real,
   build, smoke sob Xvfb, artefato por PR).
-- Fase 2 — **em andamento**: tray via StatusNotifierItem (ksni), ícone
+- Fase 2 — **concluída (PR #8)**: tray via StatusNotifierItem (ksni), ícone
   apenas. No Wayland uma janela não pode ser ocultada (`set_visible` do
   winit é no-op): fechar destrói a janela e reabrir a recria, com a coleta
-  contínua. O teste do usuário na VM Omarchy acontece ao fim das 4 fases.
-- Fase 3: backend systemd `--user` para `ai-memory.service` (a unit que
-  `ai-memory setup` instala no Linux), em substituição ao LaunchAgent.
+  contínua. Verificado headless sob Xvfb e sway headless (abrir/fechar em
+  ciclos, segunda instância, quit). O teste do usuário na VM Omarchy
+  acontece ao fim das 4 fases.
+- Fase 3 — **em andamento**: backend systemd `--user` para `ai-memory.service`
+  (a unit que `ai-memory setup` instala no Linux), em substituição ao
+  LaunchAgent.
 - Fase 4: `.deb` (Ubuntu) + `PKGBUILD` (Omarchy/Arch) + release v0.6.0.
