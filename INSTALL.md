@@ -130,7 +130,7 @@ Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalaç
 ## 4. Baixar, compilar e abrir
 
 ```sh
-git clone https://github.com/cristianovallory/ai-monitor.git
+git clone https://github.com/cristiano-vallory/ai-monitor.git
 cd ai-monitor
 bash scripts/build-app.sh
 open 'dist/AI Monitor.app'

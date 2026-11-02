@@ -4,7 +4,7 @@ Monitor nativo em **Rust para macOS**, com CPU e memória do **ai-memory** e do 
 
 Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. Interface em português brasileiro. Licença [MIT](LICENSE).
 
-**[Baixar o instalador .dmg](https://github.com/cristianovallory/ai-monitor/releases/latest)** · **[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)**
+**[Baixar o instalador .dmg](https://github.com/cristiano-vallory/ai-monitor/releases/latest)** · **[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)**
 
 Linux (Ubuntu ≥ 22.04 e Omarchy 4): consulte a [seção Linux do guia de instalação](INSTALL.md#linux-ubuntu--2204-e-omarchy-4).
 
@@ -26,7 +26,7 @@ Esta release possui **assinatura ad hoc, sem Developer ID nem notarização Appl
 Com Rust estável, Xcode Command Line Tools e Git instalados:
 
 ```sh
-git clone https://github.com/cristianovallory/ai-monitor.git
+git clone https://github.com/cristiano-vallory/ai-monitor.git
 cd ai-monitor
 bash scripts/build-app.sh
 open 'dist/AI Monitor.app'
