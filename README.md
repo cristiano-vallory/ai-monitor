@@ -10,9 +10,9 @@ Linux (Ubuntu ≥ 22.04 e Omarchy 4): consulte a [seção Linux do guia de insta
 
 ## Instalar sem compilar Rust
 
-A versão **0.6.1** traz suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD` — o macOS permanece funcionalmente inalterado. Veja as [notas da atualização](docs/releases/v0.6.1.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
+A versão **0.6.2** passa o intervalo padrão de sessões/handoffs para 60 s, reduzindo a carga constante no servidor ai-memory. Desde a 0.6.0 há suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD`. Veja as [notas da atualização](docs/releases/v0.6.2.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
 
-1. Baixe **AI-Monitor-0.6.1-macos-universal.dmg** na [release v0.6.1](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.1).
+1. Baixe **AI-Monitor-0.6.2-macos-universal.dmg** na [release v0.6.2](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.2).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.

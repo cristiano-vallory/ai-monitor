@@ -1,6 +1,6 @@
 [package]
 name = "ai-monitor"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "Monitor nativo de ai-memory e Docker para macOS e Linux"
 license = "MIT"
