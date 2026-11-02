@@ -4,15 +4,15 @@ Monitor nativo em **Rust para macOS**, com CPU e memória do **ai-memory** e do 
 
 Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. Interface em português brasileiro. Licença [MIT](LICENSE).
 
-**[Baixar o instalador .dmg](https://github.com/cristianovallory/ai-monitor/releases/latest)** · **[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)**
+**[Baixar o instalador .dmg](https://github.com/cristiano-vallory/ai-monitor/releases/latest)** · **[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)**
 
-Linux: prévia em desenvolvimento — consulte a [seção Linux do guia de instalação](INSTALL.md#linux-prévia-em-desenvolvimento).
+Linux (Ubuntu ≥ 22.04 e Omarchy 4): consulte a [seção Linux do guia de instalação](INSTALL.md#linux-ubuntu--2204-e-omarchy-4).
 
 ## Instalar sem compilar Rust
 
-A versão **0.5.0** conclui a administração avançada: projetos, usuários/permissões, autenticação humana, Keychain opcional, mensagens e operação local. Veja as [notas da atualização](docs/releases/v0.5.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
+A versão **0.6.0** traz suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD` — o macOS permanece funcionalmente inalterado. Veja as [notas da atualização](docs/releases/v0.6.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
 
-1. Baixe **AI-Monitor-0.5.0-macos-universal.dmg** na [release v0.5.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.5.0).
+1. Baixe **AI-Monitor-0.6.0-macos-universal.dmg** na [release v0.6.0](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.0).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
@@ -26,7 +26,7 @@ Esta release possui **assinatura ad hoc, sem Developer ID nem notarização Appl
 Com Rust estável, Xcode Command Line Tools e Git instalados:
 
 ```sh
-git clone https://github.com/cristianovallory/ai-monitor.git
+git clone https://github.com/cristiano-vallory/ai-monitor.git
 cd ai-monitor
 bash scripts/build-app.sh
 open 'dist/AI Monitor.app'

@@ -56,7 +56,7 @@ O workflow de CI usa permissão `contents: read`, não recebe tokens de aplicaç
 
 ## Relatar uma vulnerabilidade
 
-Use o [relato privado de vulnerabilidade do GitHub](https://github.com/cristianovallory/ai-monitor/security/advisories/new). Inclua versão, impacto e passos de reprodução com dados sintéticos. Não coloque credenciais nem dados de terceiros na descrição.
+Use o [relato privado de vulnerabilidade do GitHub](https://github.com/cristiano-vallory/ai-monitor/security/advisories/new). Inclua versão, impacto e passos de reprodução com dados sintéticos. Não coloque credenciais nem dados de terceiros na descrição.
 
 Não publique uma vulnerabilidade com dados sensíveis em uma issue aberta. Se uma credencial real tiver sido exposta, revogue-a ou rotacione-a no serviço de origem; remover somente o arquivo da versão atual não a remove do histórico.
 
@@ -64,6 +64,6 @@ As correções são desenvolvidas na branch `main`. Não há compromisso de supo
 
 ## Downloads das releases
 
-Baixe o `.dmg` somente das [releases deste repositório](https://github.com/cristianovallory/ai-monitor/releases). O checksum SHA-256 acompanha o instalador; ele detecta alterações/corrupção, mas não substitui autenticação de desenvolvedor nem notarização.
+Baixe o `.dmg` somente das [releases deste repositório](https://github.com/cristiano-vallory/ai-monitor/releases). O checksum SHA-256 acompanha o instalador; ele detecta alterações/corrupção, mas não substitui autenticação de desenvolvedor nem notarização.
 
 Os pacotes das releases atuais são universais (Apple Silicon e Intel), com assinatura ad hoc e sem notarização Apple. O certificado pessoal Apple Development não é utilizado na distribuição. A assinatura verifica a integridade do bundle; não atesta uma identidade Developer ID. A eventual autorização de abertura pelo Gatekeeper deve ser feita para este app específico, conforme o [guia de instalação](INSTALL.md), sem desativação global das proteções do macOS.

@@ -21,7 +21,7 @@ Ao atualizar, encerre a versão anterior pelo menu antes de substituí-la.
 As preferências locais são preservadas; o Bearer só é salvo se você optar pelo Keychain. Sessões humanas não são salvas.
 
 Downloads oficiais e checksums:
-https://github.com/cristianovallory/ai-monitor/releases
+https://github.com/cristiano-vallory/ai-monitor/releases
 
 Guia completo:
-https://github.com/cristianovallory/ai-monitor/blob/main/INSTALL.md
+https://github.com/cristiano-vallory/ai-monitor/blob/main/INSTALL.md
