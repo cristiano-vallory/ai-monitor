@@ -8,14 +8,16 @@ Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. In
 
 ## Instalar sem compilar Rust
 
-1. Baixe **AI-Monitor-0.2.0-macos-universal.dmg** na [release v0.2.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.0).
+A versão **0.2.1** corrige gráficos, sessões duplicadas, coleta Docker e tratamento das configurações. Veja as [notas da atualização](docs/releases/v0.2.1.md).
+
+1. Baixe **AI-Monitor-0.2.1-macos-universal.dmg** na [release v0.2.1](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.1).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
 
 O pacote Universal contém código nativo para **Apple Silicon e Intel**. Não exige Rust, Cargo, Xcode ou ferramentas de desenvolvimento para instalar ou executar. O mínimo declarado é macOS 12.0. A interface foi validada em Apple Silicon; o executável Intel foi verificado via Rosetta, sem validação em hardware Intel ou macOS antigos.
 
-Esta primeira release possui **assinatura ad hoc, sem Developer ID nem notarização Apple**. Se o macOS bloquear por desenvolvedor não verificado, após tentar abrir use **Ajustes do Sistema → Privacidade e Segurança → Abrir Mesmo Assim**, confirmando a origem. Consulte o [guia de instalação](INSTALL.md) e a [orientação da Apple](https://support.apple.com/en-us/102445). A release inclui checksum SHA-256; não é necessário desativar o Gatekeeper globalmente.
+Esta release possui **assinatura ad hoc, sem Developer ID nem notarização Apple**. Se o macOS bloquear por desenvolvedor não verificado, após tentar abrir use **Ajustes do Sistema → Privacidade e Segurança → Abrir Mesmo Assim**, confirmando a origem. Consulte o [guia de instalação](INSTALL.md) e a [orientação da Apple](https://support.apple.com/en-us/102445). A release inclui checksum SHA-256; não é necessário desativar o Gatekeeper globalmente.
 
 ## Compilar e desenvolver (opcional)
 

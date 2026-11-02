@@ -4,7 +4,7 @@ Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na 
 
 ## Instalar pelo DMG — sem Rust ou Xcode
 
-1. Acesse a [release v0.2.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.0) e baixe **AI-Monitor-0.2.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
+1. Acesse a [release v0.2.1](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.1) e baixe **AI-Monitor-0.2.1-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
 2. Abra o `.dmg` e arraste **AI Monitor.app** para o atalho **Applications / Aplicativos**.
 3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
 4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
@@ -27,11 +27,11 @@ Essa é uma exceção para o aplicativo específico, conforme a [orientação da
 
 ### Verificar a integridade do download (opcional)
 
-Baixe também **AI-Monitor-0.2.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
+Baixe também **AI-Monitor-0.2.1-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
 
 ```sh
 cd "$HOME/Downloads"
-shasum -a 256 -c AI-Monitor-0.2.0-macos-universal.dmg.sha256
+shasum -a 256 -c AI-Monitor-0.2.1-macos-universal.dmg.sha256
 ```
 
 O resultado deve terminar em `OK`. O checksum detecta alterações ou corrupção do arquivo; não substitui assinatura Developer ID ou notarização.
@@ -186,7 +186,7 @@ O subshell evita manter o token no ambiente do terminal após o app encerrar. Us
 
 O token fornecido por ambiente permanece acessível ao próprio processo; essa opção não é um cofre de segredos. Não coloque valores reais em comandos literais, `.env` do projeto, scripts versionados, issues ou capturas de tela. O app não lê arquivos `.env` e remove `AI_MEMORY_AUTH_TOKEN` do ambiente dos comandos Docker que inicia.
 
-As preferências sem token ficam em `~/Library/Application Support/AI Monitor/config.json`. Esse arquivo pode revelar seu endpoint ou caminhos locais; mantenha-o fora do Git. Configurações inválidas carregadas na inicialização fazem o app voltar aos padrões.
+As preferências sem token ficam em `~/Library/Application Support/AI Monitor/config.json`. Esse arquivo pode revelar seu endpoint ou caminhos locais; mantenha-o fora do Git. Configurações inválidas carregadas na inicialização são substituídas por valores válidos ou pelos padrões, preservando as variáveis de ambiente válidas. O arquivo de preferências é salvo com acesso restrito ao usuário (`0600`).
 
 ## Atualizar
 
@@ -244,8 +244,8 @@ bash scripts/verify-dmg.sh
 Saídas em `dist/`:
 
 - `AI Monitor.app`: bundle Universal, assinado ad hoc.
-- `AI-Monitor-0.2.0-macos-universal.dmg`: imagem comprimida, somente leitura.
-- `AI-Monitor-0.2.0-macos-universal.dmg.sha256`: checksum para download.
+- `AI-Monitor-0.2.1-macos-universal.dmg`: imagem comprimida, somente leitura.
+- `AI-Monitor-0.2.1-macos-universal.dmg.sha256`: checksum para download.
 
 O pacote é montado em uma pasta temporária limpa, a partir do bundle, do atalho `/Applications` e do `LEIA-ME.txt`. Configurações, tokens, dados, repositório e diagnósticos não entram na imagem. O script verifica a assinatura e as arquiteturas; o verificador monta a imagem, copia o app para um destino temporário e executa `--version` antes e depois de ejetar. Essa verificação não abre o painel nem acessa Docker/ai-memory.
 
