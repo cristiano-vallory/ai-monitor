@@ -8,6 +8,7 @@ pub struct MenuReading {
     pub ai: String,
     pub docker: String,
     pub freshness: String,
+    pub activity: String,
 }
 
 impl MenuReading {
@@ -37,7 +38,56 @@ impl MenuReading {
                 }
                 Some(age) => format!("Recursos atualizados há {age} s"),
             },
+            activity: String::new(),
         }
+    }
+    pub fn with_context(
+        mut self,
+        api: Option<&crate::model::ApiSnapshot>,
+        health: Option<&crate::health::Snapshot>,
+        config: &crate::model::Config,
+        now: DateTime<Utc>,
+    ) -> Self {
+        if let Some(health) = health {
+            if health.fresh(now) && !health.alerts().is_empty() {
+                self.title.push_str("  !");
+            }
+            self.freshness
+                .push_str(&format!(" · {}", health.menu_summary(now)));
+        }
+        let h = api
+            .and_then(|a| {
+                a.at.filter(|at| (now - *at).num_seconds() <= (config.api_seconds * 3) as i64)
+                    .and(a.handoff_total)
+            })
+            .map(|n| n.to_string())
+            .unwrap_or("—".into());
+        let p = if let Some(health) = health {
+            if let Some(scope) = &config.proposal_watch {
+                let n = if health.fresh(now) && health.pending_scope.as_ref() == Some(scope) {
+                    health
+                        .pending
+                        .map(|n| {
+                            if n >= 200 {
+                                "200+".into()
+                            } else {
+                                n.to_string()
+                            }
+                        })
+                        .unwrap_or("—".into())
+                } else {
+                    "—".into()
+                };
+                self.title.push_str(&format!(" P{n}"));
+                format!("Propostas {n} · {}", scope.label())
+            } else {
+                "Propostas: selecione um projeto em Conexão".into()
+            }
+        } else {
+            "Propostas: aguardando".into()
+        };
+        self.activity = format!("Handoffs abertos {h} · {p}");
+        self
     }
 }
 
@@ -174,6 +224,7 @@ mod native {
         }
         fn refresh(&self) {
             let state = self.ivars();
+            let now = Utc::now();
             let reading = {
                 // Never wait for a collector or a configuration change on AppKit.
                 let Ok(config) = state.shared.config.try_read() else {
@@ -182,63 +233,15 @@ mod native {
                 let Ok(snapshot) = state.shared.resources.try_lock() else {
                     return;
                 };
-                let mut reading = MenuReading::from_snapshot(
+                let api = state.shared.api.try_lock().ok();
+                let health = state.shared.health.try_lock().ok();
+                MenuReading::from_snapshot(
                     &snapshot,
                     &config.container,
                     config.resource_seconds,
-                    Utc::now(),
-                );
-                if let Ok(health) = state.shared.health.try_lock() {
-                    if health.fresh(Utc::now()) && !health.alerts().is_empty() {
-                        reading.title.push_str("  !");
-                    }
-                    reading
-                        .freshness
-                        .push_str(&format!(" · {}", health.menu_summary(Utc::now())));
-                }
-                let h = state
-                    .shared
-                    .api
-                    .try_lock()
-                    .ok()
-                    .and_then(|a| {
-                        a.at.filter(|at| {
-                            (Utc::now() - *at).num_seconds() <= (config.api_seconds * 3) as i64
-                        })
-                        .and(a.handoff_total)
-                    })
-                    .map(|n| n.to_string())
-                    .unwrap_or("—".into());
-                let p = if let Ok(health) = state.shared.health.try_lock() {
-                    if let Some(scope) = &config.proposal_watch {
-                        let n = if health.fresh(Utc::now())
-                            && health.pending_scope.as_ref() == Some(scope)
-                        {
-                            health
-                                .pending
-                                .map(|n| {
-                                    if n >= 200 {
-                                        "200+".into()
-                                    } else {
-                                        n.to_string()
-                                    }
-                                })
-                                .unwrap_or("—".into())
-                        } else {
-                            "—".into()
-                        };
-                        reading.title.push_str(&format!(" P{n}"));
-                        format!("Propostas {n} · {}", scope.label())
-                    } else {
-                        "Propostas: selecione um projeto em Conexão".into()
-                    }
-                } else {
-                    "Propostas: aguardando".into()
-                };
-                state
-                    .activity
-                    .setTitle(&NSString::from_str(&format!("Handoffs abertos {h} · {p}")));
-                reading
+                    now,
+                )
+                .with_context(api.as_deref(), health.as_deref(), &config, now)
             };
             let mut previous = state.previous.borrow_mut();
             if previous.as_ref() != Some(&reading) {
@@ -254,8 +257,11 @@ mod native {
                 state
                     .freshness
                     .setTitle(&NSString::from_str(&reading.freshness));
+                state
+                    .activity
+                    .setTitle(&NSString::from_str(&reading.activity));
                 if let Some(button) = state.status.button(self.mtm()) {
-                    button.setToolTip(Some(&NSString::from_str(&format!("AI Monitor\n{}\n{}\n{}\nCPU: 100% = 1 núcleo. M/G = MiB/GiB. Docker inclui ai-memory.",reading.ai,reading.docker,reading.freshness))));
+                    button.setToolTip(Some(&NSString::from_str(&format!("AI Monitor\n{}\n{}\n{}\n{}\nCPU: 100% = 1 núcleo. M/G = MiB/GiB. Docker inclui ai-memory.",reading.ai,reading.docker,reading.freshness,reading.activity))));
                 }
                 *previous = Some(reading);
             }
@@ -489,5 +495,43 @@ mod tests {
                 .freshness
                 .contains("primeira")
         );
+    }
+
+    #[test]
+    fn menu_reading_composes_health_alerts_and_proposal_watch_counts() {
+        let now = Utc::now();
+        let snap = snapshot();
+        let scope = crate::client::Scope {
+            workspace: "ws".into(),
+            project: "proj".into(),
+        };
+        let cfg = crate::model::Config {
+            proposal_watch: Some(scope.clone()),
+            ..Default::default()
+        };
+        let api = crate::model::ApiSnapshot {
+            at: Some(now),
+            handoff_total: Some(3),
+            ..Default::default()
+        };
+        let health = crate::health::Snapshot {
+            at: Some(now),
+            status: Some(serde_json::json!({"consolidation":{"failed":1}})),
+            pending: Some(200),
+            pending_scope: Some(scope),
+            ..Default::default()
+        };
+        let reading = MenuReading::from_snapshot(&snap, "ai-memory", 2, now).with_context(
+            Some(&api),
+            Some(&health),
+            &cfg,
+            now,
+        );
+        assert!(reading.title.ends_with("  ! P200+"), "{}", reading.title);
+        assert_eq!(
+            reading.activity,
+            "Handoffs abertos 3 · Propostas 200+ · ws / proj"
+        );
+        assert!(reading.freshness.contains("Consolidações com falha"));
     }
 }

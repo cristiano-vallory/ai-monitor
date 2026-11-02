@@ -1029,14 +1029,24 @@ impl MonitorApp {
             });
             ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,"Guardar o Bearer no Keychain para este servidor (opcional)");
             ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(MUTED));
-            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new("Carregar Bearer do Keychain deste endereço")).clicked(){match crate::keychain::load(&self.draft.endpoint){Ok(Some(token))=>{self.draft.token=token;self.settings_message="Token carregado no campo. Salve para conectar.".into();},Ok(None)=>self.settings_message="Nenhum token guardado para esse endereço.".into(),Err(e)=>self.settings_message=e}}
+            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new("Carregar Bearer do Keychain deste endereço")).clicked(){
+                self.draft.normalize();
+                match crate::keychain::load(&self.draft.endpoint){
+                    Ok(Some(token))=>{self.draft.token=token.trim().into();self.settings_message="Token carregado no campo. Salve para conectar.".into();},
+                    Ok(None)=>self.settings_message="Nenhum token guardado para esse endereço.".into(),
+                    Err(e)=>self.settings_message=e
+                }
+            }
 
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy, egui::Button::new(RichText::new("Salvar e conectar").color(GREEN))).clicked() {
                     self.draft.normalize();
                     match self.draft.validate().and_then(|_|{
-                        if self.draft.remember_token {crate::keychain::save(&self.draft.endpoint,&self.draft.token)?;}
-                        else if self.config.remember_token && self.config.endpoint==self.draft.endpoint {crate::keychain::forget(&self.draft.endpoint)?;}
+                        if self.draft.remember_token {
+                            crate::keychain::save(&self.draft.endpoint,&self.draft.token)?;
+                        } else if self.config.remember_token {
+                            crate::keychain::forget(&self.config.endpoint)?;
+                        }
                         self.draft.save()
                     }) {
                         Ok(())=> {self.reconnect(self.draft.clone());self.authentication.clear();self.settings_message="Configuração salva. Reconectando…".into();},
@@ -1072,6 +1082,7 @@ impl eframe::App for MonitorApp {
         if let Some(config) = self.authentication.poll(&self.shared) {
             self.reconnect(config);
         }
+        self.central.poll(&self.shared);
         self.management.poll(&self.shared);
         self.operations.poll(&self.shared);
         ctx.request_repaint_after(Duration::from_secs(1));

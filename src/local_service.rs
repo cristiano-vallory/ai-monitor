@@ -399,10 +399,23 @@ impl Operation {
                     Kind::Logs => {
                         let mut logs = Vec::new();
                         for key in ["StandardOutPath", "StandardErrorPath"] {
-                            let path = extract(self.s("plist"), key)?;
+                            let Ok(path) = extract(self.s("plist"), key) else {
+                                continue;
+                            };
+                            if matches!(
+                                std::fs::symlink_metadata(&path),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                            ) {
+                                continue;
+                            }
                             regular(&path)?;
-                            let raw = run("/usr/bin/tail", &["-n", "150", &path], false, 6)?;
+                            let raw = run("/usr/bin/tail", &["-n", "150", "--", &path], false, 6)?;
                             logs.push(json!({"stream":key,"text":tail(&raw)}));
+                        }
+                        if logs.is_empty() {
+                            return Err(Error::Invalid(
+                                "Nenhum arquivo de log regular configurado ou disponível para este LaunchAgent.".into(),
+                            ));
                         }
                         return Ok(json!({"logs":logs}));
                     }
@@ -446,7 +459,7 @@ impl Operation {
 fn run(binary: &str, args: &[&str], logs: bool, secs: u64) -> Result<String, Error> {
     local_command(binary, args, Duration::from_secs(secs), logs).map_err(Error::Invalid)
 }
-fn regular(path: &str) -> Result<(), Error> {
+fn open_regular(path: &str) -> Result<std::fs::File, Error> {
     let m = std::fs::symlink_metadata(path)
         .map_err(|_| Error::Invalid("Arquivo local ausente ou inacessível.".into()))?;
     if !Path::new(path).is_absolute() || !m.is_file() || m.file_type().is_symlink() {
@@ -455,31 +468,52 @@ fn regular(path: &str) -> Result<(), Error> {
                 .into(),
         ));
     }
-    Ok(())
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x0100) // O_NOFOLLOW on macOS/BSD
+            .open(path)
+            .map_err(|_| {
+                Error::Invalid("Arquivo local ausente ou link simbólico recusado.".into())
+            })?
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)
+        .map_err(|_| Error::Invalid("Arquivo local ausente ou inacessível.".into()))?;
+    let fm = file.metadata().map_err(|_| Error::Unavailable)?;
+    if !fm.is_file() {
+        return Err(Error::Invalid(
+            "Use arquivo regular absoluto; links simbólicos não são aceitos para manutenção."
+                .into(),
+        ));
+    }
+    Ok(file)
+}
+fn regular(path: &str) -> Result<(), Error> {
+    open_regular(path).map(|_| ())
 }
 fn extract(path: &str, key: &str) -> Result<String, Error> {
     run(
         "/usr/bin/plutil",
-        &["-extract", key, "raw", "-o", "-", path],
+        &["-extract", key, "raw", "-o", "-", "--", path],
         false,
         6,
     )
     .map(|s| s.trim().to_owned())
 }
 fn hash(path: &str) -> Result<String, Error> {
-    regular(path)?;
-    let s = run("/usr/bin/shasum", &["-a", "256", path], false, 300)?;
-    let s = s.split_whitespace().next().unwrap_or("");
-    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(Error::Format);
-    }
-    Ok(s.into())
+    use sha2::{Digest, Sha256};
+    let mut file = open_regular(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|_| Error::Unavailable)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 fn backup(path: &str) -> Result<(), Error> {
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
-    regular(path)?;
-    let mut f = std::fs::File::open(path).map_err(|_| Error::Unavailable)?;
+    let mut f = open_regular(path)?;
     let mut magic = [0u8; 2];
     f.read_exact(&mut magic).map_err(|_| Error::Format)?;
     let m = f.metadata().map_err(|_| Error::Unavailable)?;
@@ -500,13 +534,18 @@ fn replace(binary: &str, replacement: &str, expected: &str) -> Result<Value, Err
     // Same-directory staging keeps the final replacement atomic; backup is never overwritten.
     regular(binary)?;
     regular(replacement)?;
+    if Path::new(binary) == Path::new(replacement) {
+        return Err(Error::Invalid(
+            "O novo binário deve estar em um caminho diferente do binário instalado.".into(),
+        ));
+    }
     let suffix = chrono::Utc::now()
         .timestamp_nanos_opt()
         .ok_or(Error::Unavailable)?;
     let old = format!("{binary}.backup-{suffix}");
     let stage = format!("{binary}.new-{suffix}");
     let copy_private = |from: &str, to: &str| -> Result<(), Error> {
-        let mut src = std::fs::File::open(from).map_err(|_| Error::Unavailable)?;
+        let mut src = open_regular(from)?;
         let mut dest = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -647,5 +686,33 @@ esac
         );
         assert_eq!(std::fs::read_to_string(old).unwrap(), "new binary");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_rejects_identical_source_and_target_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "monitor-local-same-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let bin = dir.join("ai-memory");
+        std::fs::write(&bin, "binary").unwrap();
+        let digest = hash(bin.to_str().unwrap()).unwrap();
+        assert_eq!(
+            digest,
+            "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd"
+        );
+        #[cfg(unix)]
+        {
+            let link = dir.join("symlink-bin");
+            std::os::unix::fs::symlink(&bin, &link).unwrap();
+            assert!(hash(link.to_str().unwrap()).is_err());
+        }
+        let res = replace(bin.to_str().unwrap(), bin.to_str().unwrap(), &digest);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            res.is_err(),
+            "replace must refuse overwriting binary with its own path"
+        );
     }
 }

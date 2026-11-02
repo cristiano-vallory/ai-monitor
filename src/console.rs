@@ -92,7 +92,7 @@ impl Console {
             Err(e) => self.error = Some(e.to_string()),
         }
     }
-    fn poll(&mut self, shared: &Shared) {
+    pub(crate) fn poll(&mut self, shared: &Shared) {
         while let Ok(reply) = self.worker.replies.try_recv() {
             self.busy = false;
             if reply.ticket != self.ticket
@@ -379,14 +379,14 @@ impl Console {
                         },
                     );
                 }
-                for row in array(&data["observations"]) {
+                for (idx, row) in array(&data["observations"]).iter().enumerate() {
                     egui::CollapsingHeader::new(format!(
                         "{} · {} · {}",
                         text(row, "created_at"),
                         text(row, "kind"),
                         text(row, "title")
                     ))
-                    .id_salt(text(row, "id"))
+                    .id_salt((idx, text(row, "id")))
                     .show(ui, |ui| {
                         ui.add(egui::Label::new(text(row, "body")).wrap().selectable(true));
                     });
@@ -837,8 +837,12 @@ fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
         }
         egui::CollapsingHeader::new("Uso dos providers por atividade").show(ui, |ui| {
             ui.small("Contadores passivos desde o início do servidor. Estimativas e tokens reportados são medidas distintas.");
-            for row in array(&v["providers"]["llm_workloads"]).iter().take(100) {
-                ui.push_id(text(row, "workload"), |ui| {
+            for (idx, row) in array(&v["providers"]["llm_workloads"])
+                .iter()
+                .take(100)
+                .enumerate()
+            {
+                ui.push_id((idx, text(row, "workload")), |ui| {
                     ui.strong(text(row, "workload"));
                     count_grid(ui, "workload", row, &[("calls", "Chamadas"), ("errors", "Falhas"), ("reported_input_tokens", "Entrada reportada"), ("reported_output_tokens", "Saída reportada"), ("estimated_input_tokens", "Entrada estimada"), ("estimated_output_tokens", "Saída estimada")]);
                 });

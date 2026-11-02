@@ -18,6 +18,13 @@ pub struct Session {
     csrf: String,
 }
 impl Session {
+    #[cfg(test)]
+    pub(crate) fn for_test(session: &str, csrf: &str) -> Self {
+        Self {
+            session: session.into(),
+            csrf: csrf.into(),
+        }
+    }
     pub fn headers(&self, request: RequestBuilder, method: &Method) -> RequestBuilder {
         let request = request.header(
             "Cookie",
@@ -40,6 +47,7 @@ impl Session {
             let Some((name, value)) = text.split(';').next().and_then(|p| p.split_once('=')) else {
                 continue;
             };
+            let name = name.trim();
             if !["ai_memory_session", "ai_memory_csrf"].contains(&name) {
                 continue;
             }
@@ -68,7 +76,7 @@ fn secure(config: &Config) -> Result<(), Error> {
     check.token = "transport-validation".into();
     check.validate().map_err(Error::Invalid)
 }
-fn login(config: &Config, username: &str, password: &str) -> Result<Config, Error> {
+fn login(config: &Config, username: &str, password: &str) -> Result<(Config, Value), Error> {
     secure(config)?;
     if username.trim().is_empty() || password.is_empty() {
         return Err(Error::Invalid("Informe usuário e senha.".into()));
@@ -88,8 +96,8 @@ fn login(config: &Config, username: &str, password: &str) -> Result<Config, Erro
     let mut connected = config.clone();
     connected.human = Some(session);
     // Confirm capability state using only the new human session.
-    Connection::new(&connected)?.get::<Value>(&["auth", "me"], &[])?;
-    Ok(connected)
+    let me = Connection::new(&connected)?.get::<Value>(&["auth", "me"], &[])?;
+    Ok((connected, me))
 }
 fn password(
     config: &Config,
@@ -178,8 +186,7 @@ impl Panel {
                 }
                 match command {
                     Command::Login { username, password } => {
-                        let next = login(&config, &username, &password)?;
-                        let v = Connection::new(&next)?.get(&["auth", "me"], &[])?;
+                        let (next, v) = login(&config, &username, &password)?;
                         changed = Some(next);
                         Ok(v)
                     }
@@ -192,11 +199,11 @@ impl Panel {
                         Ok(json!({"message":"Senha atualizada. A sessão foi renovada."}))
                     }
                     Command::Logout => {
-                        let result =
-                            Connection::new(&config)?.post(&["auth", "logout"], &[], &json!({}));
-                        let mut next = config;
+                        let mut next = config.clone();
                         next.human = None;
                         changed = Some(next);
+                        let result =
+                            Connection::new(&config)?.post(&["auth", "logout"], &[], &json!({}));
                         result.map(|_| json!({"message":"Sessão humana encerrada; conexão voltou ao Bearer configurado."}))
                     }
                     Command::Me => Connection::new(&config)?.get(&["auth", "me"], &[]),
@@ -347,7 +354,9 @@ mod tests {
         });
         let mut original = mock.config();
         original.token = "synthetic-bearer".into();
-        let config = login(&original, "fixture", "synthetic-password").unwrap();
+        let (config, me) = login(&original, "fixture", "synthetic-password").unwrap();
+        assert_eq!(me["role"], "user");
+        assert_eq!(mock.requests().len(), 2);
         Connection::new(&config)
             .unwrap()
             .post(&["admin", "lint"], &[], &json!({"dry_run":true}))

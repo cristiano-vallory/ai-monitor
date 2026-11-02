@@ -83,19 +83,30 @@ impl Config {
         }
     }
     pub fn load() -> Self {
+        let env_token = std::env::var("AI_MEMORY_AUTH_TOKEN").ok();
         let mut config = Self::from_sources(
             std::fs::read(Self::path()).ok().as_deref(),
             std::env::var("AI_MEMORY_SERVER_URL").ok(),
-            std::env::var("AI_MEMORY_AUTH_TOKEN").ok(),
+            env_token.clone(),
         );
-        if config.remember_token
-            && config.token.is_empty()
-            && std::env::var_os("AI_MEMORY_AUTH_TOKEN").is_none()
-            && let Ok(Some(token)) = crate::keychain::load(&config.endpoint)
-        {
-            config.token = token;
+        if env_token.is_none() {
+            config.apply_keychain_token(crate::keychain::load(&config.endpoint).ok().flatten());
         }
         config
+    }
+    pub fn apply_keychain_token(&mut self, keychain_token: Option<String>) {
+        if self.remember_token
+            && self.token.is_empty()
+            && let Some(token) = keychain_token
+        {
+            let token = token.trim().to_owned();
+            if !token.is_empty() {
+                self.token = token;
+                if self.validate().is_err() {
+                    self.token.clear();
+                }
+            }
+        }
     }
     pub fn validate(&self) -> Result<(), String> {
         if let Some(scope) = &self.proposal_watch {
@@ -494,5 +505,29 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn keychain_token_is_refused_for_insecure_remote_http_and_normalized() {
+        let mut remote_http = Config {
+            endpoint: "http://remote.example.com:49374".into(),
+            remember_token: true,
+            ..Default::default()
+        };
+        remote_http.apply_keychain_token(Some("  synthetic-keychain-token  ".into()));
+        assert!(
+            remote_http.token.is_empty(),
+            "keychain token must not be attached to plaintext remote HTTP endpoint"
+        );
+        assert!(remote_http.validate().is_ok());
+
+        let mut remote_https = Config {
+            endpoint: "https://remote.example.com:49374".into(),
+            remember_token: true,
+            ..Default::default()
+        };
+        remote_https.apply_keychain_token(Some("  synthetic-keychain-token  ".into()));
+        assert_eq!(remote_https.token, "synthetic-keychain-token");
+        assert!(remote_https.validate().is_ok());
     }
 }

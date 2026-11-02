@@ -516,7 +516,13 @@ impl Operation {
             }
             CreateKey => json!({"username":self.s("username"),"label":self.s("label")}),
             SendMessage => {
-                json!({"from_workspace":self.s("workspace"),"from_project":self.s("project"),"to_workspace":self.s("to_workspace"),"to_project":self.s("to_project"),"subject":self.s("subject"),"nature":self.s("nature"),"evidence":self.s("evidence"),"body":self.s("body")})
+                let mut b = json!({"from_workspace":self.s("workspace"),"from_project":self.s("project"),"to_workspace":self.s("to_workspace"),"to_project":self.s("to_project"),"nature":self.s("nature"),"body":self.s("body")});
+                for k in ["subject", "evidence"] {
+                    if !self.s(k).is_empty() {
+                        b[k] = json!(self.s(k));
+                    }
+                }
+                b
             }
             CancelMessage => {
                 b["message_id"] = json!(self.s("message_id"));
@@ -586,14 +592,18 @@ pub fn concealed(value: &Value) -> Value {
             map.iter()
                 .map(|(k, v)| {
                     let lower = k.to_ascii_lowercase();
+                    let secret_key = (lower.contains("password")
+                        || (lower.contains("token") && !lower.ends_with("_tokens"))
+                        || lower.contains("secret")
+                        || lower.contains("csrf")
+                        || lower.contains("cookie")
+                        || matches!(lower.as_str(), "api_key" | "raw_key" | "private_key"))
+                        && !v.is_null()
+                        && !v.is_boolean()
+                        && !v.is_number();
                     (
                         k.clone(),
-                        if lower.contains("password")
-                            || lower == "token"
-                            || lower == "secret"
-                            || lower.contains("csrf")
-                            || lower.contains("cookie")
-                        {
+                        if secret_key {
                             json!("[oculto]")
                         } else {
                             concealed(v)
@@ -603,6 +613,7 @@ pub fn concealed(value: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(rows) => Value::Array(rows.iter().map(concealed).collect()),
+        Value::String(s) if s.starts_with("aim_") => json!("[oculto]"),
         _ => value.clone(),
     }
 }
@@ -690,5 +701,43 @@ mod tests {
         o.values
             .insert("to_workspace".into(), o.s("workspace").into());
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn concealed_masks_compound_secret_keys_and_aim_prefixed_values_and_omits_empty_optionals() {
+        let masked = concealed(&json!({
+            "api_token": "secret-1",
+            "raw_token": "secret-2",
+            "secret_key": "secret-3",
+            "api_key": "secret-4",
+            "credential": "aim_live_secret_value",
+            "input_tokens": 42,
+            "id": "public-id"
+        }));
+        let s = masked.to_string();
+        for leaked in [
+            "secret-1",
+            "secret-2",
+            "secret-3",
+            "secret-4",
+            "aim_live_secret_value",
+        ] {
+            assert!(
+                !s.contains(leaked),
+                "leaked secret in concealed(): {leaked}"
+            );
+        }
+        assert_eq!(masked["input_tokens"], 42);
+        assert_eq!(masked["id"], "public-id");
+
+        let mut msg = Operation::new(SendMessage);
+        msg.values.insert("workspace".into(), "w1".into());
+        msg.values.insert("project".into(), "p1".into());
+        msg.values.insert("to_workspace".into(), "w2".into());
+        msg.values.insert("to_project".into(), "p2".into());
+        msg.values.insert("body".into(), "hello".into());
+        let body = msg.body(false);
+        assert!(body.get("subject").is_none());
+        assert!(body.get("evidence").is_none());
     }
 }
