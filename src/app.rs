@@ -21,6 +21,7 @@ const AMBER: Color32 = Color32::from_rgb(244, 190, 103);
 enum Page {
     Overview,
     Central,
+    Management,
     Sessions,
     Docker,
     Settings,
@@ -51,6 +52,7 @@ pub struct MonitorApp {
     paused: bool,
     central: crate::console::Console,
     health: crate::health::Snapshot,
+    management: crate::management_ui::Management,
 }
 
 impl MonitorApp {
@@ -87,7 +89,9 @@ impl MonitorApp {
             std::env::args().any(|a| a == "--show-dashboard"),
         );
         let central = crate::console::Console::new(shared.clone());
+        let management = crate::management_ui::Management::new(shared.clone());
         Self {
+            management,
             central,
             health: Default::default(),
             #[cfg(target_os = "macos")]
@@ -174,6 +178,7 @@ impl MonitorApp {
                 for (page, label) in [
                     (Page::Overview, "Visão geral"),
                     (Page::Central, "Central ai-memory"),
+                    (Page::Management, "Administrar memória"),
                     (Page::Sessions, "Sessões e handoffs"),
                     (Page::Docker, "Docker"),
                     (Page::Settings, "Conexão"),
@@ -236,6 +241,10 @@ impl MonitorApp {
                 "Consumo, contêineres e imagens do contexto Docker ativo.",
             ),
             Page::Settings => ("Conexão", "Ajuste as fontes e a frequência de atualização."),
+            Page::Management => (
+                "Administrar memória",
+                "Revisão, manutenção e recuperação do conhecimento.",
+            ),
             Page::Central => (
                 "Central ai-memory",
                 "Saúde, sessões e conhecimento do servidor conectado.",
@@ -987,10 +996,10 @@ impl MonitorApp {
             });
             ui.add_space(12.);ui.label(RichText::new("O token fica somente na memória deste app. Também é possível fornecer AI_MEMORY_AUTH_TOKEN ao iniciar pelo terminal.").small().color(MUTED));
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("Salvar e conectar").color(GREEN)).clicked() {
+                if ui.add_enabled(!self.management.busy, egui::Button::new(RichText::new("Salvar e conectar").color(GREEN))).clicked() {
                     self.draft.normalize();
                     match self.draft.validate().and_then(|_|self.draft.save()) {
-                        Ok(())=> {self.config=self.draft.clone();self.shared.apply(self.config.clone());self.central.reset();self.health=Default::default();self.history.clear();self.resources=Default::default();self.api=Default::default();self.scope.clear();self.selected_container=None;self.handoff_page=0;self.paused=false;self.last_sync=Instant::now()-Duration::from_secs(1);self.settings_message="Configuração salva. Reconectando…".into();},
+                        Ok(())=> {self.config=self.draft.clone();self.shared.apply(self.config.clone());self.central.reset();self.management.reset();self.health=Default::default();self.history.clear();self.resources=Default::default();self.api=Default::default();self.scope.clear();self.selected_container=None;self.handoff_page=0;self.paused=false;self.last_sync=Instant::now()-Duration::from_secs(1);self.settings_message="Configuração salva. Reconectando…".into();},
                         Err(e)=>self.settings_message=e,
                     }
                 }
@@ -1023,6 +1032,7 @@ impl eframe::App for MonitorApp {
                 return;
             }
         }
+        self.management.poll(&self.shared);
         self.sync();
         ctx.request_repaint_after(Duration::from_millis(500));
         self.sidebar(ctx);
@@ -1036,6 +1046,9 @@ impl eframe::App for MonitorApp {
                         ui.set_min_width(ui.available_width());
                         match self.page {
                             Page::Overview => self.overview(ui),
+                            Page::Management => {
+                                self.management.show(ui, &self.shared, &self.api.projects)
+                            }
                             Page::Central => self.central.show(
                                 ui,
                                 &self.shared,

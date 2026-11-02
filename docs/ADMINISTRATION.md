@@ -75,6 +75,72 @@ externa, exportação automática ou persistência de token. Conteúdo da memór
 pode ser privado: considere isso ao compartilhar a tela. O projeto público e
 os testes usam somente dados sintéticos.
 
-A v0.3 é de inspeção: propostas, manutenção e administração entram nas próximas
-fases descritas em [IMPLEMENTATION.md](IMPLEMENTATION.md). Falhas de rede, rotas
-desabilitadas e permissões são mostradas; não são contornadas pelo aplicativo.
+Falhas de rede, rotas desabilitadas e permissões são mostradas; não são contornadas pelo aplicativo. A execução por fases está em [IMPLEMENTATION.md](IMPLEMENTATION.md).
+
+
+## Administrar memória (v0.4)
+
+As operações abaixo ficam em **Administrar memória**. Selecione o projeto exato,
+prepare a ação, examine a prévia/evidências e digite a confirmação solicitada.
+Os campos ficam bloqueados enquanto há uma prévia aguardando decisão; **Cancelar
+e editar** permite alterá-los. Trocar aba/projeto cancela a prévia. Uma confirmação
+expira em cinco minutos e não pode ser reaproveitada após mudar a conexão.
+Salvar outra conexão fica indisponível durante uma operação administrativa.
+
+| Área | Operações e limites |
+| --- | --- |
+| Propostas | Filtrar pendentes/aprovadas/rejeitadas/conflitos/falhas, até 200; detalhes por ID; evidências, corpo e comparação antes de aprovar/rejeitar. O servidor verifica conflito da página ao aprovar. |
+| Handoffs | Histórico até 200, sem consumir; cancelamento de ID visível na lista de abertos; expiração por idade. Zero dias abrange todos os abertos próprios/compartilhados no projeto. |
+| Auditoria | Prévia com `dry_run=true` e `no_llm=true`; aplicação grava o relatório, sem LLM. |
+| Curadoria | Prévia somente leitura; aplicação cria proposta de relatório para revisão, sem autoaprovação. |
+| Retenção | Prévia da política do servidor; aplicação pode remover/compactar páginas e eventos. Faça backup antes. |
+| Embeddings | Prévia conta páginas sem chamar provider; aplicação no projeto selecionado, com opção de regenerar existentes. Pode gerar cobrança. |
+| Reconsolidação | ID explícito de sessão, prévia de admissão, execução com LLM. A API não recebe workspace/projeto: o servidor decide o destino a partir da sessão. A seleção do painel é apenas contexto. Confirme `SESSAO <id>` após conferir esse limite. |
+| Feedback | Útil/não ajudou/desatualizada/incorreta, caminho exato e motivo de até 500 caracteres. Aplica à versão atual; não há trava de versão oferecida por essa API. |
+| Checkpoints | Lista os últimos 100 da wiki inteira; criar checkpoint global com descrição. A prévia da criação é um plano local, sem execução no servidor. |
+| Restauração | Por ID de versão, compara a página atual com a versão escolhida; exige página atual legível. Por checkpoint Git, exige OID completo listado nos últimos 100; a API não fornece prévia do corpo dessa revisão. |
+
+Prévia não é transação ou reserva do estado. Outros agentes podem alterar dados
+antes da execução. A expiração de handoffs não tem dry-run nativo: a tela mostra
+uma amostra de até 200 abertos e a idade escolhida; o servidor reavalia o conjunto
+ao executar. Reconsolidação em dry-run não gera o texto final do LLM. Restauração
+não oferece condição por versão atual na API: evite edições concorrentes.
+
+Propostas dependem da política `require_approval` do servidor. O app não altera
+essa configuração nem usa `memory_auto_improve` como se tivesse dry-run: essa
+ferramenta rejeita os antigos campos de prévia. A revisão de propostas existentes
+é oferecida independentemente de como elas foram criadas.
+
+### Backup e exportação privada
+
+Informe um **arquivo novo com caminho absoluto** e prepare o download. Confirme
+`GLOBAL` para backup de toda a instalação, ou o projeto para exportar OKF.
+O backup inclui SQLite consistente, wiki com histórico e `config.toml` da área
+de dados; esse arquivo pode conter segredos. Não inclui todos os recursos externos
+(modelos, raw, logs e credenciais externas). OKF contém conhecimento do projeto,
+não substitui backup do banco. Checkpoint Git também não substitui esse backup.
+
+O app cria o arquivo com permissão `0600`, recusa sobrescrita e remove downloads
+incompletos quando ocorre falha. Limites: 2 GiB e cinco minutos; conteúdo é
+transferido em blocos, sem carregar o arquivo inteiro na memória. A assinatura
+gzip é conferida, mas isso **não é um teste de restauração**. A prévia do download
+é local; não produz o backup até a confirmação. Nunca publique esses arquivos.
+
+Restaurar um backup completo, resetar e reindexar continuam sendo operações
+offline do ai-memory, com o serviço parado. A v0.4 restaura páginas individuais.
+
+### Transporte e falhas administrativas
+
+Escritas HTTP e chamadas MCP usam um trabalhador dedicado, fila limitada e
+nenhuma repetição automática. Operações administrativas têm timeout de 120 s;
+downloads, 300 s. Uma demora pode continuar sendo processada no servidor depois
+do timeout ou de encerrar o app. **Consulte o estado antes de repetir.**
+
+O cliente MCP suporta respostas JSON e SSE, inicialização de sessão quando
+necessária, descarte ao trocar a conexão e encerramento do transporte stateful.
+Cancelar uma prévia não cancela uma escrita já enviada. Resultados e formulários
+permanecem em memória; só o download solicitado grava conteúdo em disco.
+
+Relatórios são apresentados como campos e listas navegáveis. Textos acima de
+100 KiB e estruturas muito profundas são sinalizados como parciais; consulte a
+fonte completa antes de aprovar conteúdo que exceda esses limites.

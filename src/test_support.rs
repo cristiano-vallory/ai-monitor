@@ -14,17 +14,20 @@ use std::{
 #[derive(Clone)]
 pub struct Request {
     pub path: String,
+    pub method: String,
+    pub headers: String,
+    pub body: serde_json::Value,
 }
 pub struct Response {
     pub status: u16,
-    pub body: String,
+    pub body: Vec<u8>,
     pub headers: Vec<(String, String)>,
 }
 impl Response {
     pub fn json(status: u16, value: serde_json::Value) -> Self {
         Self {
             status,
-            body: value.to_string(),
+            body: value.to_string().into_bytes(),
             headers: vec![],
         }
     }
@@ -68,14 +71,26 @@ impl Mock {
                     }
                 }
                 let header = String::from_utf8_lossy(&bytes);
+                let len = header
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                assert!(len < 8 * 1024 * 1024);
+                let mut body = vec![0; len];
+                let _ = stream.read_exact(&mut body);
                 let request = Request {
                     path: header.split_whitespace().nth(1).unwrap_or("").to_owned(),
+                    method: header.split_whitespace().next().unwrap_or("").into(),
+                    headers: header.to_string(),
+                    body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
                 };
                 captured.lock().unwrap().push(request.clone());
                 let response = handler(&request);
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nConnection: close\r\n",
+                    "HTTP/1.1 {} Test\r\nConnection: close\r\n",
                     response.status
                 );
                 if !response
@@ -88,7 +103,8 @@ impl Mock {
                 for (k, v) in response.headers {
                     let _ = write!(stream, "{k}: {v}\r\n");
                 }
-                let _ = write!(stream, "\r\n{}", response.body);
+                let _ = write!(stream, "\r\n");
+                let _ = stream.write_all(&response.body);
             }
         });
         Self {

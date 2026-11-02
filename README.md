@@ -8,9 +8,9 @@ Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. In
 
 ## Instalar sem compilar Rust
 
-A versão **0.3.0** acrescenta saúde interna, sessões detalhadas e navegação pelo conhecimento. Veja as [notas da atualização](docs/releases/v0.3.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
+A versão **0.4.0** acrescenta revisão de propostas, manutenção com prévia, backup privado e restauração. Veja as [notas da atualização](docs/releases/v0.4.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
 
-1. Baixe **AI-Monitor-0.3.0-macos-universal.dmg** na [release v0.3.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.3.0).
+1. Baixe **AI-Monitor-0.4.0-macos-universal.dmg** na [release v0.4.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.4.0).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
@@ -71,6 +71,7 @@ Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repo
 - **Sessões e handoffs:** handoffs abertos, resumos e próximos passos; sessões com agente, projeto, eventos, início e estado; projetos com contagens e última atividade. Pesquisa e filtro por projeto.
 - **Docker:** CPU/memória/tarefas por contêiner, estado, imagem, portas e I/O acumulado; imagens agrupadas por ID e associação aos contêineres; processos do Docker Desktop e ai-memory no Mac.
 - **Central ai-memory:** saúde interna, alertas, tokens, eventos pesquisáveis, wiki, histórico/diff e grafos de relações.
+- **Administrar memória:** propostas e evidências, handoffs, auditoria/curadoria/retenção/embeddings, reconsolidação, feedback, backup/OKF, checkpoints e restauração, com prévia e confirmação.
 - **Conexão:** servidor, token opcional, nome do contêiner, caminho do Docker CLI e intervalos.
 
 ## Conexão e coleta
@@ -97,7 +98,7 @@ Configurações são salvas em `~/Library/Application Support/AI Monitor/config.
 
 Os nomes das variáveis são públicos; **seus valores reais não devem ser versionados**. O app não carrega `.env`. Prefira o campo protegido da interface para informar o token. Aplicativos iniciados pelo Finder não herdam automaticamente variáveis do terminal. Veja [autenticação sem salvar segredos](INSTALL.md#autenticação-sem-salvar-segredos).
 
-Usa apenas leituras: `docker ps`, `stats --no-stream`, `image ls`, `container inspect --format '{{.Id}} {{.Image}}'` e `top`. Não solicita variáveis de ambiente dos contêineres por `inspect`. As consultas HTTP são `GET /identity`, `GET /api/v1/projects` e as rotas `/sessions`, `/handoffs?state=open` e `/briefing?limit=1` sob `/api/v1/workspaces/{workspace}/projects/{project}`. Não inicia/encerra contêineres, não remove imagens e não aceita handoffs. Não usa LLM nem ferramentas MCP para coletar dados.
+A coleta automática usa apenas leituras: `docker ps`, `stats --no-stream`, `image ls`, `container inspect --format '{{.Id}} {{.Image}}'`, `top` e rotas GET da API/saúde. Não solicita o ambiente dos contêineres, não aceita handoffs nem chama LLM para monitorar. As consultas manuais da Central incluem busca (que pode usar embeddings/reranking do servidor). **Administrar memória** oferece escritas HTTP/MCP somente após preparar e confirmar uma operação específica; embeddings e reconsolidação podem consumir providers. Veja o [guia administrativo](docs/ADMINISTRATION.md).
 
 Cada comando Docker tem timeout de 6 s e saída limitada a 16 MiB. Cada requisição HTTP tem timeout de 8 s, conexão de até 2 s e resposta limitada a 8 MiB, sem proxy. Após descobrir projetos e identidade, o coletor distribui projetos entre até quatro trabalhadores, com orçamento de 30 s; requisições em andamento podem terminar depois desse orçamento. Dados parciais e erros são sinalizados; falhas não viram medições zero. Trocar a conexão descarta respostas da configuração anterior.
 

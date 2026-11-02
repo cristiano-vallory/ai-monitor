@@ -893,37 +893,59 @@ fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
         });
     }
 }
-fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
-    if depth > 6 {
+pub(crate) fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
+    if depth > 10 {
+        ui.small(
+            "Conteúdo aninhado além do limite de visualização; consulte a fonte antes de aprovar.",
+        );
         return;
     }
     match value {
         Value::Object(map) => {
-            for (key, v) in map {
+            for (key, v) in map.iter().take(200) {
                 if v.is_object() || v.is_array() {
-                    egui::CollapsingHeader::new(key)
-                        .id_salt((depth, key))
-                        .show(ui, |ui| show_values(ui, v, depth + 1));
+                    ui.push_id(key, |ui| {
+                        egui::CollapsingHeader::new(key)
+                            .default_open(depth < 2)
+                            .show(ui, |ui| show_values(ui, v, depth + 1));
+                    });
                 } else {
-                    ui.label(format!(
-                        "{key}: {}",
-                        v.as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| v.to_string())
-                    ));
+                    let value = v
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string());
+                    ui.add(
+                        egui::Label::new(format!("{key}: {}", bounded_text(&value, 100_000)))
+                            .wrap()
+                            .selectable(true),
+                    );
+                    if value.len() > 100_000 {
+                        ui.small("Conteúdo exibido parcialmente (100 KiB).");
+                    }
                 }
             }
         }
         Value::Array(rows) => {
-            for (i, v) in rows.iter().take(200).enumerate() {
-                ui.push_id(i, |ui| show_values(ui, v, depth + 1));
+            let range = local_page(ui, rows.len());
+            for i in range {
+                ui.push_id(i, |ui| {
+                    ui.separator();
+                    show_values(ui, &rows[i], depth + 1);
+                });
             }
         }
         v => {
-            ui.label(
-                v.as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| v.to_string()),
+            let label = v
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string());
+            if label.len() > 100_000 {
+                ui.small("Conteúdo exibido parcialmente (100 KiB).");
+            }
+            ui.add(
+                egui::Label::new(bounded_text(&label, 100_000))
+                    .wrap()
+                    .selectable(true),
             );
         }
     }
