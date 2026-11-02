@@ -1,0 +1,42 @@
+/target/
+/dist/
+.DS_Store
+/artifacts/
+
+# Local credentials and machine-specific settings (never publish).
+.env
+.env.*
+.envrc
+/.cargo/config
+/.cargo/config.toml
+/.cargo/credentials*
+/config.json
+/config.*.json
+*.local
+*.local.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+/secrets/
+/credentials/
+
+# Diagnostics and local data can contain project names, ports and handoffs.
+/data/
+/logs/
+/backups/
+/screenshots/
+*.log
+*.jsonl
+*.sqlite*
+*.db
+*.db-*
+*.zip
+*.dmg
+
+# Editor state.
+/.idea/
+/.vscode/
+*.swp
+*~
