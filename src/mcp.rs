@@ -76,7 +76,6 @@ impl Connection {
             .header("Accept", "application/json, text/event-stream")
             .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ai-monitor","version":env!("CARGO_PKG_VERSION")}}}))
             .send().map_err(|_|Error::Unavailable)?;
-        check_status(&init)?;
         let session = init.headers().get("mcp-session-id").cloned();
         let mut protocol: Option<String> = None;
         let result = (|| {
@@ -348,5 +347,63 @@ mod transport_tests {
                     .contains("mcp-session-id: leak-check-2")),
             "stateful session must be closed with DELETE even when initialize body is unparseable"
         );
+    }
+
+    #[test]
+    fn rejected_initialize_closes_session_and_preserves_original_error() {
+        for (status, expected) in [
+            (302, Error::Http(302)),
+            (401, Error::Authentication),
+            (403, Error::Forbidden),
+            (404, Error::Missing),
+            (409, Error::Conflict),
+            (412, Error::Conflict),
+            (429, Error::RateLimited),
+            (500, Error::Http(500)),
+        ] {
+            for session in [false, true] {
+                for cleanup_status in [200, 500] {
+                    let mock = Mock::new(move |request| {
+                        if request.method == "DELETE" {
+                            return Response::json(cleanup_status, json!({}));
+                        }
+                        Response {
+                            status,
+                            body: b"private invalid initialize response".to_vec(),
+                            headers: if session {
+                                vec![("Mcp-Session-Id".into(), "rejected-session".into())]
+                            } else {
+                                vec![]
+                            },
+                        }
+                    });
+                    assert_eq!(
+                        Connection::new(&mock.config()).unwrap().tool(
+                            "memory_feedback",
+                            &json!({}),
+                            || false
+                        ),
+                        Err(expected.clone()),
+                        "HTTP {status}, session={session}, cleanup HTTP {cleanup_status}"
+                    );
+                    let requests = mock.requests();
+                    assert_eq!(
+                        requests.len(),
+                        if session { 2 } else { 1 },
+                        "cleanup must run once, only with a session: HTTP {status}"
+                    );
+                    assert_eq!(requests[0].method, "POST");
+                    assert_eq!(requests[0].body["method"], "initialize");
+                    if session {
+                        let delete = &requests[1];
+                        assert_eq!(delete.method, "DELETE");
+                        assert_eq!(delete.path, "/mcp");
+                        let headers = delete.headers.to_lowercase();
+                        assert!(headers.contains("mcp-session-id: rejected-session"));
+                        assert!(!headers.contains("mcp-protocol-version"));
+                    }
+                }
+            }
+        }
     }
 }

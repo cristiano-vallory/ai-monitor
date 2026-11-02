@@ -621,20 +621,33 @@ pub fn concealed(value: &Value) -> Value {
                         ]
                         .iter()
                         .any(|w| name.ends_with(w));
-                    let counter = v.is_number()
-                        && (name.ends_with("tokens")
-                            || [
-                                "count", "total", "limit", "used", "usage", "budget", "max", "min",
-                            ]
-                            .iter()
-                            .any(|w| name.contains(w)));
-                    if !named_secret && name.contains("prefix") && v.is_string() {
+                    let alias = name.trim_start_matches("prefix").trim_end_matches("prefix");
+                    let explicit_secret = ["sessionkey", "passkey", "jwt", "signature"]
+                        .iter()
+                        .any(|word| alias.ends_with(word));
+                    // These generic names also label inventory containers; keep their
+                    // object fields, but hide scalars (including nested arrays).
+                    let alias_secret = matches!(
+                        alias,
+                        "credential" | "private" | "auth" | "session" | "sessionid"
+                    );
+                    let counter = v.is_number() && counter_name(k);
+                    if !named_secret
+                        && !explicit_secret
+                        && !alias_secret
+                        && name.contains("prefix")
+                        && v.is_string()
+                    {
                         return (k.clone(), v.clone());
                     }
-                    let secret_key = named_secret && !v.is_null() && !v.is_boolean() && !counter;
+                    let secret_key = (explicit_secret || named_secret && !counter)
+                        && !v.is_null()
+                        && !v.is_boolean();
                     (
                         k.clone(),
-                        if secret_key {
+                        if alias_secret && !counter {
+                            concealed_alias(v)
+                        } else if secret_key {
                             json!("[oculto]")
                         } else {
                             concealed(v)
@@ -647,6 +660,47 @@ pub fn concealed(value: &Value) -> Value {
         Value::String(s) if s.starts_with("aim_") => json!("[oculto]"),
         _ => value.clone(),
     }
+}
+
+fn concealed_alias(value: &Value) -> Value {
+    match value {
+        Value::Object(_) => concealed(value),
+        Value::Array(values) => Value::Array(values.iter().map(concealed_alias).collect()),
+        Value::Null | Value::Bool(_) => value.clone(),
+        _ => json!("[oculto]"),
+    }
+}
+
+fn counter_name(name: &str) -> bool {
+    // Match whole snake/kebab/camel-case words, never the "min" in "admin"
+    // or "count" in "account".
+    let mut words = String::new();
+    let mut chars = name.chars().peekable();
+    let mut previous: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if c.is_ascii_uppercase()
+            && previous.is_some_and(|p| {
+                p.is_ascii_lowercase()
+                    || p.is_ascii_digit()
+                    || (p.is_ascii_uppercase()
+                        && chars.peek().is_some_and(char::is_ascii_lowercase))
+            })
+        {
+            words.push(' ');
+        }
+        words.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            ' '
+        });
+        previous = Some(c);
+    }
+    words.split_whitespace().any(|word| {
+        matches!(
+            word,
+            "tokens" | "count" | "total" | "limit" | "used" | "usage" | "budget" | "max" | "min"
+        )
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -732,6 +786,184 @@ mod tests {
         o.values
             .insert("to_workspace".into(), o.s("workspace").into());
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn send_message_transmits_filled_optionals_and_omits_blank_ones() {
+        let mock = Mock::new(|_| Response::json(200, json!({"sent": true})));
+        let connection = Connection::new(&mock.config()).unwrap();
+        for (subject, evidence) in [(" assunto ", " evidência "), ("", ""), ("   ", "   ")] {
+            let mut message = op(SendMessage);
+            message.values.insert("subject".into(), subject.into());
+            message.values.insert("evidence".into(), evidence.into());
+            message.values.insert(
+                "nature".into(),
+                if evidence.trim().is_empty() {
+                    "unknown"
+                } else {
+                    "measured"
+                }
+                .into(),
+            );
+            assert_eq!(
+                message.execute(&connection, false).unwrap(),
+                json!({"sent": true})
+            );
+        }
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/admin/messages/send");
+            assert_eq!(request.body["body"], "synthetic-body");
+            assert_eq!(request.body["from_workspace"], "synthetic-workspace");
+            assert_eq!(request.body["to_project"], "synthetic-to_project");
+        }
+        assert_eq!(requests[0].body["subject"], "assunto");
+        assert_eq!(requests[0].body["evidence"], "evidência");
+        assert_eq!(requests[0].body["nature"], "measured");
+        for request in &requests[1..] {
+            assert!(request.body.get("subject").is_none());
+            assert!(request.body.get("evidence").is_none());
+        }
+    }
+
+    #[test]
+    fn concealed_masks_secret_aliases_without_hiding_inventory() {
+        for key in [
+            "session_key",
+            "sessionKey",
+            "SESSION-KEY",
+            "user_session_key",
+            "passkey",
+            "Pass-Key",
+            "credential",
+            "private",
+            "auth",
+            "jwt",
+            "signature",
+            "session",
+            "sessionid",
+            "SESSION_ID",
+            "auth_prefix",
+            "prefix_auth",
+            "credential_prefix",
+            "private_prefix",
+            "jwt_prefix",
+            "signature_prefix",
+            "session_prefix",
+            "session_id_prefix",
+        ] {
+            for value in [json!("raw-secret"), json!(""), json!(0), json!(123456)] {
+                let input = json!({"rows": [{key: value}]});
+                assert_eq!(concealed(&input)["rows"][0][key], "[oculto]", "{key}");
+            }
+            for value in [Value::Null, json!(true), json!(false)] {
+                assert_eq!(concealed(&json!({key: value}))[key], value, "{key}");
+            }
+            let unambiguous = [
+                "session_key",
+                "sessionKey",
+                "SESSION-KEY",
+                "user_session_key",
+                "passkey",
+                "Pass-Key",
+                "jwt",
+                "signature",
+                "jwt_prefix",
+                "signature_prefix",
+            ]
+            .contains(&key);
+            let array_expected = if unambiguous {
+                json!("[oculto]")
+            } else {
+                json!(["[oculto]", ["[oculto]", null, true], {"id": "row", "token": "[oculto]"}])
+            };
+            assert_eq!(
+                concealed(
+                    &json!({key: ["array-secret", [123456, null, true], {"id": "row", "token": "nested-secret"}]})
+                )[key],
+                array_expected,
+                "{key} array scalars must remain concealed"
+            );
+            if unambiguous {
+                assert_eq!(
+                    concealed(&json!({key: {"value": "raw-secret"}}))[key],
+                    "[oculto]",
+                    "{key} object holds secret material"
+                );
+            }
+        }
+        let inventory = json!({
+            "credentials": [{"id": "key-1", "key_prefix": "aim_ab12", "credential": "raw-secret"}],
+            "credential": {"id": "key-2", "token": "raw-secret"},
+            "auth": {"method": "password", "jwt": "raw-secret"},
+            "session": {"id": "row-1", "passkey": "raw-secret"},
+            "private": {"enabled": true, "signature": "raw-secret"},
+            "credential_id": "key-1", "auth_method": "bearer", "session_count": 12,
+            "jwt_count": 2, "signature_count": 3, "passkey_count": 4,
+            "session_key_count": 5, "key_prefix": "aim_ab12", "author": "public author"
+        });
+        let masked = concealed(&inventory);
+        assert_eq!(masked["credentials"][0]["credential"], "[oculto]");
+        assert_eq!(masked["credentials"][0]["id"], "key-1");
+        assert_eq!(masked["credentials"][0]["key_prefix"], "aim_ab12");
+        assert_eq!(masked["credential"]["token"], "[oculto]");
+        assert_eq!(masked["credential"]["id"], "key-2");
+        assert_eq!(masked["auth"]["jwt"], "[oculto]");
+        assert_eq!(masked["auth"]["method"], "password");
+        assert_eq!(masked["session"]["passkey"], "[oculto]");
+        assert_eq!(masked["session"]["id"], "row-1");
+        assert_eq!(masked["private"]["signature"], "[oculto]");
+        assert_eq!(masked["private"]["enabled"], true);
+        for key in [
+            "credential_id",
+            "auth_method",
+            "session_count",
+            "jwt_count",
+            "signature_count",
+            "passkey_count",
+            "session_key_count",
+            "key_prefix",
+            "author",
+        ] {
+            assert_eq!(masked[key], inventory[key], "{key}");
+        }
+    }
+
+    #[test]
+    fn concealed_numeric_secrets_require_whole_counter_words() {
+        for key in [
+            "admin_token",
+            "admin_signature",
+            "account_token",
+            "token_admin",
+            "accountToken",
+            "adminToken",
+            "session_key",
+        ] {
+            assert_eq!(
+                concealed(&json!({key: 123456}))[key],
+                "[oculto]",
+                "{key} is not a counter"
+            );
+        }
+        for key in [
+            "input_tokens",
+            "max_tokens",
+            "token_count",
+            "TOKEN_COUNT",
+            "tokenCount",
+            "tokenTotal",
+            "token_limit",
+            "token_used",
+            "tokenUsage",
+            "token_budget",
+            "minToken",
+            "maximum_tokens",
+        ] {
+            assert_eq!(concealed(&json!({key: 42}))[key], 42, "{key} is a counter");
+        }
     }
 
     #[test]
