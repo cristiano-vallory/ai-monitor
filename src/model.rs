@@ -40,22 +40,52 @@ impl Config {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
             .join("Library/Application Support/AI Monitor/config.json")
     }
+    pub fn normalize(&mut self) {
+        self.endpoint = self.endpoint.trim().into();
+        self.token = self.token.trim().into();
+        self.container = self.container.trim().into();
+        self.docker_binary = self.docker_binary.trim().into();
+    }
+    pub fn from_sources(
+        disk: Option<&[u8]>,
+        env_url: Option<String>,
+        env_token: Option<String>,
+    ) -> Self {
+        let token = env_token.unwrap_or_default().trim().to_owned();
+        let disk_cfg: Option<Self> = disk.and_then(|b| serde_json::from_slice(b).ok());
+        for base in [disk_cfg, Some(Self::default())].into_iter().flatten() {
+            if let Some(url) = &env_url {
+                let mut candidate = base.clone();
+                candidate.endpoint = url.clone();
+                candidate.token = token.clone();
+                candidate.normalize();
+                if candidate.validate().is_ok() {
+                    return candidate;
+                }
+            }
+            let mut candidate = base;
+            candidate.token = token.clone();
+            candidate.normalize();
+            if candidate.validate().is_ok() {
+                return candidate;
+            }
+        }
+        Self {
+            token,
+            ..Self::default()
+        }
+    }
     pub fn load() -> Self {
-        let mut config: Self = std::fs::read(Self::path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        if let Ok(url) = std::env::var("AI_MEMORY_SERVER_URL") {
-            config.endpoint = url;
-        }
-        config.token = std::env::var("AI_MEMORY_AUTH_TOKEN").unwrap_or_default();
-        if config.validate().is_err() {
-            return Self::default();
-        }
-        config
+        Self::from_sources(
+            std::fs::read(Self::path()).ok().as_deref(),
+            std::env::var("AI_MEMORY_SERVER_URL").ok(),
+            std::env::var("AI_MEMORY_AUTH_TOKEN").ok(),
+        )
     }
     pub fn validate(&self) -> Result<(), String> {
-        let url = reqwest::Url::parse(&self.endpoint).map_err(|_| "URL do servidor inválida.")?;
+        let endpoint = self.endpoint.trim();
+        let token = self.token.trim();
+        let url = reqwest::Url::parse(endpoint).map_err(|_| "URL do servidor inválida.")?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -65,14 +95,18 @@ impl Config {
         {
             return Err("Use uma URL HTTP(S), sem credenciais, query ou fragmento.".into());
         }
-        if !self.token.is_empty()
+        if !token.is_empty()
             && url.scheme() == "http"
             && !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
         {
             return Err("Use HTTPS para enviar um token a um servidor remoto.".into());
         }
-        if self.container.trim().is_empty() || self.docker_binary.trim().is_empty() {
-            return Err("Informe o contêiner e o executável do Docker.".into());
+        if self.container.trim().is_empty()
+            || self.container.trim().starts_with('-')
+            || self.docker_binary.trim().is_empty()
+            || self.docker_binary.trim().starts_with('-')
+        {
+            return Err("Informe um contêiner e um executável do Docker válidos.".into());
         }
         if !(1..=60).contains(&self.resource_seconds) || !(5..=300).contains(&self.api_seconds) {
             return Err("Recursos: 1–60 s. API: 5–300 s.".into());
@@ -80,11 +114,37 @@ impl Config {
         Ok(())
     }
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path();
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self).unwrap())
-            .map_err(|e| e.to_string())?;
+        self.save_to(&Self::path())
+    }
+    pub fn save_to(&self, path: &std::path::Path) -> Result<(), String> {
+        let Some(parent) = path.parent().filter(|_| path.is_absolute()) else {
+            return Err("Diretório HOME indisponível para salvar a configuração.".into());
+        };
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        let mut normalized = self.clone();
+        normalized.normalize();
+        let bytes = serde_json::to_vec_pretty(&normalized).unwrap();
+        #[cfg(unix)]
+        {
+            use std::{
+                io::Write,
+                os::unix::fs::{OpenOptionsExt, PermissionsExt},
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&tmp)
+                .map_err(|e| e.to_string())?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(unix))]
+        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
         std::fs::rename(tmp, path).map_err(|e| e.to_string())
     }
 }
@@ -170,7 +230,10 @@ impl ResourceSnapshot {
     }
     pub fn ai_usage(&self, name: &str) -> Option<Usage> {
         if self.docker_error.is_none()
-            && let Some(c) = self.containers.iter().find(|c| c.name == name)
+            && let Some(c) = self
+                .containers
+                .iter()
+                .find(|c| c.name == name && c.state == "running")
         {
             return c.usage.clone();
         }
@@ -319,5 +382,99 @@ mod tests {
         assert_eq!(s.docker_total().unwrap().cpu, 250.);
         s.docker_error = Some("Offline".into());
         assert!(s.docker_total().is_none());
+    }
+
+    #[test]
+    fn exited_container_falls_back_to_native_ai_memory_while_running_container_takes_precedence() {
+        let mut s = ResourceSnapshot {
+            at: Some(Utc::now()),
+            containers: vec![Container {
+                name: "ai-memory".into(),
+                state: "exited".into(),
+                usage: None,
+                ..Default::default()
+            }],
+            processes: vec![HostProcess {
+                pid: 42,
+                name: "ai-memory".into(),
+                group: "ai-memory".into(),
+                usage: Usage {
+                    cpu: 42.5,
+                    memory: 2048,
+                    tasks: Some(4),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let fallback = s
+            .ai_usage("ai-memory")
+            .expect("exited container must not block native ai-memory fallback");
+        assert_eq!(fallback.cpu, 42.5);
+        assert_eq!(fallback.memory, 2048);
+        assert_eq!(fallback.tasks, Some(4));
+
+        // When the container is actually running, it takes precedence over host processes.
+        s.containers[0].state = "running".into();
+        assert!(s.ai_usage("ai-memory").is_none());
+        s.containers[0].usage = Some(Usage {
+            cpu: 110.0,
+            memory: 4096,
+            tasks: Some(9),
+            ..Default::default()
+        });
+        assert_eq!(s.ai_usage("ai-memory").unwrap().cpu, 110.0);
+    }
+
+    #[test]
+    fn config_preserves_env_overrides_when_disk_is_invalid_and_trims_fields() {
+        // Invalid resource_seconds on disk must not wipe out valid env URL and token.
+        let loaded = Config::from_sources(
+            Some(br#"{"resource_seconds":0,"endpoint":"http://remote.example.com"}"#),
+            Some("  https://example.com  ".into()),
+            Some("  synthetic-env-token  ".into()),
+        );
+        assert_eq!(loaded.endpoint, "https://example.com");
+        assert_eq!(loaded.token, "synthetic-env-token");
+        assert_eq!(loaded.resource_seconds, 2);
+
+        // Remote HTTP on disk (valid without token) must fall back to loopback default
+        // without dropping the environment bearer token.
+        let loaded = Config::from_sources(
+            Some(br#"{"endpoint":"http://remote.example.com:49374"}"#),
+            None,
+            Some("synthetic-env-token".into()),
+        );
+        assert_eq!(loaded.endpoint, "http://127.0.0.1:49374");
+        assert_eq!(loaded.token, "synthetic-env-token");
+
+        // Invalid endpoint on disk overridden by valid AI_MEMORY_SERVER_URL preserves other valid disk settings.
+        let loaded = Config::from_sources(
+            Some(br#"{"endpoint":"not-a-url","container":"custom-ai","resource_seconds":5}"#),
+            Some("https://example.com".into()),
+            Some("synthetic-env-token".into()),
+        );
+        assert_eq!(loaded.endpoint, "https://example.com");
+        assert_eq!(loaded.container, "custom-ai");
+        assert_eq!(loaded.resource_seconds, 5);
+        assert_eq!(loaded.token, "synthetic-env-token");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_restricts_permissions_and_rejects_relative_path() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            Config::default()
+                .save_to(std::path::Path::new("relative/config.json"))
+                .is_err()
+        );
+        let dir = std::env::temp_dir().join(format!("ai-monitor-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        Config::default().save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600);
     }
 }

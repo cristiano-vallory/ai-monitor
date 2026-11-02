@@ -33,6 +33,13 @@ impl Shared {
         let resources = shared.clone();
         thread::spawn(move || {
             let mut system = System::new();
+            system.refresh_cpu_usage();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().with_cpu(),
+            );
+            thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
             let mut images = Vec::new();
             let mut images_at = None;
             let mut image_ids = std::collections::HashMap::new();
@@ -63,7 +70,12 @@ impl Shared {
                             .containers
                             .iter()
                             .any(|c| !image_ids.contains_key(&c.id));
-                    if Instant::now() >= next_inventory || inventory_changed {
+                    if should_poll_inventory(
+                        Instant::now(),
+                        next_inventory,
+                        inventory_changed,
+                        inventory_error.is_some(),
+                    ) {
                         match docker::images(&config.docker_binary, &mut snapshot.containers) {
                             Ok(new_images) => {
                                 images = new_images;
@@ -82,19 +94,11 @@ impl Shared {
                     snapshot.images = images.clone();
                     snapshot.images_at = images_at;
                     snapshot.inventory_error = inventory_error.clone();
-                    for c in &mut snapshot.containers {
-                        if let Some(id) = image_ids.get(&c.id) {
-                            c.image_id = id.clone();
-                        }
-                    }
-                    // Refresh running state even between full image inventory polls.
-                    for image in &mut snapshot.images {
-                        image.running = snapshot
-                            .containers
-                            .iter()
-                            .filter(|c| c.image_id == image.id && c.state == "running")
-                            .count();
-                    }
+                    refresh_running_images(
+                        &mut snapshot.containers,
+                        &mut snapshot.images,
+                        &image_ids,
+                    );
                 }
                 {
                     let mut target = resources.resources.lock().unwrap();
@@ -129,7 +133,10 @@ impl Shared {
                     let config = server.config.read().unwrap();
                     (server.generation.load(Ordering::Acquire), config.clone())
                 };
-                let snapshot = api::collect(&config, &server.stop);
+                let snapshot = api::collect_until(&config, || {
+                    server.stop.load(Ordering::Relaxed)
+                        || server.generation.load(Ordering::Acquire) != generation
+                });
                 {
                     let mut target = server.api.lock().unwrap();
                     if server.generation.load(Ordering::Acquire) == generation {
@@ -172,7 +179,6 @@ pub fn sample_resources(config: &Config, system: &mut System) -> ResourceSnapsho
             .with_exe(UpdateKind::OnlyIfNotSet),
     );
     let mut result = ResourceSnapshot {
-        at: Some(Utc::now()),
         host_cpu: system.global_cpu_usage(),
         host_memory: system.used_memory(),
         host_total: system.total_memory(),
@@ -252,4 +258,92 @@ fn thread_count(pid: u32) -> Option<u64> {
 #[cfg(not(target_os = "macos"))]
 fn thread_count(_: u32) -> Option<u64> {
     None
+}
+
+pub fn should_poll_inventory(
+    now: Instant,
+    next_inventory: Instant,
+    inventory_changed: bool,
+    has_error: bool,
+) -> bool {
+    now >= next_inventory || (inventory_changed && !has_error)
+}
+
+pub fn refresh_running_images(
+    containers: &mut [Container],
+    images: &mut [DockerImage],
+    image_ids: &std::collections::HashMap<String, String>,
+) {
+    for c in containers.iter_mut() {
+        c.image_id = image_ids.get(&c.id).cloned().unwrap_or_default();
+    }
+    for image in images.iter_mut() {
+        image.running = containers
+            .iter()
+            .filter(|c| c.image_id == image.id && c.state == "running")
+            .count();
+    }
+    docker::sort_images(images);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refreshing_running_state_between_inventory_polls_resorts_images_and_clears_uncommitted_ids()
+    {
+        let mut containers = vec![
+            Container {
+                id: "c1".into(),
+                name: "one".into(),
+                state: "exited".into(),
+                ..Default::default()
+            },
+            Container {
+                id: "c2".into(),
+                name: "two".into(),
+                state: "running".into(),
+                image_id: "sha256:uncommitted".into(),
+                ..Default::default()
+            },
+        ];
+        let mut images = vec![
+            DockerImage {
+                id: "sha256:img-a".into(),
+                size: 100,
+                containers: vec!["one".into()],
+                running: 1,
+                ..Default::default()
+            },
+            DockerImage {
+                id: "sha256:img-b".into(),
+                size: 200,
+                containers: vec!["two".into()],
+                running: 0,
+                ..Default::default()
+            },
+        ];
+        let image_ids = std::collections::HashMap::from([
+            ("c1".into(), "sha256:img-a".into()),
+            ("c2".into(), "sha256:img-b".into()),
+        ]);
+        refresh_running_images(&mut containers, &mut images, &image_ids);
+        assert_eq!(containers[1].image_id, "sha256:img-b");
+        assert_eq!(
+            images[0].id, "sha256:img-b",
+            "newly running image must sort ahead of stopped image between 15s polls"
+        );
+        assert_eq!(images[0].running, 1);
+        assert_eq!(images[1].running, 0);
+
+        let now = Instant::now();
+        let future = now + Duration::from_secs(15);
+        assert!(should_poll_inventory(now, future, true, false));
+        assert!(
+            !should_poll_inventory(now, future, true, true),
+            "inventory error must enforce backoff until next_inventory"
+        );
+        assert!(should_poll_inventory(future, future, true, true));
+    }
 }

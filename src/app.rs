@@ -113,10 +113,12 @@ impl MonitorApp {
             return;
         }
         self.last_sync = Instant::now();
+        let mut resources_changed = false;
         {
             let incoming = self.shared.resources.lock().unwrap();
             if incoming.at != self.resources.at {
                 self.resources = incoming.clone();
+                resources_changed = true;
             }
         }
         {
@@ -125,7 +127,9 @@ impl MonitorApp {
                 self.api = incoming.clone();
             }
         }
-        self.history = self.shared.history.lock().unwrap().clone();
+        if resources_changed || self.history.is_empty() {
+            self.history = self.shared.history.lock().unwrap().clone();
+        }
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
@@ -240,6 +244,9 @@ impl MonitorApp {
                     .clicked()
                 {
                     self.paused = !self.paused;
+                    if !self.paused {
+                        self.last_sync = Instant::now() - Duration::from_secs(1);
+                    }
                 }
                 badge(
                     ui,
@@ -354,9 +361,24 @@ impl MonitorApp {
                 }
             });
         });
+        let interval = self.config.resource_seconds;
         ui.columns(2, |cols| {
-            chart(&mut cols[0], "CPU", &self.history, self.minutes, false);
-            chart(&mut cols[1], "Memória", &self.history, self.minutes, true);
+            chart(
+                &mut cols[0],
+                "CPU",
+                &self.history,
+                self.minutes,
+                false,
+                interval,
+            );
+            chart(
+                &mut cols[1],
+                "Memória",
+                &self.history,
+                self.minutes,
+                true,
+                interval,
+            );
         });
         ui.add_space(14.);
         let total = self.resources.docker_total();
@@ -418,7 +440,12 @@ impl MonitorApp {
             .iter()
             .filter(|c| c.state == "running")
             .collect();
+        let prev_selected = self.selected_container.clone();
         container_table(ui, &running, &mut self.selected_container, 180.);
+        if self.selected_container != prev_selected && self.selected_container.is_some() {
+            self.page = Page::Docker;
+            self.docker_tab = 0;
+        }
         ui.add_space(16.);
         panel().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -496,13 +523,9 @@ impl MonitorApp {
             );
             if !self.api.warnings.is_empty() {
                 ui.label(
-                    RichText::new(format!(
-                        "Lista: {} handoffs carregados de {} abertos. Até 200 por projeto.",
-                        number(self.api.handoffs.len()),
-                        self.api
-                            .handoff_total
-                            .map(number)
-                            .unwrap_or("total indisponível".into())
+                    RichText::new(handoff_warning_message(
+                        self.api.handoffs.len(),
+                        self.api.handoff_total,
                     ))
                     .color(AMBER),
                 );
@@ -511,18 +534,7 @@ impl MonitorApp {
                 .api
                 .handoffs
                 .iter()
-                .filter(|h| {
-                    (self.scope.is_empty() || h.scope == self.scope)
-                        && format!(
-                            "{} {} {} {}",
-                            h.scope,
-                            h.agent,
-                            h.id,
-                            h.summary.as_deref().unwrap_or("")
-                        )
-                        .to_lowercase()
-                        .contains(&needle)
-                })
+                .filter(|h| handoff_matches(h, &self.scope, &needle))
                 .collect();
             if hs.is_empty() {
                 empty(
@@ -794,10 +806,9 @@ impl MonitorApp {
                 })
                 .collect();
             container_table(ui, &cs, &mut self.selected_container, 420.);
-            if let Some(c) = self
-                .resources
-                .containers
+            if let Some(c) = cs
                 .iter()
+                .copied()
                 .find(|c| Some(&c.id) == self.selected_container.as_ref())
             {
                 ui.add_space(10.);
@@ -927,7 +938,7 @@ impl MonitorApp {
                         .resources
                         .processes
                         .iter()
-                        .filter(|p| p.name.to_lowercase().contains(&needle))
+                        .filter(|p| process_matches(p, &needle))
                     {
                         body.row(36., |mut row| {
                             row.col(|ui| {
@@ -965,12 +976,13 @@ impl MonitorApp {
             ui.add_space(12.);ui.label(RichText::new("O token fica somente na memória deste app. Também é possível fornecer AI_MEMORY_AUTH_TOKEN ao iniciar pelo terminal.").small().color(MUTED));
             ui.horizontal(|ui| {
                 if ui.button(RichText::new("Salvar e conectar").color(GREEN)).clicked() {
+                    self.draft.normalize();
                     match self.draft.validate().and_then(|_|self.draft.save()) {
-                        Ok(())=> {self.config=self.draft.clone();self.shared.apply(self.config.clone());self.history.clear();self.resources=Default::default();self.api=Default::default();self.paused=false;self.settings_message="Configuração salva. Reconectando…".into();},
+                        Ok(())=> {self.config=self.draft.clone();self.shared.apply(self.config.clone());self.history.clear();self.resources=Default::default();self.api=Default::default();self.scope.clear();self.selected_container=None;self.handoff_page=0;self.paused=false;self.last_sync=Instant::now()-Duration::from_secs(1);self.settings_message="Configuração salva. Reconectando…".into();},
                         Err(e)=>self.settings_message=e,
                     }
                 }
-                if ui.button("Restaurar campos padrão").clicked(){self.draft=Config::default();}
+                if ui.button("Restaurar campos padrão").clicked(){self.draft=Config::default();self.settings_message="Campos restaurados ao padrão. Clique em Salvar e conectar para aplicar.".into();}
             });
             if !self.settings_message.is_empty(){ui.label(&self.settings_message);}
         });
@@ -1110,11 +1122,7 @@ fn short_id(id: &str) -> String {
     id.chars().take(18).collect()
 }
 fn short_project(s: &str) -> &str {
-    s.split(" / ")
-        .last()
-        .unwrap_or(s)
-        .strip_prefix("cristiano-vallory-")
-        .unwrap_or(s.split(" / ").last().unwrap_or(s))
+    s.split(" / ").last().unwrap_or(s)
 }
 
 fn container_table(
@@ -1207,7 +1215,14 @@ fn container_table(
         });
 }
 
-fn chart(ui: &mut egui::Ui, title: &str, history: &VecDeque<Sample>, minutes: i64, memory: bool) {
+fn chart(
+    ui: &mut egui::Ui,
+    title: &str,
+    history: &VecDeque<Sample>,
+    minutes: i64,
+    memory: bool,
+    resource_seconds: u64,
+) {
     panel().show(ui, |ui| {
         ui.horizontal(|ui| {
             section(ui, title);
@@ -1253,37 +1268,15 @@ fn chart(ui: &mut egui::Ui, title: &str, history: &VecDeque<Sample>, minutes: i6
                 MUTED,
             );
         }
+        let plot_painter = painter.with_clip_rect(plot.expand(4.));
         for (ai, color) in [(false, BLUE), (true, GREEN)] {
-            let mut points = Vec::new();
-            let mut previous = None;
-            for s in history.iter().filter(|s| s.at >= start) {
-                let usage = if ai { s.ai.as_ref() } else { s.docker.as_ref() };
-                if previous.is_some_and(|at: DateTime<Utc>| (s.at - at).num_seconds() > 65)
-                    || usage.is_none()
-                {
-                    if points.len() > 1 {
-                        painter.add(egui::Shape::line(
-                            std::mem::take(&mut points),
-                            Stroke::new(2.0_f32, color),
-                        ));
-                    } else {
-                        points.clear();
-                    }
-                }
-                if let Some(u) = usage {
-                    let x = plot.left()
-                        + plot.width()
-                            * ((s.at - start).num_milliseconds() as f32
-                                / (minutes * 60 * 1000) as f32);
-                    let y = plot.bottom() - plot.height() * (value(u) / max) as f32;
-                    points.push(egui::pos2(x, y));
-                }
-                previous = Some(s.at);
+            let (lines, dots) =
+                chart_segments(history, minutes, max, memory, ai, resource_seconds, plot);
+            for pts in lines {
+                plot_painter.add(egui::Shape::line(pts, Stroke::new(2.0_f32, color)));
             }
-            if points.len() > 1 {
-                painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, color)));
-            } else if let Some(p) = points.first() {
-                painter.circle_filled(*p, 3., color);
+            for pt in dots {
+                plot_painter.circle_filled(pt, 3., color);
             }
         }
         if history.is_empty() {
@@ -1306,4 +1299,196 @@ fn chart(ui: &mut egui::Ui, title: &str, history: &VecDeque<Sample>, minutes: i6
             });
         });
     });
+}
+
+fn chart_segments(
+    history: &VecDeque<Sample>,
+    minutes: i64,
+    max: f64,
+    memory: bool,
+    ai: bool,
+    resource_seconds: u64,
+    plot: egui::Rect,
+) -> (Vec<Vec<egui::Pos2>>, Vec<egui::Pos2>) {
+    let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
+    let start = end - chrono::Duration::minutes(minutes);
+    let value = |u: &Usage| {
+        if memory {
+            u.memory as f64 / (1u64 << 20) as f64
+        } else {
+            u.cpu
+        }
+    };
+    let gap_limit = (resource_seconds.saturating_mul(3).max(65)) as i64;
+    let mut lines = Vec::new();
+    let mut dots = Vec::new();
+    let mut points = Vec::new();
+    let mut previous = None;
+    for s in history.iter().filter(|s| s.at >= start) {
+        let usage = if ai { s.ai.as_ref() } else { s.docker.as_ref() };
+        if previous
+            .is_some_and(|at: DateTime<Utc>| (s.at - at).num_seconds() > gap_limit || s.at < at)
+            || usage.is_none()
+        {
+            if points.len() > 1 {
+                lines.push(std::mem::take(&mut points));
+            } else if let Some(p) = points.pop() {
+                dots.push(p);
+            }
+        }
+        if let Some(u) = usage {
+            let x = (plot.left()
+                + plot.width()
+                    * ((s.at - start).num_milliseconds() as f32 / (minutes * 60 * 1000) as f32))
+                .clamp(plot.left(), plot.right());
+            let y = (plot.bottom() - plot.height() * (value(u) / max) as f32)
+                .clamp(plot.top(), plot.bottom());
+            points.push(egui::pos2(x, y));
+        }
+        previous = Some(s.at);
+    }
+    if points.len() > 1 {
+        lines.push(points);
+    } else if let Some(p) = points.pop() {
+        dots.push(p);
+    }
+    (lines, dots)
+}
+
+fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
+    let summary = if h.redacted {
+        ""
+    } else {
+        h.summary.as_deref().unwrap_or("")
+    };
+    (scope.is_empty() || h.scope == scope)
+        && format!("{} {} {} {}", h.scope, h.agent, h.id, summary)
+            .to_lowercase()
+            .contains(needle)
+}
+
+fn handoff_warning_message(loaded: usize, total: Option<usize>) -> String {
+    match total {
+        Some(total) => format!(
+            "Lista: {} handoffs carregados de {} abertos. Até 200 por projeto.",
+            number(loaded),
+            number(total)
+        ),
+        None => format!(
+            "Lista: {} handoffs carregados (total aberto indisponível). Até 200 por projeto.",
+            number(loaded)
+        ),
+    }
+}
+
+fn process_matches(p: &HostProcess, needle: &str) -> bool {
+    format!("{} {} {}", p.pid, p.name, p.group)
+        .to_lowercase()
+        .contains(needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chart_preserves_isolated_samples_and_scales_gap_with_resource_interval() {
+        let base = Utc::now();
+        let u = Some(Usage {
+            cpu: 50.0,
+            memory: 128 << 20,
+            ..Default::default()
+        });
+        // 1) An isolated valid sample followed by a failed (None) sample must still render as a dot.
+        let history = VecDeque::from([
+            Sample {
+                at: base - chrono::Duration::seconds(10),
+                ai: u.clone(),
+                docker: None,
+            },
+            Sample {
+                at: base - chrono::Duration::seconds(8),
+                ai: None,
+                docker: None,
+            },
+        ]);
+        let plot = egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(200., 100.));
+        let (lines, dots) = chart_segments(&history, 5, 100.0, false, true, 2, plot);
+        assert!(lines.is_empty());
+        assert_eq!(
+            dots.len(),
+            1,
+            "isolated sample before a None gap must not be erased"
+        );
+
+        // 2) With resource_seconds = 60, samples 66s apart must connect as a line, not blank out.
+        let history_60s = VecDeque::from([
+            Sample {
+                at: base - chrono::Duration::seconds(132),
+                ai: u.clone(),
+                docker: None,
+            },
+            Sample {
+                at: base - chrono::Duration::seconds(66),
+                ai: u.clone(),
+                docker: None,
+            },
+            Sample {
+                at: base,
+                ai: u,
+                docker: None,
+            },
+        ]);
+        let (lines, _) = chart_segments(&history_60s, 5, 100.0, false, true, 60, plot);
+        assert_eq!(
+            lines.len(),
+            1,
+            "60s interval samples separated by 66s must form a connected line"
+        );
+        assert_eq!(lines[0].len(), 3);
+    }
+
+    #[test]
+    fn redacted_handoff_summary_is_not_searchable_and_short_project_is_neutral() {
+        let redacted = Handoff {
+            id: "h-1".into(),
+            agent: "claude".into(),
+            at: "2026-01-01T00:00:00Z".into(),
+            state: "open".into(),
+            summary: Some("segredo-confidencial-interno".into()),
+            redacted: true,
+            next_steps: None,
+            scope: "ws / proj".into(),
+        };
+        assert!(
+            !handoff_matches(&redacted, "", "segredo-confidencial"),
+            "redacted summary must not be searchable via filter"
+        );
+        let visible = Handoff {
+            redacted: false,
+            ..redacted
+        };
+        assert!(handoff_matches(&visible, "", "segredo-confidencial"));
+        assert_eq!(
+            short_project("default / cristiano-vallory-app"),
+            "cristiano-vallory-app"
+        );
+        assert_eq!(
+            handoff_warning_message(200, None),
+            "Lista: 200 handoffs carregados (total aberto indisponível). Até 200 por projeto."
+        );
+        assert_eq!(
+            handoff_warning_message(200, Some(350)),
+            "Lista: 200 handoffs carregados de 350 abertos. Até 200 por projeto."
+        );
+        let proc = HostProcess {
+            pid: 9876,
+            name: "com.docker.backend".into(),
+            group: "Docker Desktop".into(),
+            usage: Default::default(),
+        };
+        assert!(process_matches(&proc, "9876"));
+        assert!(process_matches(&proc, "docker desktop"));
+        assert!(!process_matches(&proc, "ai-memory"));
+    }
 }

@@ -11,10 +11,32 @@ use std::{
 const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 
 pub fn command(binary: &str, args: &[&str]) -> Result<String, String> {
-    command_with_timeout(binary, args, Duration::from_secs(6))
+    command_with_timeout(binary, args, Duration::from_secs(6), false)
 }
 
-fn command_with_timeout(binary: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+fn drain(mut stream: impl Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = (MAX_OUTPUT + 1).saturating_sub(bytes.len());
+                bytes.extend_from_slice(&chunk[..n.min(remaining)]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    bytes
+}
+
+fn command_with_timeout(
+    binary: &str,
+    args: &[&str],
+    timeout: Duration,
+    allow_missing_container: bool,
+) -> Result<String, String> {
     let mut cmd = Command::new(binary);
     #[cfg(unix)]
     {
@@ -30,19 +52,8 @@ fn command_with_timeout(binary: &str, args: &[&str], timeout: Duration) -> Resul
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| "Docker CLI não encontrado. Confira o caminho em Conexão.".to_owned())?;
-    // Drain both pipes while the command runs, avoiding pipe-buffer deadlocks.
-    fn drain(mut stream: impl Read) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 8192];
-        while let Ok(n) = stream.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            let remaining = MAX_OUTPUT.saturating_sub(bytes.len());
-            bytes.extend_from_slice(&chunk[..n.min(remaining)]);
-        }
-        bytes
-    }
+    #[cfg(unix)]
+    let pgid = child.id() as i32;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let out = thread::spawn(move || drain(stdout));
@@ -53,31 +64,41 @@ fn command_with_timeout(binary: &str, args: &[&str], timeout: Duration) -> Resul
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
             _ => {
-                #[cfg(unix)]
-                {
-                    unsafe extern "C" {
-                        fn kill(pid: i32, signal: i32) -> i32;
-                    }
-                    // SAFETY: this group belongs exclusively to the child we just spawned.
-                    // Kill descendants too, so inherited stdout pipes cannot block join().
-                    unsafe {
-                        kill(-(child.id() as i32), 9);
-                    }
-                }
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
             }
         }
     };
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // SAFETY: this group belongs exclusively to the child we just spawned.
+        // Kill descendants too, so inherited stdout/stderr pipes cannot block join().
+        unsafe {
+            kill(-pgid, 9);
+        }
+    }
     let output = out.join().unwrap_or_default();
-    let _ = err.join();
+    let stderr = err.join().unwrap_or_default();
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    let only_missing_container = allow_missing_container
+        && !stderr_text.trim().is_empty()
+        && stderr_text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| {
+                let lower = l.to_ascii_lowercase();
+                lower.contains("no such container") || lower.contains("no such object")
+            });
     match status {
         None => Err("Docker excedeu o limite de 6 s; nova tentativa automática.".into()),
-        Some(s) if !s.success() => {
+        Some(s) if !s.success() && !only_missing_container => {
             Err("Comando Docker falhou. Verifique o Docker Desktop e o contexto ativo.".into())
         }
-        _ if output.len() >= MAX_OUTPUT => Err("Resposta Docker excedeu 16 MiB.".into()),
+        _ if output.len() > MAX_OUTPUT => Err("Resposta Docker excedeu 16 MiB.".into()),
         _ => String::from_utf8(output).map_err(|_| "Resposta Docker inválida.".into()),
     }
 }
@@ -137,10 +158,6 @@ pub fn parse_usage(v: &Value) -> Option<Usage> {
 }
 
 pub fn containers(binary: &str) -> Result<Vec<Container>, String> {
-    let list = json_lines(&command(
-        binary,
-        &["ps", "-a", "--no-trunc", "--format", "{{json .}}"],
-    )?)?;
     let stats = json_lines(&command(
         binary,
         &[
@@ -150,6 +167,10 @@ pub fn containers(binary: &str) -> Result<Vec<Container>, String> {
             "--format",
             "{{json .}}",
         ],
+    )?)?;
+    let list = json_lines(&command(
+        binary,
+        &["ps", "-a", "--no-trunc", "--format", "{{json .}}"],
     )?)?;
     let mut containers: Vec<_> = list
         .iter()
@@ -186,9 +207,15 @@ pub fn containers(binary: &str) -> Result<Vec<Container>, String> {
 
 pub fn images(binary: &str, containers: &mut [Container]) -> Result<Vec<DockerImage>, String> {
     if !containers.is_empty() {
-        let mut args = vec!["container", "inspect", "--format", "{{.Id}} {{.Image}}"];
+        let mut args = vec![
+            "container",
+            "inspect",
+            "--format",
+            "{{.Id}} {{.Image}}",
+            "--",
+        ];
         args.extend(containers.iter().map(|c| c.id.as_str()));
-        let raw = command(binary, &args)?;
+        let raw = command_with_timeout(binary, &args, Duration::from_secs(6), true)?;
         for line in raw.lines() {
             let mut fields = line.split_whitespace();
             if let (Some(id), Some(image)) = (fields.next(), fields.next())
@@ -225,13 +252,17 @@ pub fn group_images(rows: &[Value], containers: &[Container]) -> Vec<DockerImage
         }
     }
     let mut result: Vec<_> = images.into_values().collect();
-    result.sort_by(|a, b| {
+    sort_images(&mut result);
+    result
+}
+
+pub fn sort_images(images: &mut [DockerImage]) {
+    images.sort_by(|a, b| {
         b.running
             .cmp(&a.running)
             .then(b.containers.len().cmp(&a.containers.len()))
             .then(b.size.cmp(&a.size))
     });
-    result
 }
 
 pub fn process_threads(
@@ -296,6 +327,7 @@ mod tests {
             "/bin/sh",
             &["-c", "sleep 20 & wait"],
             Duration::from_millis(80),
+            false,
         );
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
@@ -329,5 +361,86 @@ mod tests {
         assert_eq!(result[0].tags.len(), 2);
         assert_eq!(result[0].containers, vec!["stopped"]);
         assert_eq!(result[0].running, 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_reaps_background_grandchild_holding_stdout_when_parent_exits_zero() {
+        let started = Instant::now();
+        let out = command_with_timeout(
+            "/bin/sh",
+            &["-c", "sleep 4 & echo ready"],
+            Duration::from_secs(1),
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.trim(), "ready");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "out.join() blocked on surviving grandchild holding stdout pipe"
+        );
+    }
+
+    #[test]
+    fn drain_retries_on_interrupted_reads() {
+        struct FlakyReader {
+            step: usize,
+        }
+        impl Read for FlakyReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.step += 1;
+                match self.step {
+                    1 => {
+                        buf[..5].copy_from_slice(b"hello");
+                        Ok(5)
+                    }
+                    2 => Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                    3 => {
+                        buf[..6].copy_from_slice(b" world");
+                        Ok(6)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+        assert_eq!(drain(FlakyReader { step: 0 }), b"hello world");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn images_tolerates_ephemeral_container_vanishing_before_inspect() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("ai-monitor-docker-mock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-docker.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ \"$1\" = container ] && [ \"$2\" = inspect ]; then\n  echo 'c-alive sha256:abc'\n  echo 'Error: No such container: c-ephemeral' >&2\n  exit 1\nfi\necho '{\"ID\":\"sha256:abc\",\"Repository\":\"app\",\"Tag\":\"latest\",\"Size\":\"10MiB\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cs = vec![
+            Container {
+                id: "c-alive".into(),
+                name: "alive".into(),
+                state: "running".into(),
+                ..Default::default()
+            },
+            Container {
+                id: "c-ephemeral".into(),
+                name: "ephemeral".into(),
+                state: "running".into(),
+                ..Default::default()
+            },
+        ];
+        let imgs = images(script.to_str().unwrap(), &mut cs);
+        let _ = std::fs::remove_dir_all(&dir);
+        let imgs =
+            imgs.expect("ephemeral container vanishing during inspect must not fail inventory");
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].containers, vec!["alive"]);
+        assert_eq!(imgs[0].running, 1);
     }
 }
