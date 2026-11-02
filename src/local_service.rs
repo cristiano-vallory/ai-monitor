@@ -1,7 +1,11 @@
 //! Host operations are explicit, loopback-only, bounded and never shell-expanded.
 use crate::{client::Error, docker::local_command, model::Config};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    time::{Duration, Instant},
+};
 pub const WARNING: &str = "Ações no serviço podem interromper agentes conectados. Confira o destino e salve backup antes de parar/atualizar. Nenhuma ação local é executada automaticamente. Logs podem conter dados privados. Recuperação offline fornece um roteiro; não restaura nem exclui bancos automaticamente.";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -397,27 +401,7 @@ impl Operation {
                 let domain = state["domain"].as_str().ok_or(Error::Format)?;
                 match self.kind {
                     Kind::Logs => {
-                        let mut logs = Vec::new();
-                        for key in ["StandardOutPath", "StandardErrorPath"] {
-                            let Ok(path) = extract(self.s("plist"), key) else {
-                                continue;
-                            };
-                            if matches!(
-                                std::fs::symlink_metadata(&path),
-                                Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                            ) {
-                                continue;
-                            }
-                            regular(&path)?;
-                            let raw = run("/usr/bin/tail", &["-n", "150", "--", &path], false, 6)?;
-                            logs.push(json!({"stream":key,"text":tail(&raw)}));
-                        }
-                        if logs.is_empty() {
-                            return Err(Error::Invalid(
-                                "Nenhum arquivo de log regular configurado ou disponível para este LaunchAgent.".into(),
-                            ));
-                        }
-                        return Ok(json!({"logs":logs}));
+                        return launch_agent_logs(self.s("plist"));
                     }
                     Kind::Start => {
                         run(
@@ -459,6 +443,14 @@ impl Operation {
 fn run(binary: &str, args: &[&str], logs: bool, secs: u64) -> Result<String, Error> {
     local_command(binary, args, Duration::from_secs(secs), logs).map_err(Error::Invalid)
 }
+#[cfg(unix)]
+fn open_nofollow(path: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
 fn open_regular(path: &str) -> Result<std::fs::File, Error> {
     let m = std::fs::symlink_metadata(path)
         .map_err(|_| Error::Invalid("Arquivo local ausente ou inacessível.".into()))?;
@@ -469,16 +461,8 @@ fn open_regular(path: &str) -> Result<std::fs::File, Error> {
         ));
     }
     #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(0x0100) // O_NOFOLLOW on macOS/BSD
-            .open(path)
-            .map_err(|_| {
-                Error::Invalid("Arquivo local ausente ou link simbólico recusado.".into())
-            })?
-    };
+    let file = open_nofollow(path)
+        .map_err(|_| Error::Invalid("Arquivo local ausente ou link simbólico recusado.".into()))?;
     #[cfg(not(unix))]
     let file = std::fs::File::open(path)
         .map_err(|_| Error::Invalid("Arquivo local ausente ou inacessível.".into()))?;
@@ -504,10 +488,27 @@ fn extract(path: &str, key: &str) -> Result<String, Error> {
     .map(|s| s.trim().to_owned())
 }
 fn hash(path: &str) -> Result<String, Error> {
+    hash_within(path, Duration::from_secs(300))
+}
+fn hash_within(path: &str, limit: Duration) -> Result<String, Error> {
     use sha2::{Digest, Sha256};
     let mut file = open_regular(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|_| Error::Unavailable)?;
+    let mut buf = [0u8; 64 * 1024];
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= limit {
+            return Err(Error::Invalid(
+                "Cálculo do SHA-256 excedeu o tempo limite; confira o arquivo antes de tentar novamente.".into(),
+            ));
+        }
+        match std::io::Read::read(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(Error::Unavailable),
+        }
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 fn backup(path: &str) -> Result<(), Error> {
@@ -522,6 +523,48 @@ fn backup(path: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+fn launch_agent_logs(plist: &str) -> Result<Value, Error> {
+    let mut logs = Vec::new();
+    let mut unavailable = Vec::new();
+    for key in ["StandardOutPath", "StandardErrorPath"] {
+        let Ok(path) = extract(plist, key) else {
+            unavailable.push(json!({"stream":key,"reason":"não configurado ou ilegível no plist"}));
+            continue;
+        };
+        if !Path::new(&path).is_absolute() {
+            return Err(Error::Invalid(
+                "Caminho de log relativo no plist; use caminho absoluto.".into(),
+            ));
+        }
+        if matches!(
+            std::fs::symlink_metadata(&path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        ) {
+            unavailable.push(json!({"stream":key,"reason":"arquivo ainda não criado"}));
+            continue;
+        }
+        regular(&path)?;
+        let raw = run("/usr/bin/tail", &["-n", "150", "--", &path], false, 6)?;
+        logs.push(json!({"stream":key,"text":tail(&raw)}));
+    }
+    if logs.is_empty() {
+        let detail = unavailable
+            .iter()
+            .map(|u| {
+                format!(
+                    "{}: {}",
+                    u["stream"].as_str().unwrap_or(""),
+                    u["reason"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::Invalid(format!(
+            "Nenhum arquivo de log regular configurado ou disponível para este LaunchAgent. {detail}"
+        )));
+    }
+    Ok(json!({"logs":logs,"unavailable":unavailable}))
+}
 fn tail(s: &str) -> &str {
     let mut start = s.len().saturating_sub(100 * 1024);
     while !s.is_char_boundary(start) {
@@ -534,7 +577,17 @@ fn replace(binary: &str, replacement: &str, expected: &str) -> Result<Value, Err
     // Same-directory staging keeps the final replacement atomic; backup is never overwritten.
     regular(binary)?;
     regular(replacement)?;
-    if Path::new(binary) == Path::new(replacement) {
+    let same_file = {
+        use std::os::unix::fs::MetadataExt;
+        let a = open_regular(binary)?
+            .metadata()
+            .map_err(|_| Error::Unavailable)?;
+        let b = open_regular(replacement)?
+            .metadata()
+            .map_err(|_| Error::Unavailable)?;
+        (a.dev(), a.ino()) == (b.dev(), b.ino())
+    };
+    if same_file {
         return Err(Error::Invalid(
             "O novo binário deve estar em um caminho diferente do binário instalado.".into(),
         ));
@@ -708,11 +761,191 @@ esac
             std::os::unix::fs::symlink(&bin, &link).unwrap();
             assert!(hash(link.to_str().unwrap()).is_err());
         }
-        let res = replace(bin.to_str().unwrap(), bin.to_str().unwrap(), &digest);
+        for alias in [
+            bin.to_str().unwrap().to_owned(),
+            dir.join("hardlink").to_str().unwrap().to_owned(),
+            std::fs::canonicalize(&bin)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        ] {
+            std::fs::hard_link(&bin, dir.join("hardlink")).ok();
+            let res = replace(bin.to_str().unwrap(), &alias, &digest);
+            assert!(
+                res.is_err(),
+                "replace must refuse alias of its own file: {alias}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&bin).unwrap(),
+            "binary",
+            "refused replace must leave the binary untouched"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".backup-") || n.contains(".new-"))
+            .collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            res.is_err(),
-            "replace must refuse overwriting binary with its own path"
+            leftovers.is_empty(),
+            "refused replace must not leave backups/staging: {leftovers:?}"
+        );
+    }
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "monitor-{tag}-{}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+    fn plist_with(entries: &[(&str, &str)]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = unique_temp_dir("logs");
+        let pairs: String = entries
+            .iter()
+            .map(|(k, v)| format!("<key>{k}</key><string>{v}</string>"))
+            .collect();
+        let plist = dir.join("agent.plist");
+        std::fs::write(
+            &plist,
+            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>{pairs}</dict></plist>"),
+        )
+        .unwrap();
+        (dir, plist)
+    }
+
+    #[test]
+    fn launch_agent_logs_reports_missing_streams_without_failing() {
+        let dir = unique_temp_dir("logs");
+        let out = dir.join("out.log");
+        std::fs::write(&out, "out-line\n").unwrap();
+        let err = dir.join("missing-err.log");
+        let plist = dir.join("agent.plist");
+        std::fs::write(
+            &plist,
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
+                out.display(),
+                err.display()
+            ),
+        )
+        .unwrap();
+        let v = launch_agent_logs(plist.to_str().unwrap()).unwrap();
+        assert_eq!(v["logs"].as_array().unwrap().len(), 1);
+        assert!(
+            v["logs"][0]["text"].as_str().unwrap().contains("out-line"),
+            "log tail must include the file contents"
+        );
+        let un = &v["unavailable"].as_array().unwrap()[0];
+        assert_eq!(un["stream"], "StandardErrorPath");
+        assert_eq!(un["reason"], "arquivo ainda não criado");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launch_agent_logs_rejects_dangling_symlink() {
+        let dir = unique_temp_dir("logs");
+        let out = dir.join("out.log");
+        std::fs::write(&out, "out-line\n").unwrap();
+        let dangling = dir.join("dangling-err.log");
+        std::os::unix::fs::symlink(dir.join("gone"), &dangling).unwrap();
+        let plist = dir.join("agent.plist");
+        std::fs::write(
+            &plist,
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
+                out.display(),
+                dangling.display()
+            ),
+        )
+        .unwrap();
+        assert!(
+            launch_agent_logs(plist.to_str().unwrap()).is_err(),
+            "dangling symlink must not be silently reported as not-created"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launch_agent_logs_error_lists_each_stream_reason() {
+        let (dir, plist) = plist_with(&[]);
+        let Err(Error::Invalid(msg)) = launch_agent_logs(plist.to_str().unwrap()) else {
+            panic!("missing streams must error");
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(msg.contains("StandardOutPath"), "got: {msg}");
+        assert!(msg.contains("StandardErrorPath"), "got: {msg}");
+    }
+
+    #[test]
+    fn launch_agent_logs_rejects_relative_log_path() {
+        let (dir, plist) = plist_with(&[("StandardOutPath", "relative.log")]);
+        let Err(Error::Invalid(msg)) = launch_agent_logs(plist.to_str().unwrap()) else {
+            panic!("relative path must error");
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(msg.contains("absoluto"), "got: {msg}");
+    }
+
+    #[test]
+    fn open_nofollow_refuses_symlinks_and_does_not_block_on_fifo() {
+        let dir = unique_temp_dir("nofollow");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, "x").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            open_nofollow(link.to_str().unwrap()).is_err(),
+            "O_NOFOLLOW must refuse opening through a symlink"
+        );
+
+        let fifo = dir.join("pipe");
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        let fifo_path = fifo.to_str().unwrap().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_nofollow(&fifo_path).is_ok());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            "open_nofollow must not block on a FIFO (needs O_NONBLOCK)"
+        );
+        assert!(
+            open_regular(fifo.to_str().unwrap()).is_err(),
+            "FIFO is not a regular file and must be refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hash_within_honors_a_zero_deadline() {
+        let dir = unique_temp_dir("hashlimit");
+        let file = dir.join("nonempty");
+        std::fs::write(&file, "data").unwrap();
+        let Err(Error::Invalid(msg)) = hash_within(file.to_str().unwrap(), Duration::ZERO) else {
+            panic!("zero deadline must abort hashing a non-empty file");
+        };
+        assert!(
+            msg.contains("tempo limite"),
+            "deadline error must say the hash timed out, got: {msg}"
+        );
+        let Ok(digest) = hash_within(file.to_str().unwrap(), Duration::from_secs(60)) else {
+            panic!("generous deadline must hash normally");
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            digest,
+            "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
         );
     }
 }

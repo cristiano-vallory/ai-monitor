@@ -477,4 +477,22 @@ mod tests {
         );
         assert!(Session::from_headers(&headers).is_err());
     }
+    #[test]
+    fn cookie_names_with_surrounding_space_are_accepted() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "set-cookie",
+            "ai_memory_session =synthetic-session; Path=/"
+                .parse()
+                .unwrap(),
+        );
+        headers.append(
+            "set-cookie",
+            "ai_memory_csrf =synthetic-csrf; Path=/".parse().unwrap(),
+        );
+        let session = Session::from_headers(&headers)
+            .expect("cookie names padded with spaces must still be recognized");
+        assert_eq!(session.session, "synthetic-session");
+        assert_eq!(session.csrf, "synthetic-csrf");
+    }
 }

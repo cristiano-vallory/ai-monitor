@@ -82,22 +82,33 @@ impl Config {
             ..Self::default()
         }
     }
-    pub fn load() -> Self {
-        let env_token = std::env::var("AI_MEMORY_AUTH_TOKEN").ok();
-        let mut config = Self::from_sources(
-            std::fs::read(Self::path()).ok().as_deref(),
-            std::env::var("AI_MEMORY_SERVER_URL").ok(),
-            env_token.clone(),
-        );
-        if env_token.is_none() {
-            config.apply_keychain_token(crate::keychain::load(&config.endpoint).ok().flatten());
+    pub fn load_from(
+        disk: Option<&[u8]>,
+        env_url: Option<String>,
+        env_token: Option<std::ffi::OsString>,
+        keychain: impl FnOnce(&str) -> Option<String>,
+    ) -> Self {
+        let explicit = env_token.is_some();
+        let mut config =
+            Self::from_sources(disk, env_url, env_token.and_then(|t| t.into_string().ok()));
+        if !explicit {
+            let endpoint = config.endpoint.clone();
+            config.apply_keychain_token(|| keychain(&endpoint));
         }
         config
     }
-    pub fn apply_keychain_token(&mut self, keychain_token: Option<String>) {
+    pub fn load() -> Self {
+        Self::load_from(
+            std::fs::read(Self::path()).ok().as_deref(),
+            std::env::var("AI_MEMORY_SERVER_URL").ok(),
+            std::env::var_os("AI_MEMORY_AUTH_TOKEN"),
+            |e| crate::keychain::load(e).ok().flatten(),
+        )
+    }
+    pub fn apply_keychain_token(&mut self, load: impl FnOnce() -> Option<String>) {
         if self.remember_token
             && self.token.is_empty()
-            && let Some(token) = keychain_token
+            && let Some(token) = load()
         {
             let token = token.trim().to_owned();
             if !token.is_empty() {
@@ -514,7 +525,7 @@ mod tests {
             remember_token: true,
             ..Default::default()
         };
-        remote_http.apply_keychain_token(Some("  synthetic-keychain-token  ".into()));
+        remote_http.apply_keychain_token(|| Some("  synthetic-keychain-token  ".into()));
         assert!(
             remote_http.token.is_empty(),
             "keychain token must not be attached to plaintext remote HTTP endpoint"
@@ -526,8 +537,69 @@ mod tests {
             remember_token: true,
             ..Default::default()
         };
-        remote_https.apply_keychain_token(Some("  synthetic-keychain-token  ".into()));
+        remote_https.apply_keychain_token(|| Some("  synthetic-keychain-token  ".into()));
         assert_eq!(remote_https.token, "synthetic-keychain-token");
         assert!(remote_https.validate().is_ok());
+    }
+
+    #[test]
+    fn keychain_is_only_read_when_remember_is_enabled_and_no_env_token() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let keychain = |_: &str| {
+            calls.set(calls.get() + 1);
+            Some("  synthetic-keychain-token  ".to_owned())
+        };
+
+        let off_disk = serde_json::to_vec(&Config {
+            endpoint: "http://localhost:49374".into(),
+            remember_token: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let cfg = Config::load_from(Some(&off_disk), None, None, keychain);
+        assert_eq!(
+            calls.get(),
+            0,
+            "remember_token=false must not read Keychain"
+        );
+        assert!(cfg.token.is_empty());
+
+        let on_disk = serde_json::to_vec(&Config {
+            endpoint: "http://localhost:49374".into(),
+            remember_token: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let cfg = Config::load_from(Some(&on_disk), None, None, keychain);
+        assert_eq!(calls.get(), 1, "remember_token=true reads Keychain once");
+        assert_eq!(cfg.token, "synthetic-keychain-token");
+
+        let cfg = Config::load_from(
+            Some(&on_disk),
+            None,
+            Some(std::ffi::OsString::from("")),
+            keychain,
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "explicit env token (even empty) skips Keychain"
+        );
+        assert!(cfg.token.is_empty());
+
+        use std::os::unix::ffi::OsStringExt;
+        let cfg = Config::load_from(
+            Some(&on_disk),
+            None,
+            Some(std::ffi::OsString::from_vec(vec![0x66, 0xff])),
+            keychain,
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "non-UTF-8 env token still counts as explicit"
+        );
+        assert!(cfg.token.is_empty());
     }
 }

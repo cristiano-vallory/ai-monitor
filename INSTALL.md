@@ -168,7 +168,7 @@ Para iniciar no login, adicione o app instalado em **Ajustes do Sistema → Gera
 
 ## Autenticação sem salvar segredos
 
-A opção mais simples é inserir o token em **Conexão → Token Bearer** e clicar em **Salvar e conectar**. Ele fica somente na memória do processo e deve ser informado novamente após encerrar o aplicativo. Não é salvo no JSON de preferências. A opção **Guardar o Bearer no Keychain** permite persistir somente esse token, por endereço. Desmarque a opção e salve no mesmo servidor para removê-lo. Variável de ambiente explícita, mesmo vazia, tem prioridade sobre o Keychain.
+A opção mais simples é inserir o token em **Conexão → Token Bearer** e clicar em **Salvar e conectar**. Ele fica somente na memória do processo e deve ser informado novamente após encerrar o aplicativo. Não é salvo no JSON de preferências. A opção **Guardar o Bearer no Keychain** permite persistir somente esse token, por endereço. Desmarque a opção e salve para removê-lo: o app apaga o token guardado do servidor que estava conectado, inclusive quando o endereço é trocado na mesma ação. **Restaurar campos padrão** seguido de **Salvar e conectar** também o remove. Variável de ambiente explícita, mesmo vazia, tem prioridade sobre o Keychain.
 
 Para uso pelo terminal, `AI_MEMORY_SERVER_URL` e `AI_MEMORY_AUTH_TOKEN` são opcionais. Exemplo para o **zsh padrão do macOS**, solicitando o token sem escrevê-lo no histórico nem exibi-lo:
 

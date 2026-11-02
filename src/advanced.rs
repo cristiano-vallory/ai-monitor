@@ -591,16 +591,47 @@ pub fn concealed(value: &Value) -> Value {
         Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(k, v)| {
-                    let lower = k.to_ascii_lowercase();
-                    let secret_key = (lower.contains("password")
-                        || (lower.contains("token") && !lower.ends_with("_tokens"))
-                        || lower.contains("secret")
-                        || lower.contains("csrf")
-                        || lower.contains("cookie")
-                        || matches!(lower.as_str(), "api_key" | "raw_key" | "private_key"))
-                        && !v.is_null()
-                        && !v.is_boolean()
-                        && !v.is_number();
+                    let name: String = k
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .collect::<String>()
+                        .to_lowercase();
+                    let named_secret = [
+                        "password",
+                        "passwd",
+                        "passphrase",
+                        "secret",
+                        "token",
+                        "csrf",
+                        "cookie",
+                        "authorization",
+                        "bearer",
+                        "pepper",
+                    ]
+                    .iter()
+                    .any(|w| name.contains(w))
+                        || [
+                            "apikey",
+                            "privatekey",
+                            "rawkey",
+                            "accesskey",
+                            "signingkey",
+                            "encryptionkey",
+                            "masterkey",
+                        ]
+                        .iter()
+                        .any(|w| name.ends_with(w));
+                    let counter = v.is_number()
+                        && (name.ends_with("tokens")
+                            || [
+                                "count", "total", "limit", "used", "usage", "budget", "max", "min",
+                            ]
+                            .iter()
+                            .any(|w| name.contains(w)));
+                    if !named_secret && name.contains("prefix") && v.is_string() {
+                        return (k.clone(), v.clone());
+                    }
+                    let secret_key = named_secret && !v.is_null() && !v.is_boolean() && !counter;
                     (
                         k.clone(),
                         if secret_key {
@@ -711,24 +742,57 @@ mod tests {
             "secret_key": "secret-3",
             "api_key": "secret-4",
             "credential": "aim_live_secret_value",
+            "openai_api_key": "leak-1",
+            "ssh_private_key": "leak-2",
+            "authorization": "Bearer leak-3",
+            "x-api-key": "leak-4",
+            "apikey": "leak-5",
+            "token": 123456,
+            "prefix_token": "leak-6",
+            "authorization_prefix": "Bearer leak-7",
+            "token_prefix": "aim_ab12",
             "input_tokens": 42,
-            "id": "public-id"
+            "max_tokens": 1000,
+            "token_count": 5,
+            "key_prefix": "aim_ab12",
+            "api_key_id": "k1",
+            "id": "public-id",
+            "password_set": true,
+            "x": [{"refresh_token": "nested-secret"}]
         }));
-        let s = masked.to_string();
-        for leaked in [
-            "secret-1",
-            "secret-2",
-            "secret-3",
-            "secret-4",
-            "aim_live_secret_value",
+        let oculto = json!("[oculto]");
+        for key in [
+            "api_token",
+            "raw_token",
+            "secret_key",
+            "api_key",
+            "credential",
+            "openai_api_key",
+            "ssh_private_key",
+            "authorization",
+            "x-api-key",
+            "apikey",
+            "token",
+            "prefix_token",
+            "authorization_prefix",
+            "token_prefix",
         ] {
-            assert!(
-                !s.contains(leaked),
-                "leaked secret in concealed(): {leaked}"
-            );
+            assert_eq!(masked[key], oculto, "{key} must be masked");
         }
+        assert_eq!(
+            masked["x"][0]["refresh_token"], oculto,
+            "nested secret must be masked"
+        );
         assert_eq!(masked["input_tokens"], 42);
+        assert_eq!(masked["max_tokens"], 1000);
+        assert_eq!(masked["token_count"], 5);
+        assert_eq!(masked["key_prefix"], "aim_ab12");
+        assert_eq!(masked["api_key_id"], "k1");
         assert_eq!(masked["id"], "public-id");
+        assert_eq!(masked["password_set"], true);
+
+        let masked = concealed(&json!({"token": null}));
+        assert_eq!(masked["token"], serde_json::Value::Null);
 
         let mut msg = Operation::new(SendMessage);
         msg.values.insert("workspace".into(), "w1".into());

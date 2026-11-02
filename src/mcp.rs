@@ -78,32 +78,34 @@ impl Connection {
             .send().map_err(|_|Error::Unavailable)?;
         check_status(&init)?;
         let session = init.headers().get("mcp-session-id").cloned();
-        let initialized = rpc_body(init, 1)?;
-        let protocol = initialized["protocolVersion"]
-            .as_str()
-            .ok_or(Error::Format)?;
-        let call = |body: Value, id: Option<u64>| -> Result<Value, Error> {
-            if cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let mut request = self
-                .request_builder(Method::POST, &["mcp"], &[])?
-                .timeout(Duration::from_secs(120))
-                .header("Accept", "application/json, text/event-stream")
-                .header("MCP-Protocol-Version", protocol)
-                .json(&body);
-            if let Some(s) = &session {
-                request = request.header("Mcp-Session-Id", s);
-            }
-            let response = request.send().map_err(|_| Error::Unavailable)?;
-            if let Some(id) = id {
-                rpc_body(response, id)
-            } else {
-                check_status(&response)?;
-                Ok(Value::Null)
-            }
-        };
+        let mut protocol: Option<String> = None;
         let result = (|| {
+            let initialized = rpc_body(init, 1)?;
+            let proto = initialized["protocolVersion"]
+                .as_str()
+                .ok_or(Error::Format)?;
+            protocol = Some(proto.to_owned());
+            let call = |body: Value, id: Option<u64>| -> Result<Value, Error> {
+                if cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let mut request = self
+                    .request_builder(Method::POST, &["mcp"], &[])?
+                    .timeout(Duration::from_secs(120))
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("MCP-Protocol-Version", proto)
+                    .json(&body);
+                if let Some(s) = &session {
+                    request = request.header("Mcp-Session-Id", s);
+                }
+                let response = request.send().map_err(|_| Error::Unavailable)?;
+                if let Some(id) = id {
+                    rpc_body(response, id)
+                } else {
+                    check_status(&response)?;
+                    Ok(Value::Null)
+                }
+            };
             if session.is_some() {
                 call(
                     json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -119,11 +121,13 @@ impl Connection {
         if let Some(session) = session
             && let Ok(request) = self.request_builder(Method::DELETE, &["mcp"], &[])
         {
-            let _ = request
+            let mut request = request
                 .timeout(Duration::from_secs(2))
-                .header("Mcp-Session-Id", session)
-                .header("MCP-Protocol-Version", protocol)
-                .send();
+                .header("Mcp-Session-Id", session);
+            if let Some(protocol) = &protocol {
+                request = request.header("MCP-Protocol-Version", protocol);
+            }
+            let _ = request.send();
         }
         let result = result?;
         if result["isError"] == true {
@@ -168,6 +172,16 @@ mod tests {
             parse_sse(std::io::Cursor::new(err_stream), 2),
             Err(Error::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn sse_whitespace_only_line_inside_event_does_not_end_the_event() {
+        let stream =
+            b"data: {\"jsonrpc\":\"2.0\",\n   \ndata: \"id\":2,\"result\":{\"ok\":true}}\n\n";
+        assert_eq!(
+            parse_sse(std::io::Cursor::new(stream), 2),
+            Ok(json!({"ok":true}))
+        );
     }
 }
 #[cfg(test)]
@@ -265,6 +279,74 @@ mod transport_tests {
                     .to_lowercase()
                     .contains("mcp-session-id: synthetic-leak-check")),
             "stateful MCP session must be closed with DELETE even when notifications/initialized fails"
+        );
+    }
+
+    #[test]
+    fn initialize_body_failure_still_closes_stateful_session() {
+        let mock = Mock::new(|r| {
+            if r.method == "DELETE" {
+                return Response::json(200, json!({}));
+            }
+            Response {
+                status: 200,
+                body: json!({"jsonrpc":"2.0","id":1,"result":{}})
+                    .to_string()
+                    .into_bytes(),
+                headers: vec![("Mcp-Session-Id".into(), "leak-check".into())],
+            }
+        });
+        let res =
+            Connection::new(&mock.config())
+                .unwrap()
+                .tool("memory_feedback", &json!({}), || false);
+        assert_eq!(res, Err(Error::Format));
+        let requests = mock.requests();
+        let delete = requests
+            .iter()
+            .find(|r| r.method == "DELETE")
+            .expect("stateful session must be closed with DELETE even when initialize body lacks protocolVersion");
+        assert!(
+            delete
+                .headers
+                .to_lowercase()
+                .contains("mcp-session-id: leak-check"),
+            "DELETE must carry the session id, got {:?}",
+            delete.headers
+        );
+        assert!(
+            !delete
+                .headers
+                .to_lowercase()
+                .contains("mcp-protocol-version"),
+            "protocol was never negotiated; DELETE must not claim one"
+        );
+    }
+
+    #[test]
+    fn unparseable_initialize_body_still_closes_stateful_session() {
+        let mock = Mock::new(|r| {
+            if r.method == "DELETE" {
+                return Response::json(200, json!({}));
+            }
+            Response {
+                status: 200,
+                body: b"not json".to_vec(),
+                headers: vec![("Mcp-Session-Id".into(), "leak-check-2".into())],
+            }
+        });
+        let res =
+            Connection::new(&mock.config())
+                .unwrap()
+                .tool("memory_feedback", &json!({}), || false);
+        assert_eq!(res, Err(Error::Format));
+        let requests = mock.requests();
+        assert!(
+            requests.iter().any(|r| r.method == "DELETE"
+                && r.headers
+                    .to_lowercase()
+                    .contains("mcp-session-id: leak-check-2")),
+            "stateful session must be closed with DELETE even when initialize body is unparseable"
         );
     }
 }
