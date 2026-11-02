@@ -16,20 +16,25 @@ pub struct Shared {
     pub resources: Mutex<ResourceSnapshot>,
     pub history: Mutex<VecDeque<ResourceSample>>,
     pub api: Mutex<ApiSnapshot>,
+    pub health: Mutex<crate::health::Snapshot>,
     pub generation: AtomicU64,
     pub stop: Arc<AtomicBool>,
 }
 
 impl Shared {
-    pub fn start(config: Config) -> Arc<Self> {
-        let shared = Arc::new(Self {
+    pub fn unstarted(config: Config) -> Arc<Self> {
+        Arc::new(Self {
             config: RwLock::new(config),
             resources: Mutex::new(ResourceSnapshot::default()),
             history: Mutex::new(VecDeque::new()),
             api: Mutex::new(ApiSnapshot::default()),
+            health: Mutex::new(crate::health::Snapshot::default()),
             generation: AtomicU64::new(0),
             stop: Arc::new(AtomicBool::new(false)),
-        });
+        })
+    }
+    pub fn start(config: Config) -> Arc<Self> {
+        let shared = Self::unstarted(config);
         let resources = shared.clone();
         thread::spawn(move || {
             let mut system = System::new();
@@ -146,6 +151,29 @@ impl Shared {
                 wait(&server, generation, Instant::now(), config.api_seconds);
             }
         });
+        let health = shared.clone();
+        thread::spawn(move || {
+            loop {
+                if health.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let (generation, config) = {
+                    let config = health.config.read().unwrap();
+                    (health.generation.load(Ordering::Acquire), config.clone())
+                };
+                let snapshot = crate::health::collect(&config, || {
+                    health.stop.load(Ordering::Relaxed)
+                        || health.generation.load(Ordering::Acquire) != generation
+                });
+                {
+                    let mut target = health.health.lock().unwrap();
+                    if health.generation.load(Ordering::Acquire) == generation {
+                        *target = snapshot;
+                    }
+                }
+                wait(&health, generation, Instant::now(), crate::health::INTERVAL);
+            }
+        });
         shared
     }
     pub fn apply(&self, config: Config) {
@@ -155,6 +183,7 @@ impl Shared {
         *self.resources.lock().unwrap() = ResourceSnapshot::default();
         self.history.lock().unwrap().clear();
         *self.api.lock().unwrap() = ApiSnapshot::default();
+        *self.health.lock().unwrap() = crate::health::Snapshot::default();
     }
 }
 

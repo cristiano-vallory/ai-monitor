@@ -8,9 +8,9 @@ Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. In
 
 ## Instalar sem compilar Rust
 
-A versão **0.2.1** corrige gráficos, sessões duplicadas, coleta Docker e tratamento das configurações. Veja as [notas da atualização](docs/releases/v0.2.1.md).
+A versão **0.3.0** acrescenta saúde interna, sessões detalhadas e navegação pelo conhecimento. Veja as [notas da atualização](docs/releases/v0.3.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
 
-1. Baixe **AI-Monitor-0.2.1-macos-universal.dmg** na [release v0.2.1](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.1).
+1. Baixe **AI-Monitor-0.3.0-macos-universal.dmg** na [release v0.3.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.3.0).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
@@ -70,6 +70,7 @@ Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repo
 - **Visão geral:** CPU, memória, tarefas do ai-memory, handoffs abertos, contêineres, sessões e histórico de até dez minutos mantido em memória.
 - **Sessões e handoffs:** handoffs abertos, resumos e próximos passos; sessões com agente, projeto, eventos, início e estado; projetos com contagens e última atividade. Pesquisa e filtro por projeto.
 - **Docker:** CPU/memória/tarefas por contêiner, estado, imagem, portas e I/O acumulado; imagens agrupadas por ID e associação aos contêineres; processos do Docker Desktop e ai-memory no Mac.
+- **Central ai-memory:** saúde interna, alertas, tokens, eventos pesquisáveis, wiki, histórico/diff e grafos de relações.
 - **Conexão:** servidor, token opcional, nome do contêiner, caminho do Docker CLI e intervalos.
 
 ## Conexão e coleta

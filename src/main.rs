@@ -1,9 +1,15 @@
 mod api;
 mod app;
+mod client;
+mod console;
 mod docker;
+mod health;
 mod menu_bar;
 mod model;
 mod monitor;
+mod queries;
+#[cfg(test)]
+mod test_support;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version") {

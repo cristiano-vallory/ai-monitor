@@ -166,12 +166,21 @@ mod native {
                 let Ok(snapshot) = state.shared.resources.try_lock() else {
                     return;
                 };
-                MenuReading::from_snapshot(
+                let mut reading = MenuReading::from_snapshot(
                     &snapshot,
                     &config.container,
                     config.resource_seconds,
                     Utc::now(),
-                )
+                );
+                if let Ok(health) = state.shared.health.try_lock() {
+                    if health.fresh(Utc::now()) && !health.alerts().is_empty() {
+                        reading.title.push_str("  !");
+                    }
+                    reading
+                        .freshness
+                        .push_str(&format!(" · {}", health.menu_summary(Utc::now())));
+                }
+                reading
             };
             let mut previous = state.previous.borrow_mut();
             if previous.as_ref() != Some(&reading) {
