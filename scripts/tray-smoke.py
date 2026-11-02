@@ -72,13 +72,10 @@ def windows():
 
 def close_request():
     """WM_DELETE_WINDOW ClientMessage (compositor close), needs python3-xlib."""
-    try:
-        from Xlib import X, display, protocol
-    except ImportError:
-        subprocess.run(
-            ["xdotool", "getactivewindow", "windowclose"], capture_output=True
-        )
-        return
+    # No fallback: without a WM, xdotool cannot send a close request, and a
+    # silent no-op would turn this check into a false failure or a false pass.
+    from Xlib import X, display, protocol
+
     d = display.Display()
     wm_protocols = d.intern_atom("WM_PROTOCOLS")
     wm_delete = d.intern_atom("WM_DELETE_WINDOW")

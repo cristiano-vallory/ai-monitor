@@ -66,7 +66,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libx11-6 libxcursor1 libxi6 libxrandr2 libxinerama1 libxrender1 libxfixes3 libxext6 libgl1 libegl1 libgl1-mesa-dri
       - name: Test-only tools
-        run: sudo apt-get install -y gnome-keyring dbus xvfb xdotool python3-gi gir1.2-glib-2.0
+        run: sudo apt-get install -y gnome-keyring dbus xvfb xdotool python3-gi gir1.2-glib-2.0 python3-xlib
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Tests
