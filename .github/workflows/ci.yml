@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -38,6 +39,14 @@ jobs:
         run: bash scripts/build-dmg.sh
       - name: Verify installation from DMG
         run: bash scripts/verify-dmg.sh
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ai-monitor-macos
+          path: |
+            dist/AI-Monitor-*-macos-universal.dmg
+            dist/AI-Monitor-*-macos-universal.dmg.sha256
+          if-no-files-found: error
 
   linux:
     name: Linux (${{ matrix.arch }})
@@ -64,9 +73,9 @@ jobs:
         # Phase 4 packaging must reuse this exact runtime list.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libx11-6 libxcursor1 libxi6 libxrandr2 libxinerama1 libxrender1 libxfixes3 libxext6 libgl1 libegl1 libgl1-mesa-dri
+          sudo apt-get install -y libgl1 libegl1 libgl1-mesa-dri libdrm2 libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxcb1 libxcb-dri2-0 libxcb-dri3-0 libxcb-glx0 libxcb-present0 libxcb-randr0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xkb1 libxcursor1 libxext6 libxfixes3 libxi6 libxinerama1 libxrandr2 libxrender1 libxxf86vm1 libxkbcommon0 libxkbcommon-x11-0 libxshmfence1 libwayland-egl1 libwayland-client0 libwayland-cursor0 libwayland-egl1-mesa
       - name: Test-only tools
-        run: sudo apt-get install -y gnome-keyring dbus xvfb xdotool python3-gi gir1.2-glib-2.0 python3-xlib
+        run: sudo apt-get install -y gnome-keyring dbus xvfb xdotool python3-gi gir1.2-glib-2.0 python3-xlib desktop-file-utils
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Tests
@@ -124,20 +133,75 @@ jobs:
           code=$?
           set -e
           if [ "$code" -ne 0 ]; then exit "$code"; fi
-      - name: Package artifact
+      - name: Build Linux packages
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          name="ai-monitor-${version}-linux-${{ matrix.arch }}"
-          mkdir "$name"
-          cp target/release/ai-monitor LICENSE "$name/"
-          cp packaging/THIRD_PARTY_NOTICES-linux.txt "$name/THIRD_PARTY_NOTICES.txt"
-          tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          bash scripts/build-linux-packages.sh ${{ matrix.arch }} target/release/ai-monitor dist
+      - name: Install test (.deb)
+        run: |
+          sudo apt-get install -y ./dist/ai-monitor_*_*.deb
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "$(/usr/bin/ai-monitor --version)" = "AI Monitor $v (${{ matrix.arch }})"
+          desktop-file-validate /usr/share/applications/ai-monitor.desktop
+          for size in 16 32 64 128 256 512; do
+            test -f "/usr/share/icons/hicolor/${size}x${size}/apps/ai-monitor.png"
+          done
+          sudo apt-get remove -y ai-monitor
+          test ! -e /usr/bin/ai-monitor
+      - name: Install test (.deb, ubuntu:24.04 container)
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" ubuntu:24.04 bash -c '
+            apt-get update -qq && apt-get install -y -qq /dist/ai-monitor_*_*.deb
+            /usr/bin/ai-monitor --version
+          '
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ai-monitor-linux-${{ matrix.arch }}
           path: |
-            ai-monitor-*-linux-*.tar.gz
-            ai-monitor-*-linux-*.tar.gz.sha256
+            dist/ai-monitor-*-linux-*.tar.gz
+            dist/ai-monitor-*-linux-*.tar.gz.sha256
+            dist/ai-monitor_*_*.deb
+            dist/ai-monitor_*_*.deb.sha256
           if-no-files-found: error
+
+  arch:
+    # Apenas x86_64: não existe imagem oficial Arch Linux arm64 para testar aarch64.
+    name: Arch package (x86_64)
+    runs-on: ubuntu-22.04
+    needs: linux
+    container: archlinux:base-devel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Download x86_64 artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (tagged release >7d)
+        with:
+          name: ai-monitor-linux-x86_64
+          path: dist
+      - name: makepkg + pacman -U + remove
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm namcap binutils file >/dev/null
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          sha=$(awk '{print $1}' dist/ai-monitor-"$v"-linux-x86_64.tar.gz.sha256)
+          useradd -m builder
+          cp -r packaging scripts dist /home/builder/ && chown -R builder /home/builder
+          # O PKGBUILD reempacota o binário: --nodeps dispensa sudo no makepkg;
+          # as dependências de execução são resolvidas pelo pacman -U como root.
+          su builder -c "cd /home/builder && bash scripts/render-pkgbuild.sh '$v' '$sha' \
+            0000000000000000000000000000000000000000000000000000000000000000 file:///home/builder/dist \
+            && cd packaging/arch && makepkg -f --nodeps --noconfirm"
+          pacman -U --noconfirm /home/builder/packaging/arch/ai-monitor-bin-"$v"-*.pkg.tar.zst
+          test "$(/usr/bin/ai-monitor --version)" = "AI Monitor $v (x86_64)"
+          test -f /usr/share/applications/ai-monitor.desktop
+          for size in 16 32 64 128 256 512; do
+            test -f "/usr/share/icons/hicolor/${size}x${size}/apps/ai-monitor.png"
+          done
+          echo "--- namcap PKGBUILD ---"
+          namcap /home/builder/packaging/arch/PKGBUILD || true
+          echo "--- namcap package ---"
+          namcap /home/builder/packaging/arch/ai-monitor-bin-"$v"-*.pkg.tar.zst || true
+          pacman -R --noconfirm ai-monitor-bin
+          test ! -e /usr/bin/ai-monitor

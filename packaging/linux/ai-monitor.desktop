@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=AI Monitor
+Comment=Monitor nativo de ai-memory e Docker
+Exec=ai-monitor
+Icon=ai-monitor
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=ai-monitor

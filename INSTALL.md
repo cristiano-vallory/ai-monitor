@@ -4,7 +4,7 @@ Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na 
 
 ## Instalar pelo DMG — sem Rust ou Xcode
 
-1. Acesse a [release v0.5.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.5.0) e baixe **AI-Monitor-0.5.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
+1. Acesse a [release v0.6.0](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.0) e baixe **AI-Monitor-0.6.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
 2. Abra o `.dmg` e arraste **AI Monitor.app** para o atalho **Applications / Aplicativos**.
 3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
 4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
@@ -27,11 +27,11 @@ Essa é uma exceção para o aplicativo específico, conforme a [orientação da
 
 ### Verificar a integridade do download (opcional)
 
-Baixe também **AI-Monitor-0.5.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
+Baixe também **AI-Monitor-0.6.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
 
 ```sh
 cd "$HOME/Downloads"
-shasum -a 256 -c AI-Monitor-0.5.0-macos-universal.dmg.sha256
+shasum -a 256 -c AI-Monitor-0.6.0-macos-universal.dmg.sha256
 ```
 
 O resultado deve terminar em `OK`. O checksum detecta alterações ou corrupção do arquivo; não substitui assinatura Developer ID ou notarização.
@@ -244,8 +244,8 @@ bash scripts/verify-dmg.sh
 Saídas em `dist/`:
 
 - `AI Monitor.app`: bundle Universal, assinado ad hoc.
-- `AI-Monitor-0.5.0-macos-universal.dmg`: imagem comprimida, somente leitura.
-- `AI-Monitor-0.5.0-macos-universal.dmg.sha256`: checksum para download.
+- `AI-Monitor-0.6.0-macos-universal.dmg`: imagem comprimida, somente leitura.
+- `AI-Monitor-0.6.0-macos-universal.dmg.sha256`: checksum para download.
 
 O pacote é montado em uma pasta temporária limpa, a partir do bundle, do atalho `/Applications` e do `LEIA-ME.txt`. Configurações, tokens, dados, repositório e diagnósticos não entram na imagem. O script verifica a assinatura e as arquiteturas; o verificador monta a imagem, copia o app para um destino temporário e executa `--version` antes e depois de ejetar. Essa verificação não abre o painel nem acessa Docker/ai-memory.
 
@@ -304,9 +304,11 @@ dos bytes, não autenticidade da origem. O monitor não baixa binários automati
 Consulte o [guia administrativo](docs/ADMINISTRATION.md) para semântica das
 prévias, permissões, limites, logs privados e recuperação offline orientada.
 
-## Linux (prévia em desenvolvimento)
+## Linux (Ubuntu ≥ 22.04 e Omarchy 4)
 
-O port para Linux está em andamento (fase 2 — bandeja e janela sob demanda). **Não há release Linux**: cada PR publica no workflow **Checks** os artefatos `ai-monitor-linux-x86_64` e `ai-monitor-linux-aarch64` (para VMs ARM, como Omarchy em Apple Silicon). A execução X11 foi verificada apenas sob Xvfb no CI; Wayland foi exercido parcialmente sob compositor headless e ainda não foi validado em desktop real — pendente do teste na VM Omarchy.
+Na release **v0.6.0**: **Ubuntu** instala `sudo apt install ./ai-monitor_0.6.0_<amd64|arm64>.deb` (Resolve as dependências automaticamente; `gnome-keyring` é recomendado para o chaveiro). **Omarchy/Arch** baixa o `PKGBUILD` da release e roda `makepkg -si`. Remover: `sudo apt remove ai-monitor` ou `sudo pacman -R ai-monitor-bin`. O app aparece no menu de aplicativos (ícone + `.desktop`).
+
+Com bandeja (StatusNotifierItem), o app mostra somente um ícone — clique esquerdo abre o painel; fechar a janela mantém o monitor na bandeja; uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, volta ao modo janela (fecha encerra). GNOME/Ubuntu exige a extensão AppIndicator (padrão); Omarchy 4 usa o widget de bandeja. Autostart: **não é instalado** — no GNOME use "Aplicativos de inicialização"; no Hyprland, adicione `exec-once = ai-monitor` em `~/.config/hypr/autostart.conf` (autostart padrão do Hyprland; a localização preferida no Omarchy não foi verificada). A execução foi verificada em Xvfb e compositor sway headless; ainda não foi validada em desktop real — pendente do teste na VM Omarchy.
 
 ### Executar o artefato do CI
 
@@ -332,4 +334,3 @@ Com Rust estável: `cargo build --release`. Com bandeja disponível, o binário 
 - Com bandeja (StatusNotifierItem), o app mostra somente um ícone — clique esquerdo abre o painel; fechar a janela mantém o monitor rodando na bandeja; abrir uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, o app volta ao modo janela: abre direto e fechar encerra.
 - No GNOME/Ubuntu é exigida a extensão AppIndicator (ativa por padrão no Ubuntu ≥ 22.04); no Omarchy 4, o widget de bandeja da barra Quickshell.
 - Na aba de serviço local há os backends Docker e **systemd (usuário)**: controla a unit `ai-memory.service` instalada por `ai-memory setup` (iniciar, parar, reiniciar, logs do journal, atualização nativa com backup e SHA-256). Units de sistema (system-wide) estão fora de escopo. O backend precisa do barramento do usuário (`XDG_RUNTIME_DIR` e `DBUS_SESSION_BUS_ADDRESS`), presente em sessões gráficas; numa sessão sem login gráfico (SSH, headless), habilite antes `loginctl enable-linger <usuário>`.
-- `.deb` (Ubuntu), `PKGBUILD` (Omarchy/Arch), entrada `.desktop` e ícone ficam para a fase 4.

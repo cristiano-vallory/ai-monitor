@@ -1,0 +1,28 @@
+pkgname=ai-monitor-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Monitor nativo de ai-memory e Docker (binário)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/cristiano-vallory/ai-monitor'
+license=('MIT')
+provides=('ai-monitor')
+conflicts=('ai-monitor')
+depends=(glibc gcc-libs libglvnd mesa libdrm libxcb libxkbcommon libxkbcommon-x11 libx11 libxau libxdmcp libxcursor libxext libxfixes libxi libxinerama libxrandr libxrender libxxf86vm libxshmfence wayland)
+optdepends=('gnome-keyring: guardar o Bearer no chaveiro do sistema'
+            'docker: métricas de contêineres')
+source_x86_64=("@SOURCE_BASE@/ai-monitor-@VERSION@-linux-x86_64.tar.gz")
+source_aarch64=("@SOURCE_BASE@/ai-monitor-@VERSION@-linux-aarch64.tar.gz")
+sha256sums_x86_64=('@SHA_X86_64@')
+sha256sums_aarch64=('@SHA_AARCH64@')
+
+package() {
+  cd "ai-monitor-@VERSION@-linux-$CARCH"
+  install -Dm0755 ai-monitor "$pkgdir/usr/bin/ai-monitor"
+  install -Dm0644 ai-monitor.desktop "$pkgdir/usr/share/applications/ai-monitor.desktop"
+  install -Dm0644 THIRD_PARTY_NOTICES.txt "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_NOTICES.txt"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  for size in 16 32 64 128 256 512; do
+    install -Dm0644 "icons/${size}x${size}/ai-monitor.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/ai-monitor.png"
+  done
+}
