@@ -4,7 +4,7 @@ Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na 
 
 ## Instalar pelo DMG — sem Rust ou Xcode
 
-1. Acesse a [release v0.2.1](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.1) e baixe **AI-Monitor-0.2.1-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
+1. Acesse a [release v0.2.1](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.1) e baixe **AI-Monitor-0.4.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
 2. Abra o `.dmg` e arraste **AI Monitor.app** para o atalho **Applications / Aplicativos**.
 3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
 4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
@@ -27,11 +27,11 @@ Essa é uma exceção para o aplicativo específico, conforme a [orientação da
 
 ### Verificar a integridade do download (opcional)
 
-Baixe também **AI-Monitor-0.2.1-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
+Baixe também **AI-Monitor-0.4.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
 
 ```sh
 cd "$HOME/Downloads"
-shasum -a 256 -c AI-Monitor-0.2.1-macos-universal.dmg.sha256
+shasum -a 256 -c AI-Monitor-0.4.0-macos-universal.dmg.sha256
 ```
 
 O resultado deve terminar em `OK`. O checksum detecta alterações ou corrupção do arquivo; não substitui assinatura Developer ID ou notarização.
@@ -244,8 +244,8 @@ bash scripts/verify-dmg.sh
 Saídas em `dist/`:
 
 - `AI Monitor.app`: bundle Universal, assinado ad hoc.
-- `AI-Monitor-0.2.1-macos-universal.dmg`: imagem comprimida, somente leitura.
-- `AI-Monitor-0.2.1-macos-universal.dmg.sha256`: checksum para download.
+- `AI-Monitor-0.4.0-macos-universal.dmg`: imagem comprimida, somente leitura.
+- `AI-Monitor-0.4.0-macos-universal.dmg.sha256`: checksum para download.
 
 O pacote é montado em uma pasta temporária limpa, a partir do bundle, do atalho `/Applications` e do `LEIA-ME.txt`. Configurações, tokens, dados, repositório e diagnósticos não entram na imagem. O script verifica a assinatura e as arquiteturas; o verificador monta a imagem, copia o app para um destino temporário e executa `--version` antes e depois de ejetar. Essa verificação não abre o painel nem acessa Docker/ai-memory.
 
@@ -262,3 +262,18 @@ Antes de publicar, confira a correspondência entre versão de `Cargo.toml`, `In
 5. A cópia do código, `target/` e `dist/` também podem ser removidas se não precisar mais compilar.
 
 A desinstalação do monitor não remove Docker, ai-memory, contêineres, imagens, sessões ou handoffs.
+
+
+## Recursos administrativos (v0.4)
+
+Não há dependências novas para instalar o app. Habilite a API de leitura no
+ai-memory (`--enable-api` ou `--enable-web`) para selecionar projetos e consultar
+prévias. A administração exige autoridade apropriada; uma chave pessoal `aim_`
+é User e não se torna root por pertencer a um administrador. Reconsolidação e
+embeddings dependem dos providers configurados no servidor e podem gerar cobrança.
+
+Abra **Administrar memória**, selecione o projeto, prepare uma operação, leia a
+prévia e confirme o escopo. Backup e checkpoint globais usam a confirmação
+`GLOBAL`; reconsolidação usa `SESSAO <id>`. Nunca use dados reais para testar
+exclusão/manutenção. O [guia administrativo](docs/ADMINISTRATION.md) detalha
+permissões, limites, backups privados e resultados incertos após falhas de rede.

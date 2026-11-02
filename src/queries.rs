@@ -51,7 +51,7 @@ pub enum Query {
 }
 impl Query {
     pub fn execute(&self, client: &Connection) -> Result<Value, Error> {
-        let result: Value = match self {
+        let mut result: Value = match self {
             Self::Sessions {
                 scope,
                 offset,
@@ -133,6 +133,19 @@ impl Query {
             }
         }?;
         self.validate_response(&result)?;
+        if matches!(self, Self::Handoffs { .. })
+            && let Some(rows) = result["handoffs"].as_array_mut()
+        {
+            for row in rows {
+                if row["redacted"] == true
+                    && let Some(fields) = row.as_object_mut()
+                {
+                    for field in ["summary", "open_questions", "next_steps"] {
+                        fields.remove(field);
+                    }
+                }
+            }
+        }
         Ok(result)
     }
     fn validate_response(&self, v: &Value) -> Result<(), Error> {
@@ -403,5 +416,22 @@ mod tests {
         let path = &mock.requests()[0].path;
         assert!(path.contains("/api/v1/workspaces/team/projects/app/handoffs"));
         assert!(path.contains("state=accepted"));
+    }
+    #[test]
+    fn redacted_handoff_text_cannot_reach_the_admin_report() {
+        let mock = Mock::new(|_| {
+            Response::json(
+                200,
+                json!({"handoffs":[{"id":"h1","state":"open","redacted":true,"summary":"hidden","next_steps":["hidden"],"open_questions":["hidden"]}]}),
+            )
+        });
+        let result = Query::Handoffs {
+            scope: scope(),
+            state: "open".into(),
+        }
+        .execute(&Connection::new(&mock.config()).unwrap())
+        .unwrap();
+        assert!(!result.to_string().contains("hidden"));
+        assert_eq!(result["handoffs"][0]["id"], "h1");
     }
 }

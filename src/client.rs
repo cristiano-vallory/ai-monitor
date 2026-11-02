@@ -92,6 +92,7 @@ impl Connection {
             .timeout(Duration::from_secs(12))
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
+            .retry(reqwest::retry::never())
             .user_agent(concat!("ai-monitor/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| Error::Unavailable)?;
@@ -124,9 +125,22 @@ impl Connection {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Result<Vec<u8>, Error> {
+        let mut request = self.request_builder(method, path, query)?;
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().map_err(|_| Error::Unavailable)?;
+        read_response(response)
+    }
+    pub(crate) fn request_builder(
+        &self,
+        method: Method,
+        path: &[&str],
+        query: &[(&str, String)],
+    ) -> Result<reqwest::blocking::RequestBuilder, Error> {
         if path
             .iter()
-            .any(|p| *p == "." || *p == ".." || p.chars().any(char::is_control))
+            .any(|p| p.is_empty() || *p == "." || *p == ".." || p.chars().any(char::is_control))
         {
             return Err(Error::Invalid("Caminho inválido.".into()));
         }
@@ -140,36 +154,55 @@ impl Connection {
         if !self.config.token.is_empty() {
             request = request.bearer_auth(&self.config.token);
         }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request.send().map_err(|_| Error::Unavailable)?;
-        if !response.status().is_success() {
-            return Err(match response.status().as_u16() {
-                401 => Error::Authentication,
-                403 => Error::Forbidden,
-                404 => Error::Missing,
-                409 | 412 => Error::Conflict,
-                429 => Error::RateLimited,
-                n => Error::Http(n),
-            });
-        }
-        if response
-            .content_length()
-            .is_some_and(|n| n > RESPONSE_LIMIT)
-        {
-            return Err(Error::TooLarge);
-        }
-        let mut bytes = Vec::new();
-        response
-            .take(RESPONSE_LIMIT + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Error::Unavailable)?;
-        if bytes.len() as u64 > RESPONSE_LIMIT {
-            return Err(Error::TooLarge);
-        }
-        Ok(bytes)
+        Ok(request)
     }
+    pub fn post(
+        &self,
+        path: &[&str],
+        query: &[(&str, String)],
+        body: &Value,
+    ) -> Result<Value, Error> {
+        let response = self
+            .request_builder(Method::POST, path, query)?
+            .timeout(Duration::from_secs(120))
+            .json(body)
+            .send()
+            .map_err(|_| Error::Unavailable)?;
+        let bytes = read_response(response)?;
+        serde_json::from_slice(&bytes).map_err(|_| Error::Format)
+    }
+}
+
+pub(crate) fn check_status(response: &reqwest::blocking::Response) -> Result<(), Error> {
+    if response.status().is_success() {
+        return Ok(());
+    }
+    Err(match response.status().as_u16() {
+        401 => Error::Authentication,
+        403 => Error::Forbidden,
+        404 => Error::Missing,
+        409 | 412 => Error::Conflict,
+        429 => Error::RateLimited,
+        n => Error::Http(n),
+    })
+}
+pub(crate) fn read_response(response: reqwest::blocking::Response) -> Result<Vec<u8>, Error> {
+    check_status(&response)?;
+    if response
+        .content_length()
+        .is_some_and(|n| n > RESPONSE_LIMIT)
+    {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(RESPONSE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Unavailable)?;
+    if bytes.len() as u64 > RESPONSE_LIMIT {
+        return Err(Error::TooLarge);
+    }
+    Ok(bytes)
 }
 
 /// Page path is split intentionally, unlike workspace/project names (one segment).
