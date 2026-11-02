@@ -64,9 +64,9 @@ jobs:
         # Phase 4 packaging must reuse this exact runtime list.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libgl1 libegl1 libgl1-mesa-dri
+          sudo apt-get install -y libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libx11-6 libxcursor1 libxi6 libxrandr2 libxinerama1 libxrender1 libxfixes3 libxext6 libgl1 libegl1 libgl1-mesa-dri
       - name: Test-only tools
-        run: sudo apt-get install -y gnome-keyring dbus xvfb
+        run: sudo apt-get install -y gnome-keyring dbus xvfb xdotool python3-gi gir1.2-glib-2.0 python3-xlib
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Tests
@@ -91,6 +91,9 @@ jobs:
       - name: Release build
         run: cargo build --release --locked
       - name: GUI smoke (Xvfb)
+        # Sem barramento de sessão, a bandeja falha e o app cai no caminho de
+        # fallback da fase 1: abre a janela e fecha encerra — este step cobre
+        # exatamente esse caminho.
         run: |
           set +e
           xvfb-run -a timeout 15 target/release/ai-monitor
@@ -100,6 +103,20 @@ jobs:
             echo "expected the app to run until the 15 s timeout (124), got $code"
             exit 1
           fi
+      - name: Tray smoke (fake StatusNotifierWatcher)
+        run: |
+          set +e
+          xvfb-run -a dbus-run-session -- python3 scripts/tray-smoke.py target/release/ai-monitor --with-watcher
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then exit "$code"; fi
+      - name: Fallback smoke (no tray host)
+        run: |
+          set +e
+          xvfb-run -a dbus-run-session -- python3 scripts/tray-smoke.py target/release/ai-monitor --no-watcher
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then exit "$code"; fi
       - name: Package artifact
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)

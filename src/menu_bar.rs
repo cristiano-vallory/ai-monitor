@@ -1,20 +1,21 @@
 //! Status-bar presentation is independent of the dashboard's paint loop.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use crate::model::{ResourceSnapshot, Usage, bytes};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use chrono::{DateTime, Utc};
 
-#[cfg(any(target_os = "macos", test))]
-#[derive(Debug, PartialEq)]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MenuReading {
     pub title: String,
     pub ai: String,
     pub docker: String,
     pub freshness: String,
     pub activity: String,
+    pub alert: bool,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 impl MenuReading {
     pub fn from_snapshot(
         snapshot: &ResourceSnapshot,
@@ -43,6 +44,7 @@ impl MenuReading {
                 Some(age) => format!("Recursos atualizados há {age} s"),
             },
             activity: String::new(),
+            alert: false,
         }
     }
     pub fn with_context(
@@ -53,7 +55,8 @@ impl MenuReading {
         now: DateTime<Utc>,
     ) -> Self {
         if let Some(health) = health {
-            if health.fresh(now) && !health.alerts().is_empty() {
+            self.alert = health.fresh(now) && !health.alerts().is_empty();
+            if self.alert {
                 self.title.push_str("  !");
             }
             self.freshness
@@ -95,13 +98,13 @@ impl MenuReading {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn compact(usage: Option<&Usage>) -> String {
     usage
         .map(|u| format!("{:.0}% {}", u.cpu, compact_bytes(u.memory)))
         .unwrap_or("—% —".into())
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn compact_bytes(n: u64) -> String {
     if n >= 1 << 30 {
         format!("{:.1}G", n as f64 / (1u64 << 30) as f64)
@@ -109,7 +112,7 @@ fn compact_bytes(n: u64) -> String {
         format!("{:.0}M", n as f64 / (1u64 << 20) as f64)
     }
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn detail(name: &str, usage: Option<&Usage>) -> String {
     usage
         .map(|u| format!("{name} · CPU {:.1}% · memória {}", u.cpu, bytes(u.memory)))
@@ -540,5 +543,40 @@ mod tests {
             "Handoffs abertos 3 · Propostas 200+ · ws / proj"
         );
         assert!(reading.freshness.contains("Consolidações com falha"));
+    }
+
+    #[test]
+    fn alert_requires_fresh_health_with_alerts() {
+        let now = Utc::now();
+        let snap = snapshot();
+        let cfg = crate::model::Config::default();
+        let alerts = serde_json::json!({"consolidation": {"failed": 1}});
+        for (at, status, want) in [
+            (Some(now), Some(alerts.clone()), true),
+            (
+                Some(now),
+                Some(serde_json::json!({"consolidation": {"failed": 0}})),
+                false,
+            ),
+            (Some(now), None, false),
+            (
+                Some(now - chrono::Duration::seconds(crate::health::INTERVAL as i64 * 4)),
+                Some(alerts),
+                false,
+            ),
+        ] {
+            let health = crate::health::Snapshot {
+                at,
+                status: status.clone(),
+                ..Default::default()
+            };
+            let reading = MenuReading::from_snapshot(&snap, "ai-memory", 2, now).with_context(
+                None,
+                Some(&health),
+                &cfg,
+                now,
+            );
+            assert_eq!(reading.alert, want, "at={at:?} status={status:?}");
+        }
     }
 }

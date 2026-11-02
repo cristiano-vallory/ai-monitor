@@ -306,7 +306,7 @@ prévias, permissões, limites, logs privados e recuperação offline orientada.
 
 ## Linux (prévia em desenvolvimento)
 
-O port para Linux está em andamento (fase 1). **Não há release Linux**: cada PR publica no workflow **Checks** os artefatos `ai-monitor-linux-x86_64` e `ai-monitor-linux-aarch64` (para VMs ARM, como Omarchy em Apple Silicon). A execução X11 foi verificada apenas sob Xvfb no CI; Wayland ainda não foi validado — pendente do teste na VM Omarchy.
+O port para Linux está em andamento (fase 2 — bandeja e janela sob demanda). **Não há release Linux**: cada PR publica no workflow **Checks** os artefatos `ai-monitor-linux-x86_64` e `ai-monitor-linux-aarch64` (para VMs ARM, como Omarchy em Apple Silicon). A execução X11 foi verificada apenas sob Xvfb no CI; Wayland foi exercido parcialmente sob compositor headless e ainda não foi validado em desktop real — pendente do teste na VM Omarchy.
 
 ### Executar o artefato do CI
 
@@ -319,16 +319,17 @@ O port para Linux está em andamento (fase 1). **Não há release Linux**: cada 
    ./ai-monitor-<versão>-linux-<arch>/ai-monitor
    ```
 
-3. Instale as dependências de execução: `gnome-keyring` (ou outro serviço Secret Service na sessão D-Bus) e as bibliotecas gráficas `libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libgl1 libegl1 libgl1-mesa-dri`.
+3. Instale as dependências de execução: `gnome-keyring` (ou outro serviço Secret Service na sessão D-Bus) e as bibliotecas gráficas `libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libx11-6 libxcursor1 libxi6 libxrandr2 libxinerama1 libxrender1 libxfixes3 libxext6 libgl1 libegl1 libgl1-mesa-dri`.
 4. Para métricas de contêineres, o usuário precisa estar no grupo `docker` (ou equivalente com acesso ao socket).
 5. Para o "chaveiro do sistema" (Bearer guardado), é preciso um Secret Service ativo — no GNOME, o `gnome-keyring-daemon` da sessão já o fornece.
 
 ### Compilar do código-fonte
 
-Com Rust estável: `cargo build --release`. O binário abre uma janela egui normal; X11 foi verificado sob Xvfb no CI e Wayland ainda não foi validado.
+Com Rust estável: `cargo build --release`. Com bandeja disponível, o binário inicia só com o ícone e abre a janela sob demanda; sem bandeja, abre a janela direto. X11 foi verificado sob Xvfb no CI e Wayland sob compositor headless (sway); nenhum dos dois em desktop real.
 
 ### Limites atuais do port
 
-- Somente janela: fechar a janela encerra o app (não há ícone de bandeja/tray).
+- Com bandeja (StatusNotifierItem), o app mostra somente um ícone — clique esquerdo abre o painel; fechar a janela mantém o monitor rodando na bandeja; abrir uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, o app volta ao modo janela: abre direto e fechar encerra.
+- No GNOME/Ubuntu é exigida a extensão AppIndicator (ativa por padrão no Ubuntu ≥ 22.04); no Omarchy 4, o widget de bandeja da barra Quickshell.
 - Não há backend LaunchAgent nem serviço systemd na aba de serviço local — somente o backend Docker.
 - `.deb` (Ubuntu), `PKGBUILD` (Omarchy/Arch), entrada `.desktop` e ícone ficam para a fase 4.

@@ -3,10 +3,14 @@ mod api;
 mod app;
 mod auth;
 mod client;
+#[cfg(any(target_os = "linux", test))]
+mod commands;
 mod console;
 mod docker;
 mod health;
 mod keychain;
+#[cfg(target_os = "linux")]
+mod linux;
 mod local_service;
 mod maintenance;
 mod management_ui;
@@ -19,6 +23,8 @@ mod platform;
 mod queries;
 #[cfg(test)]
 mod test_support;
+#[cfg(target_os = "linux")]
+mod tray;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version") {
@@ -53,23 +59,24 @@ fn main() -> eframe::Result {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
         return Ok(());
     }
-    let show_dashboard =
-        !cfg!(target_os = "macos") || std::env::args().any(|a| a == "--show-dashboard");
-    let viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([1320., 860.])
-        .with_min_inner_size([960., 680.])
-        .with_title("AI Monitor")
-        .with_visible(show_dashboard)
-        .with_active(show_dashboard);
     #[cfg(target_os = "linux")]
-    let viewport = viewport.with_app_id("ai-monitor");
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    eframe::run_native(
-        "AI Monitor",
-        options,
-        Box::new(move |cc| Ok(Box::new(app::MonitorApp::new(cc, config)))),
-    )
+    return linux::run(config);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let show_dashboard = std::env::args().any(|a| a == "--show-dashboard");
+        let options = eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_inner_size([1320., 860.])
+                .with_min_inner_size([960., 680.])
+                .with_title("AI Monitor")
+                .with_visible(show_dashboard)
+                .with_active(show_dashboard),
+            ..Default::default()
+        };
+        eframe::run_native(
+            "AI Monitor",
+            options,
+            Box::new(move |cc| Ok(Box::new(app::MonitorApp::new(cc, config)))),
+        )
+    }
 }
