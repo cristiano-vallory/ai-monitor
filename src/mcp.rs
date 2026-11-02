@@ -8,13 +8,13 @@ use std::{
 };
 
 fn decode(message: Value, id: u64) -> Result<Value, Error> {
-    if message["jsonrpc"] != "2.0" || message["id"] != id {
+    if message["jsonrpc"] != "2.0" {
         return Err(Error::Format);
     }
-    if !message["error"].is_null() {
+    if !message["error"].is_null() && (message["id"] == id || message["id"].is_null()) {
         return Err(Error::Invalid("O servidor recusou a chamada MCP. Verifique compatibilidade, permissões e estado do objeto.".into()));
     }
-    if !message["result"].is_object() {
+    if message["id"] != id || !message["result"].is_object() {
         return Err(Error::Format);
     }
     Ok(message["result"].clone())
@@ -47,9 +47,9 @@ fn parse_sse(mut reader: impl BufRead, id: u64) -> Result<Value, Error> {
         if total > RESPONSE_LIMIT as usize {
             return Err(Error::TooLarge);
         }
-        if n == 0 || line.trim_end().is_empty() {
+        if n == 0 || line.trim_end_matches(['\r', '\n']).is_empty() {
             if let Ok(message) = serde_json::from_str::<Value>(&data)
-                && message["id"] == id
+                && (message["id"] == id || (!message["error"].is_null() && message["id"].is_null()))
             {
                 return decode(message, id);
             }
@@ -78,50 +78,56 @@ impl Connection {
             .send().map_err(|_|Error::Unavailable)?;
         check_status(&init)?;
         let session = init.headers().get("mcp-session-id").cloned();
-        let initialized = rpc_body(init, 1)?;
-        let protocol = initialized["protocolVersion"]
-            .as_str()
-            .ok_or(Error::Format)?;
-        let call = |body: Value, id: Option<u64>| -> Result<Value, Error> {
-            if cancelled() {
-                return Err(Error::Cancelled);
+        let mut protocol: Option<String> = None;
+        let result = (|| {
+            let initialized = rpc_body(init, 1)?;
+            let proto = initialized["protocolVersion"]
+                .as_str()
+                .ok_or(Error::Format)?;
+            protocol = Some(proto.to_owned());
+            let call = |body: Value, id: Option<u64>| -> Result<Value, Error> {
+                if cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let mut request = self
+                    .request_builder(Method::POST, &["mcp"], &[])?
+                    .timeout(Duration::from_secs(120))
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("MCP-Protocol-Version", proto)
+                    .json(&body);
+                if let Some(s) = &session {
+                    request = request.header("Mcp-Session-Id", s);
+                }
+                let response = request.send().map_err(|_| Error::Unavailable)?;
+                if let Some(id) = id {
+                    rpc_body(response, id)
+                } else {
+                    check_status(&response)?;
+                    Ok(Value::Null)
+                }
+            };
+            if session.is_some() {
+                call(
+                    json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                    None,
+                )?;
             }
-            let mut request = self
-                .request_builder(Method::POST, &["mcp"], &[])?
-                .timeout(Duration::from_secs(120))
-                .header("Accept", "application/json, text/event-stream")
-                .header("MCP-Protocol-Version", protocol)
-                .json(&body);
-            if let Some(s) = &session {
-                request = request.header("Mcp-Session-Id", s);
-            }
-            let response = request.send().map_err(|_| Error::Unavailable)?;
-            if let Some(id) = id {
-                rpc_body(response, id)
-            } else {
-                check_status(&response)?;
-                Ok(Value::Null)
-            }
-        };
-        if session.is_some() {
             call(
-                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-                None,
-            )?;
-        }
-        let result = call(
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
-            Some(2),
-        );
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+                Some(2),
+            )
+        })();
         // Best-effort release of stateful transport resources, never repeat the tool.
         if let Some(session) = session
             && let Ok(request) = self.request_builder(Method::DELETE, &["mcp"], &[])
         {
-            let _ = request
+            let mut request = request
                 .timeout(Duration::from_secs(2))
-                .header("Mcp-Session-Id", session)
-                .header("MCP-Protocol-Version", protocol)
-                .send();
+                .header("Mcp-Session-Id", session);
+            if let Some(protocol) = &protocol {
+                request = request.header("MCP-Protocol-Version", protocol);
+            }
+            let _ = request.send();
         }
         let result = result?;
         if result["isError"] == true {
@@ -155,6 +161,26 @@ mod tests {
         assert_eq!(
             decode(json!({"jsonrpc":"2.0","id":99,"result":{}}), 2),
             Err(Error::Format)
+        );
+    }
+
+    #[test]
+    fn sse_surfaces_null_id_jsonrpc_error_and_ignores_whitespace_only_lines() {
+        let err_stream =
+            b"   \n\ndata: {\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid\"}}\n\n";
+        assert!(matches!(
+            parse_sse(std::io::Cursor::new(err_stream), 2),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn sse_whitespace_only_line_inside_event_does_not_end_the_event() {
+        let stream =
+            b"data: {\"jsonrpc\":\"2.0\",\n   \ndata: \"id\":2,\"result\":{\"ok\":true}}\n\n";
+        assert_eq!(
+            parse_sse(std::io::Cursor::new(stream), 2),
+            Ok(json!({"ok":true}))
         );
     }
 }
@@ -221,5 +247,106 @@ mod transport_tests {
             Err(Error::Cancelled)
         );
         assert_eq!(mock.requests().len(), 1);
+    }
+
+    #[test]
+    fn failed_initialized_notification_still_closes_stateful_mcp_session() {
+        let mock = Mock::new(|r| {
+            if r.method == "DELETE" {
+                return Response::json(200, json!({}));
+            }
+            match r.body["method"].as_str().unwrap() {
+                "initialize" => Response {
+                    status: 200,
+                    body: json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}})
+                        .to_string()
+                        .into_bytes(),
+                    headers: vec![("Mcp-Session-Id".into(), "synthetic-leak-check".into())],
+                },
+                "notifications/initialized" => Response::json(500, json!({})),
+                _ => panic!("tools/call must not run when notifications/initialized fails"),
+            }
+        });
+        let res =
+            Connection::new(&mock.config())
+                .unwrap()
+                .tool("memory_feedback", &json!({}), || false);
+        assert_eq!(res, Err(Error::Http(500)));
+        let requests = mock.requests();
+        assert!(
+            requests.iter().any(|r| r.method == "DELETE"
+                && r.headers
+                    .to_lowercase()
+                    .contains("mcp-session-id: synthetic-leak-check")),
+            "stateful MCP session must be closed with DELETE even when notifications/initialized fails"
+        );
+    }
+
+    #[test]
+    fn initialize_body_failure_still_closes_stateful_session() {
+        let mock = Mock::new(|r| {
+            if r.method == "DELETE" {
+                return Response::json(200, json!({}));
+            }
+            Response {
+                status: 200,
+                body: json!({"jsonrpc":"2.0","id":1,"result":{}})
+                    .to_string()
+                    .into_bytes(),
+                headers: vec![("Mcp-Session-Id".into(), "leak-check".into())],
+            }
+        });
+        let res =
+            Connection::new(&mock.config())
+                .unwrap()
+                .tool("memory_feedback", &json!({}), || false);
+        assert_eq!(res, Err(Error::Format));
+        let requests = mock.requests();
+        let delete = requests
+            .iter()
+            .find(|r| r.method == "DELETE")
+            .expect("stateful session must be closed with DELETE even when initialize body lacks protocolVersion");
+        assert!(
+            delete
+                .headers
+                .to_lowercase()
+                .contains("mcp-session-id: leak-check"),
+            "DELETE must carry the session id, got {:?}",
+            delete.headers
+        );
+        assert!(
+            !delete
+                .headers
+                .to_lowercase()
+                .contains("mcp-protocol-version"),
+            "protocol was never negotiated; DELETE must not claim one"
+        );
+    }
+
+    #[test]
+    fn unparseable_initialize_body_still_closes_stateful_session() {
+        let mock = Mock::new(|r| {
+            if r.method == "DELETE" {
+                return Response::json(200, json!({}));
+            }
+            Response {
+                status: 200,
+                body: b"not json".to_vec(),
+                headers: vec![("Mcp-Session-Id".into(), "leak-check-2".into())],
+            }
+        });
+        let res =
+            Connection::new(&mock.config())
+                .unwrap()
+                .tool("memory_feedback", &json!({}), || false);
+        assert_eq!(res, Err(Error::Format));
+        let requests = mock.requests();
+        assert!(
+            requests.iter().any(|r| r.method == "DELETE"
+                && r.headers
+                    .to_lowercase()
+                    .contains("mcp-session-id: leak-check-2")),
+            "stateful session must be closed with DELETE even when initialize body is unparseable"
+        );
     }
 }

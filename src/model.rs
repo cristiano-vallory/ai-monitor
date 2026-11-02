@@ -82,20 +82,42 @@ impl Config {
             ..Self::default()
         }
     }
-    pub fn load() -> Self {
-        let mut config = Self::from_sources(
-            std::fs::read(Self::path()).ok().as_deref(),
-            std::env::var("AI_MEMORY_SERVER_URL").ok(),
-            std::env::var("AI_MEMORY_AUTH_TOKEN").ok(),
-        );
-        if config.remember_token
-            && config.token.is_empty()
-            && std::env::var_os("AI_MEMORY_AUTH_TOKEN").is_none()
-            && let Ok(Some(token)) = crate::keychain::load(&config.endpoint)
-        {
-            config.token = token;
+    pub fn load_from(
+        disk: Option<&[u8]>,
+        env_url: Option<String>,
+        env_token: Option<std::ffi::OsString>,
+        keychain: impl FnOnce(&str) -> Option<String>,
+    ) -> Self {
+        let explicit = env_token.is_some();
+        let mut config =
+            Self::from_sources(disk, env_url, env_token.and_then(|t| t.into_string().ok()));
+        if !explicit {
+            let endpoint = config.endpoint.clone();
+            config.apply_keychain_token(|| keychain(&endpoint));
         }
         config
+    }
+    pub fn load() -> Self {
+        Self::load_from(
+            std::fs::read(Self::path()).ok().as_deref(),
+            std::env::var("AI_MEMORY_SERVER_URL").ok(),
+            std::env::var_os("AI_MEMORY_AUTH_TOKEN"),
+            |e| crate::keychain::load(e).ok().flatten(),
+        )
+    }
+    pub fn apply_keychain_token(&mut self, load: impl FnOnce() -> Option<String>) {
+        if self.remember_token
+            && self.token.is_empty()
+            && let Some(token) = load()
+        {
+            let token = token.trim().to_owned();
+            if !token.is_empty() {
+                self.token = token;
+                if self.validate().is_err() {
+                    self.token.clear();
+                }
+            }
+        }
     }
     pub fn validate(&self) -> Result<(), String> {
         if let Some(scope) = &self.proposal_watch {
@@ -494,5 +516,90 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn keychain_token_is_refused_for_insecure_remote_http_and_normalized() {
+        let mut remote_http = Config {
+            endpoint: "http://remote.example.com:49374".into(),
+            remember_token: true,
+            ..Default::default()
+        };
+        remote_http.apply_keychain_token(|| Some("  synthetic-keychain-token  ".into()));
+        assert!(
+            remote_http.token.is_empty(),
+            "keychain token must not be attached to plaintext remote HTTP endpoint"
+        );
+        assert!(remote_http.validate().is_ok());
+
+        let mut remote_https = Config {
+            endpoint: "https://remote.example.com:49374".into(),
+            remember_token: true,
+            ..Default::default()
+        };
+        remote_https.apply_keychain_token(|| Some("  synthetic-keychain-token  ".into()));
+        assert_eq!(remote_https.token, "synthetic-keychain-token");
+        assert!(remote_https.validate().is_ok());
+    }
+
+    #[test]
+    fn keychain_is_only_read_when_remember_is_enabled_and_no_env_token() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let keychain = |_: &str| {
+            calls.set(calls.get() + 1);
+            Some("  synthetic-keychain-token  ".to_owned())
+        };
+
+        let off_disk = serde_json::to_vec(&Config {
+            endpoint: "http://localhost:49374".into(),
+            remember_token: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let cfg = Config::load_from(Some(&off_disk), None, None, keychain);
+        assert_eq!(
+            calls.get(),
+            0,
+            "remember_token=false must not read Keychain"
+        );
+        assert!(cfg.token.is_empty());
+
+        let on_disk = serde_json::to_vec(&Config {
+            endpoint: "http://localhost:49374".into(),
+            remember_token: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let cfg = Config::load_from(Some(&on_disk), None, None, keychain);
+        assert_eq!(calls.get(), 1, "remember_token=true reads Keychain once");
+        assert_eq!(cfg.token, "synthetic-keychain-token");
+
+        let cfg = Config::load_from(
+            Some(&on_disk),
+            None,
+            Some(std::ffi::OsString::from("")),
+            keychain,
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "explicit env token (even empty) skips Keychain"
+        );
+        assert!(cfg.token.is_empty());
+
+        use std::os::unix::ffi::OsStringExt;
+        let cfg = Config::load_from(
+            Some(&on_disk),
+            None,
+            Some(std::ffi::OsString::from_vec(vec![0x66, 0xff])),
+            keychain,
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "non-UTF-8 env token still counts as explicit"
+        );
+        assert!(cfg.token.is_empty());
     }
 }

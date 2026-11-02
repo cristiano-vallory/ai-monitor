@@ -124,6 +124,14 @@ impl Management {
                 }
             }
         }
+        if self
+            .receipt
+            .as_ref()
+            .is_some_and(|r| r.at.elapsed() > std::time::Duration::from_secs(300))
+        {
+            self.clear();
+            self.notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.".into();
+        }
     }
     pub fn show(&mut self, ui: &mut egui::Ui, shared: &Arc<Shared>, projects: &[Project]) {
         self.poll(shared);
@@ -245,27 +253,31 @@ impl Management {
             });
             if self.tab == 0 && result.is_array() {
                 ui.small("Até 200 propostas; filtre pelo estado. Use o ID exato para revisar uma proposta fora da lista.");
-                for row in result.as_array().unwrap().iter().take(200) {
-                    ui.push_id(row["id"].as_str().unwrap_or("unknown"), |ui| {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.strong(row["title"].as_str().unwrap_or("Proposta"));
-                            ui.label(format!(
-                                "{} · {}",
-                                str_field(row, "status"),
-                                str_field(row, "target_path")
-                            ));
-                            ui.small(str_field(row, "id"));
-                            if ui
-                                .add_enabled(
-                                    !self.busy && self.receipt.is_none(),
-                                    egui::Button::new("Selecionar ID"),
-                                )
-                                .clicked()
-                            {
-                                self.identifier = str_field(row, "id").into();
-                            }
-                        });
-                    });
+                let mut seen = std::collections::HashSet::new();
+                for (idx, row) in result.as_array().unwrap().iter().take(200).enumerate() {
+                    ui.push_id(
+                        crate::console::row_key(&mut seen, row["id"].as_str(), idx),
+                        |ui| {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.strong(row["title"].as_str().unwrap_or("Proposta"));
+                                ui.label(format!(
+                                    "{} · {}",
+                                    str_field(row, "status"),
+                                    str_field(row, "target_path")
+                                ));
+                                ui.small(str_field(row, "id"));
+                                if ui
+                                    .add_enabled(
+                                        !self.busy && self.receipt.is_none(),
+                                        egui::Button::new("Selecionar ID"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.identifier = str_field(row, "id").into();
+                                }
+                            });
+                        },
+                    );
                 }
             } else {
                 console::show_values(ui, &result, 0);
@@ -520,5 +532,52 @@ mod tests {
         assert!(ui.reason.is_empty());
         assert!(ui.identifier.is_empty());
         assert!(ui.result.is_none());
+    }
+
+    #[test]
+    fn expired_preview_receipt_is_cleared_during_poll() {
+        let shared = Shared::unstarted(crate::model::Config::default());
+        let mut ui = Management::new(shared.clone());
+        let receipt = |age: u64| Receipt {
+            action: Action {
+                scope: Scope {
+                    workspace: "fixture".into(),
+                    project: "demo".into(),
+                },
+                intent: Intent::Checkpoint {
+                    message: "test".into(),
+                },
+            },
+            generation: 0,
+            at: std::time::Instant::now() - std::time::Duration::from_secs(age),
+        };
+        ui.receipt = Some(receipt(301));
+        ui.result = Some(serde_json::json!({"preview": true}));
+        ui.error = Some("stale error".into());
+        ui.confirm = "GLOBAL".into();
+        ui.poll(&shared);
+        assert!(
+            ui.receipt.is_none(),
+            "expired receipt must be cleared during poll so form fields unlock"
+        );
+        assert!(
+            ui.result.is_none(),
+            "expired preview result must be discarded, not kept on screen"
+        );
+        assert!(ui.error.is_none(), "expiry must clear stale errors");
+        assert!(ui.confirm.is_empty());
+        assert!(
+            ui.notice.contains("expirou"),
+            "expiry notice expected, got {:?}",
+            ui.notice
+        );
+
+        ui.receipt = Some(receipt(299));
+        ui.result = Some(serde_json::json!({"preview": true}));
+        ui.poll(&shared);
+        assert!(
+            ui.receipt.is_some() && ui.result.is_some(),
+            "fresh preview must be kept"
+        );
     }
 }

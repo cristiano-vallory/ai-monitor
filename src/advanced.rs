@@ -516,7 +516,13 @@ impl Operation {
             }
             CreateKey => json!({"username":self.s("username"),"label":self.s("label")}),
             SendMessage => {
-                json!({"from_workspace":self.s("workspace"),"from_project":self.s("project"),"to_workspace":self.s("to_workspace"),"to_project":self.s("to_project"),"subject":self.s("subject"),"nature":self.s("nature"),"evidence":self.s("evidence"),"body":self.s("body")})
+                let mut b = json!({"from_workspace":self.s("workspace"),"from_project":self.s("project"),"to_workspace":self.s("to_workspace"),"to_project":self.s("to_project"),"nature":self.s("nature"),"body":self.s("body")});
+                for k in ["subject", "evidence"] {
+                    if !self.s(k).is_empty() {
+                        b[k] = json!(self.s(k));
+                    }
+                }
+                b
             }
             CancelMessage => {
                 b["message_id"] = json!(self.s("message_id"));
@@ -585,15 +591,50 @@ pub fn concealed(value: &Value) -> Value {
         Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(k, v)| {
-                    let lower = k.to_ascii_lowercase();
+                    let name: String = k
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .collect::<String>()
+                        .to_lowercase();
+                    let named_secret = [
+                        "password",
+                        "passwd",
+                        "passphrase",
+                        "secret",
+                        "token",
+                        "csrf",
+                        "cookie",
+                        "authorization",
+                        "bearer",
+                        "pepper",
+                    ]
+                    .iter()
+                    .any(|w| name.contains(w))
+                        || [
+                            "apikey",
+                            "privatekey",
+                            "rawkey",
+                            "accesskey",
+                            "signingkey",
+                            "encryptionkey",
+                            "masterkey",
+                        ]
+                        .iter()
+                        .any(|w| name.ends_with(w));
+                    let counter = v.is_number()
+                        && (name.ends_with("tokens")
+                            || [
+                                "count", "total", "limit", "used", "usage", "budget", "max", "min",
+                            ]
+                            .iter()
+                            .any(|w| name.contains(w)));
+                    if !named_secret && name.contains("prefix") && v.is_string() {
+                        return (k.clone(), v.clone());
+                    }
+                    let secret_key = named_secret && !v.is_null() && !v.is_boolean() && !counter;
                     (
                         k.clone(),
-                        if lower.contains("password")
-                            || lower == "token"
-                            || lower == "secret"
-                            || lower.contains("csrf")
-                            || lower.contains("cookie")
-                        {
+                        if secret_key {
                             json!("[oculto]")
                         } else {
                             concealed(v)
@@ -603,6 +644,7 @@ pub fn concealed(value: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(rows) => Value::Array(rows.iter().map(concealed).collect()),
+        Value::String(s) if s.starts_with("aim_") => json!("[oculto]"),
         _ => value.clone(),
     }
 }
@@ -690,5 +732,76 @@ mod tests {
         o.values
             .insert("to_workspace".into(), o.s("workspace").into());
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn concealed_masks_compound_secret_keys_and_aim_prefixed_values_and_omits_empty_optionals() {
+        let masked = concealed(&json!({
+            "api_token": "secret-1",
+            "raw_token": "secret-2",
+            "secret_key": "secret-3",
+            "api_key": "secret-4",
+            "credential": "aim_live_secret_value",
+            "openai_api_key": "leak-1",
+            "ssh_private_key": "leak-2",
+            "authorization": "Bearer leak-3",
+            "x-api-key": "leak-4",
+            "apikey": "leak-5",
+            "token": 123456,
+            "prefix_token": "leak-6",
+            "authorization_prefix": "Bearer leak-7",
+            "token_prefix": "aim_ab12",
+            "input_tokens": 42,
+            "max_tokens": 1000,
+            "token_count": 5,
+            "key_prefix": "aim_ab12",
+            "api_key_id": "k1",
+            "id": "public-id",
+            "password_set": true,
+            "x": [{"refresh_token": "nested-secret"}]
+        }));
+        let oculto = json!("[oculto]");
+        for key in [
+            "api_token",
+            "raw_token",
+            "secret_key",
+            "api_key",
+            "credential",
+            "openai_api_key",
+            "ssh_private_key",
+            "authorization",
+            "x-api-key",
+            "apikey",
+            "token",
+            "prefix_token",
+            "authorization_prefix",
+            "token_prefix",
+        ] {
+            assert_eq!(masked[key], oculto, "{key} must be masked");
+        }
+        assert_eq!(
+            masked["x"][0]["refresh_token"], oculto,
+            "nested secret must be masked"
+        );
+        assert_eq!(masked["input_tokens"], 42);
+        assert_eq!(masked["max_tokens"], 1000);
+        assert_eq!(masked["token_count"], 5);
+        assert_eq!(masked["key_prefix"], "aim_ab12");
+        assert_eq!(masked["api_key_id"], "k1");
+        assert_eq!(masked["id"], "public-id");
+        assert_eq!(masked["password_set"], true);
+
+        let masked = concealed(&json!({"token": null}));
+        assert_eq!(masked["token"], serde_json::Value::Null);
+
+        let mut msg = Operation::new(SendMessage);
+        msg.values.insert("workspace".into(), "w1".into());
+        msg.values.insert("project".into(), "p1".into());
+        msg.values.insert("to_workspace".into(), "w2".into());
+        msg.values.insert("to_project".into(), "p2".into());
+        msg.values.insert("body".into(), "hello".into());
+        let body = msg.body(false);
+        assert!(body.get("subject").is_none());
+        assert!(body.get("evidence").is_none());
     }
 }

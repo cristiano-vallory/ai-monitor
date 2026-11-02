@@ -63,6 +63,10 @@ pub fn collect(config: &Config, stop: &Arc<AtomicBool>) -> ApiSnapshot {
 
 pub fn collect_until(config: &Config, cancel: impl Fn() -> bool + Sync) -> ApiSnapshot {
     let mut result = ApiSnapshot::default();
+    if let Err(e) = config.validate() {
+        result.error = Some(e);
+        return result;
+    }
     if cancel() {
         result.error = Some("Coleta interrompida.".into());
         return result;
@@ -93,11 +97,13 @@ pub fn collect_until(config: &Config, cancel: impl Fn() -> bool + Sync) -> ApiSn
         result.error = Some("Coleta interrompida.".into());
         return result;
     }
-    result.version = endpoint(&config.endpoint, &["identity"])
-        .and_then(|url| get::<serde_json::Value>(&client, config, url))
-        .ok()
-        .and_then(|v| v["version"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    if config.human.is_none() {
+        result.version = endpoint(&config.endpoint, &["identity"])
+            .and_then(|url| get::<serde_json::Value>(&client, config, url))
+            .ok()
+            .and_then(|v| v["version"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+    }
     let deadline = Instant::now() + Duration::from_secs(30);
     let cancel = &cancel;
     let chunks = std::thread::scope(|scope| {
@@ -543,5 +549,49 @@ mod tests {
         assert!(stopped.at.is_none());
         assert!(stopped.handoff_total.is_none());
         assert!(stopped.error.is_some());
+    }
+
+    #[test]
+    fn collect_validates_config_and_does_not_send_human_cookies_to_identity() {
+        let insecure = Config {
+            endpoint: "http://remote.example.com:49374".into(),
+            token: "synthetic-bearer".into(),
+            ..Default::default()
+        };
+        let snap = collect(&insecure, &Arc::new(AtomicBool::new(false)));
+        assert!(
+            snap.error.as_deref().unwrap_or("").contains("HTTPS"),
+            "collect must validate config before attempting HTTP calls"
+        );
+
+        let server = Mock::new(|path| {
+            if path == "/admin/status" {
+                return (200, json!({"version":"3.3.1","counts":{}}));
+            }
+            (200, json!([]))
+        });
+        let human_cfg = Config {
+            endpoint: server.url.clone(),
+            human: Some(crate::auth::Session::for_test(
+                "synthetic-session",
+                "synthetic-csrf",
+            )),
+            ..Default::default()
+        };
+        let snap = collect(&human_cfg, &Arc::new(AtomicBool::new(false)));
+        assert!(snap.error.is_none());
+        assert!(
+            snap.version.is_empty(),
+            "human session must not trigger any version endpoint"
+        );
+        let requests = server.requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|r| r.contains("GET /identity ")),
+            "human session must not be sent to machine-only /identity endpoint"
+        );
+        assert!(
+            !requests.iter().any(|r| r.contains("GET /admin/status ")),
+            "API collector must not poll /admin/status; version comes from health"
+        );
     }
 }

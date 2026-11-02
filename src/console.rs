@@ -92,7 +92,7 @@ impl Console {
             Err(e) => self.error = Some(e.to_string()),
         }
     }
-    fn poll(&mut self, shared: &Shared) {
+    pub(crate) fn poll(&mut self, shared: &Shared) {
         while let Ok(reply) = self.worker.replies.try_recv() {
             self.busy = false;
             if reply.ticket != self.ticket
@@ -379,14 +379,15 @@ impl Console {
                         },
                     );
                 }
-                for row in array(&data["observations"]) {
+                let mut seen = std::collections::HashSet::new();
+                for (idx, row) in array(&data["observations"]).iter().enumerate() {
                     egui::CollapsingHeader::new(format!(
                         "{} · {} · {}",
                         text(row, "created_at"),
                         text(row, "kind"),
                         text(row, "title")
                     ))
-                    .id_salt(text(row, "id"))
+                    .id_salt(row_key(&mut seen, row["id"].as_str(), idx))
                     .show(ui, |ui| {
                         ui.add(egui::Label::new(text(row, "body")).wrap().selectable(true));
                     });
@@ -749,6 +750,16 @@ fn array(v: &Value) -> &[Value] {
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("—")
 }
+pub(crate) fn row_key(
+    seen: &mut std::collections::HashSet<String>,
+    id: Option<&str>,
+    idx: usize,
+) -> (String, Option<usize>) {
+    match id {
+        Some(id) if !id.is_empty() && seen.insert(id.to_owned()) => (id.to_owned(), None),
+        _ => (id.unwrap_or("").to_owned(), Some(idx)),
+    }
+}
 fn number(v: &Value) -> String {
     v.as_u64().map(|n| n.to_string()).unwrap_or("—".into())
 }
@@ -837,8 +848,13 @@ fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
         }
         egui::CollapsingHeader::new("Uso dos providers por atividade").show(ui, |ui| {
             ui.small("Contadores passivos desde o início do servidor. Estimativas e tokens reportados são medidas distintas.");
-            for row in array(&v["providers"]["llm_workloads"]).iter().take(100) {
-                ui.push_id(text(row, "workload"), |ui| {
+            let mut seen = std::collections::HashSet::new();
+            for (idx, row) in array(&v["providers"]["llm_workloads"])
+                .iter()
+                .take(100)
+                .enumerate()
+            {
+                ui.push_id(row_key(&mut seen, row["workload"].as_str(), idx), |ui| {
                     ui.strong(text(row, "workload"));
                     count_grid(ui, "workload", row, &[("calls", "Chamadas"), ("errors", "Falhas"), ("reported_input_tokens", "Entrada reportada"), ("reported_output_tokens", "Saída reportada"), ("estimated_input_tokens", "Entrada estimada"), ("estimated_output_tokens", "Saída estimada")]);
                 });
@@ -1070,5 +1086,24 @@ mod tests {
         inspector.reset();
         assert!(inspector.result.is_none());
         assert!(inspector.search.is_empty());
+    }
+
+    #[test]
+    fn row_key_is_stable_for_unique_ids_and_disambiguates_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(row_key(&mut seen, Some("a"), 0), ("a".into(), None));
+        assert_eq!(row_key(&mut seen, Some("b"), 1), ("b".into(), None));
+
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(row_key(&mut seen, Some("b"), 0), ("b".into(), None));
+        assert_eq!(row_key(&mut seen, Some("a"), 1), ("a".into(), None));
+
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(row_key(&mut seen, Some("a"), 0), ("a".into(), None));
+        assert_eq!(row_key(&mut seen, Some("a"), 1), ("a".into(), Some(1)));
+
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(row_key(&mut seen, None, 0), ("".into(), Some(0)));
+        assert_eq!(row_key(&mut seen, Some(""), 3), ("".into(), Some(3)));
     }
 }

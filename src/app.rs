@@ -1,4 +1,32 @@
 use crate::{model::*, monitor::Shared};
+
+enum KeychainChange<'a> {
+    Save { endpoint: &'a str, token: &'a str },
+    Forget(&'a str),
+    Keep,
+}
+fn server_version<'a>(api: &'a ApiSnapshot, health: &'a crate::health::Snapshot) -> &'a str {
+    if !api.version.is_empty() {
+        return &api.version;
+    }
+    health
+        .status
+        .as_ref()
+        .and_then(|s| s["version"].as_str())
+        .unwrap_or("")
+}
+fn keychain_change<'a>(current: &'a Config, draft: &'a Config) -> KeychainChange<'a> {
+    if draft.remember_token {
+        KeychainChange::Save {
+            endpoint: &draft.endpoint,
+            token: &draft.token,
+        }
+    } else if current.remember_token {
+        KeychainChange::Forget(&current.endpoint)
+    } else {
+        KeychainChange::Keep
+    }
+}
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use egui_extras::{Column, TableBuilder};
@@ -1029,14 +1057,24 @@ impl MonitorApp {
             });
             ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,"Guardar o Bearer no Keychain para este servidor (opcional)");
             ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(MUTED));
-            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new("Carregar Bearer do Keychain deste endereço")).clicked(){match crate::keychain::load(&self.draft.endpoint){Ok(Some(token))=>{self.draft.token=token;self.settings_message="Token carregado no campo. Salve para conectar.".into();},Ok(None)=>self.settings_message="Nenhum token guardado para esse endereço.".into(),Err(e)=>self.settings_message=e}}
+            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new("Carregar Bearer do Keychain deste endereço")).clicked(){
+                self.draft.normalize();
+                match crate::keychain::load(&self.draft.endpoint){
+                    Ok(Some(token))=>{self.draft.token=token.trim().into();self.settings_message="Token carregado no campo. Salve para conectar.".into();},
+                    Ok(None)=>self.settings_message="Nenhum token guardado para esse endereço.".into(),
+                    Err(e)=>self.settings_message=e
+                }
+            }
 
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy, egui::Button::new(RichText::new("Salvar e conectar").color(GREEN))).clicked() {
                     self.draft.normalize();
                     match self.draft.validate().and_then(|_|{
-                        if self.draft.remember_token {crate::keychain::save(&self.draft.endpoint,&self.draft.token)?;}
-                        else if self.config.remember_token && self.config.endpoint==self.draft.endpoint {crate::keychain::forget(&self.draft.endpoint)?;}
+                        match keychain_change(&self.config,&self.draft) {
+                            KeychainChange::Save{endpoint,token}=>crate::keychain::save(endpoint,token)?,
+                            KeychainChange::Forget(endpoint)=>crate::keychain::forget(endpoint)?,
+                            KeychainChange::Keep=>{}
+                        }
                         self.draft.save()
                     }) {
                         Ok(())=> {self.reconnect(self.draft.clone());self.authentication.clear();self.settings_message="Configuração salva. Reconectando…".into();},
@@ -1057,7 +1095,7 @@ impl MonitorApp {
         });
         ui.add_space(12.);
         panel().show(ui,|ui| {
-            section(ui,"Diagnóstico da conexão");ui.label(format!("ai-memory {}",if self.api.version.is_empty(){"—"}else{&self.api.version}));
+            section(ui,"Diagnóstico da conexão");ui.label(format!("ai-memory {}",{let v=server_version(&self.api,&self.health);if v.is_empty(){"—"}else{v}}));
             ui.label(format!("Recursos: {} · API: {}",age(self.resources.at),age(self.api.at)));
             ui.label("As consultas respeitam o usuário do token. Handoffs de outros usuários podem não estar visíveis.");
             if self.api.errors.is_empty()&&self.api.error.is_none(){ui.label(RichText::new(if self.api.at.is_some(){"Última coleta da API concluída sem erros."}else{"Conectando…"}).color(GREEN));}
@@ -1072,6 +1110,7 @@ impl eframe::App for MonitorApp {
         if let Some(config) = self.authentication.poll(&self.shared) {
             self.reconnect(config);
         }
+        self.central.poll(&self.shared);
         self.management.poll(&self.shared);
         self.operations.poll(&self.shared);
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -1591,5 +1630,75 @@ mod tests {
         assert!(process_matches(&proc, "9876"));
         assert!(process_matches(&proc, "docker desktop"));
         assert!(!process_matches(&proc, "ai-memory"));
+    }
+
+    #[test]
+    fn keychain_change_decides_save_forget_keep() {
+        let current = Config {
+            endpoint: "https://old.example".into(),
+            token: "old-token".into(),
+            remember_token: true,
+            ..Default::default()
+        };
+        let draft = Config {
+            endpoint: "https://new.example".into(),
+            token: "draft-token".into(),
+            remember_token: true,
+            ..Default::default()
+        };
+        match keychain_change(&current, &draft) {
+            KeychainChange::Save { endpoint, token } => {
+                assert_eq!(endpoint, "https://new.example");
+                assert_eq!(token, "draft-token");
+            }
+            _ => panic!("remembered draft must save to the draft endpoint"),
+        }
+
+        let mut draft = current.clone();
+        draft.remember_token = false;
+        match keychain_change(&current, &draft) {
+            KeychainChange::Forget(endpoint) => assert_eq!(endpoint, "https://old.example"),
+            _ => panic!("unchecked remember must forget the connected endpoint"),
+        }
+        draft.endpoint = "https://new.example".into();
+        match keychain_change(&current, &draft) {
+            KeychainChange::Forget(endpoint) => assert_eq!(
+                endpoint, "https://old.example",
+                "forget must target the endpoint that was connected, not the draft"
+            ),
+            _ => panic!("endpoint change with unchecked remember must still forget"),
+        }
+        match keychain_change(&current, &Config::default()) {
+            KeychainChange::Forget(endpoint) => assert_eq!(endpoint, "https://old.example"),
+            _ => panic!("restoring defaults must forget the connected endpoint"),
+        }
+
+        let plain = Config::default();
+        assert!(matches!(
+            keychain_change(&plain, &Config::default()),
+            KeychainChange::Keep
+        ));
+    }
+
+    #[test]
+    fn server_version_prefers_api_then_health_then_empty() {
+        let api = crate::model::ApiSnapshot {
+            version: "9.9.9".into(),
+            ..Default::default()
+        };
+        let health = crate::health::Snapshot {
+            status: Some(serde_json::json!({"version":"1.2.3"})),
+            ..Default::default()
+        };
+        assert_eq!(server_version(&api, &health), "9.9.9");
+        let api = crate::model::ApiSnapshot::default();
+        assert_eq!(server_version(&api, &health), "1.2.3");
+        let health = crate::health::Snapshot {
+            status: Some(serde_json::json!({"counts":{}})),
+            ..Default::default()
+        };
+        assert_eq!(server_version(&api, &health), "");
+        let health = crate::health::Snapshot::default();
+        assert_eq!(server_version(&api, &health), "");
     }
 }
