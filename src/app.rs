@@ -1,4 +1,12 @@
 use crate::{model::*, monitor::Shared};
+use chrono::{DateTime, Local, Utc};
+use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use egui_extras::{Column, TableBuilder};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
+};
 
 enum KeychainChange<'a> {
     Save { endpoint: &'a str, token: &'a str },
@@ -27,14 +35,6 @@ fn keychain_change<'a>(current: &'a Config, draft: &'a Config) -> KeychainChange
         KeychainChange::Keep
     }
 }
-use chrono::{DateTime, Local, Utc};
-use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
-use egui_extras::{Column, TableBuilder};
-use std::{
-    collections::VecDeque,
-    sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
-};
 
 const BG: Color32 = Color32::from_rgb(15, 18, 24);
 const PANEL: Color32 = Color32::from_rgb(23, 28, 36);

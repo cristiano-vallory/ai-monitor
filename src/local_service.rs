@@ -452,6 +452,12 @@ fn open_nofollow(path: &str) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 fn open_regular(path: &str) -> Result<std::fs::File, Error> {
+    open_regular_with(path, open_nofollow)
+}
+fn open_regular_with(
+    path: &str,
+    open: impl FnOnce(&str) -> std::io::Result<std::fs::File>,
+) -> Result<std::fs::File, Error> {
     let m = std::fs::symlink_metadata(path)
         .map_err(|_| Error::Invalid("Arquivo local ausente ou inacessível.".into()))?;
     if !Path::new(path).is_absolute() || !m.is_file() || m.file_type().is_symlink() {
@@ -460,18 +466,20 @@ fn open_regular(path: &str) -> Result<std::fs::File, Error> {
                 .into(),
         ));
     }
-    #[cfg(unix)]
-    let file = open_nofollow(path)
+    let file = open(path)
         .map_err(|_| Error::Invalid("Arquivo local ausente ou link simbólico recusado.".into()))?;
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(path)
-        .map_err(|_| Error::Invalid("Arquivo local ausente ou inacessível.".into()))?;
     let fm = file.metadata().map_err(|_| Error::Unavailable)?;
     if !fm.is_file() {
         return Err(Error::Invalid(
             "Use arquivo regular absoluto; links simbólicos não são aceitos para manutenção."
                 .into(),
         ));
+    }
+    // Ancestor aliases (e.g. macOS /var) are valid, but a path swap between
+    // validation and open must not substitute another regular file.
+    use std::os::unix::fs::MetadataExt;
+    if (m.dev(), m.ino()) != (fm.dev(), fm.ino()) {
+        return Err(Error::Conflict);
     }
     Ok(file)
 }
@@ -524,6 +532,12 @@ fn backup(path: &str) -> Result<(), Error> {
     Ok(())
 }
 fn launch_agent_logs(plist: &str) -> Result<Value, Error> {
+    launch_agent_logs_with(plist, open_regular)
+}
+fn launch_agent_logs_with(
+    plist: &str,
+    open: impl Fn(&str) -> Result<std::fs::File, Error>,
+) -> Result<Value, Error> {
     let mut logs = Vec::new();
     let mut unavailable = Vec::new();
     for key in ["StandardOutPath", "StandardErrorPath"] {
@@ -543,9 +557,8 @@ fn launch_agent_logs(plist: &str) -> Result<Value, Error> {
             unavailable.push(json!({"stream":key,"reason":"arquivo ainda não criado"}));
             continue;
         }
-        regular(&path)?;
-        let raw = run("/usr/bin/tail", &["-n", "150", "--", &path], false, 6)?;
-        logs.push(json!({"stream":key,"text":tail(&raw)}));
+        let raw = log_tail(open(&path)?)?;
+        logs.push(json!({"stream":key,"text":raw}));
     }
     if logs.is_empty() {
         let detail = unavailable
@@ -565,6 +578,38 @@ fn launch_agent_logs(plist: &str) -> Result<Value, Error> {
     }
     Ok(json!({"logs":logs,"unavailable":unavailable}))
 }
+fn log_tail(mut file: impl std::io::Read + std::io::Seek) -> Result<String, Error> {
+    use std::io::{Read, SeekFrom};
+    // Snapshot the end offset: rotations keep the opened inode, and appends do
+    // not extend this read. Three extra bytes preserve a UTF-8 boundary before
+    // the final byte cap. Even a huge single line only reads this small window.
+    let end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|_| Error::Unavailable)?;
+    let start = end.saturating_sub(100 * 1024 + 3);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|_| Error::Unavailable)?;
+    let mut bytes = Vec::new();
+    file.take(end - start)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Unavailable)?;
+    let scan_end = bytes
+        .len()
+        .saturating_sub(usize::from(bytes.last() == Some(&b'\n')));
+    let mut breaks = 0;
+    let mut first = 0;
+    for i in (0..scan_end).rev() {
+        if bytes[i] == b'\n' {
+            breaks += 1;
+            if breaks == 150 {
+                first = i + 1;
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes[first..]);
+    Ok(tail(&text).to_owned())
+}
 fn tail(s: &str) -> &str {
     let mut start = s.len().saturating_sub(100 * 1024);
     while !s.is_char_boundary(start) {
@@ -575,8 +620,6 @@ fn tail(s: &str) -> &str {
 fn replace(binary: &str, replacement: &str, expected: &str) -> Result<Value, Error> {
     use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
     // Same-directory staging keeps the final replacement atomic; backup is never overwritten.
-    regular(binary)?;
-    regular(replacement)?;
     let same_file = {
         use std::os::unix::fs::MetadataExt;
         let a = open_regular(binary)?
@@ -761,6 +804,7 @@ esac
             std::os::unix::fs::symlink(&bin, &link).unwrap();
             assert!(hash(link.to_str().unwrap()).is_err());
         }
+        std::fs::hard_link(&bin, dir.join("hardlink")).unwrap();
         for alias in [
             bin.to_str().unwrap().to_owned(),
             dir.join("hardlink").to_str().unwrap().to_owned(),
@@ -770,7 +814,6 @@ esac
                 .unwrap()
                 .to_owned(),
         ] {
-            std::fs::hard_link(&bin, dir.join("hardlink")).ok();
             let res = replace(bin.to_str().unwrap(), &alias, &digest);
             assert!(
                 res.is_err(),
@@ -925,6 +968,145 @@ esac
             "FIFO is not a regular file and must be refused"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_refuses_replaced_ancestor_but_accepts_stable_directory_alias() {
+        use std::io::Read;
+        let dir = unique_temp_dir("ancestor-race");
+        let live = dir.join("live");
+        let saved = dir.join("saved");
+        let other = dir.join("other");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(live.join("log"), "approved original").unwrap();
+        std::fs::write(other.join("log"), "unapproved replacement").unwrap();
+        let path = live.join("log");
+        let result = open_regular_with(path.to_str().unwrap(), |p| {
+            std::fs::rename(&live, &saved).unwrap();
+            std::os::unix::fs::symlink(&other, &live).unwrap();
+            open_nofollow(p)
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "unapproved replacement"
+        );
+        assert!(
+            matches!(result, Err(Error::Conflict)),
+            "opening must reject changed file identity"
+        );
+        let mut content = String::new();
+        open_regular(path.to_str().unwrap())
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+        assert_eq!(
+            content, "unapproved replacement",
+            "stable ancestor aliases remain supported"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn log_read_keeps_opened_file_when_path_is_replaced() {
+        let dir = unique_temp_dir("log-rotation");
+        let out = dir.join("out.log");
+        std::fs::write(&out, "approved original\n").unwrap();
+        let (plist_dir, plist) = plist_with(&[("StandardOutPath", out.to_str().unwrap())]);
+        let value = launch_agent_logs_with(plist.to_str().unwrap(), |path| {
+            let file = open_regular(path)?;
+            std::fs::rename(&out, dir.join("rotated.log")).unwrap();
+            std::fs::write(&out, "unapproved replacement\n").unwrap();
+            Ok(file)
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "unapproved replacement\n"
+        );
+        assert_eq!(
+            value["logs"][0]["text"], "approved original\n",
+            "tail must consume the opened descriptor, never reopen the path"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(plist_dir).unwrap();
+    }
+
+    #[test]
+    fn log_tail_has_exact_line_and_utf8_bounds() {
+        use std::io::Cursor;
+        assert_eq!(log_tail(Cursor::new(b"")).unwrap(), "");
+        for count in [1usize, 149, 150, 151, 300] {
+            for terminated in [false, true] {
+                let lines: Vec<_> = (0..count).map(|n| format!("line-{n}")).collect();
+                let ending = if terminated { "\n" } else { "" };
+                let input = format!("{}{ending}", lines.join("\n"));
+                let expected = format!("{}{ending}", lines[count.saturating_sub(150)..].join("\n"));
+                assert_eq!(
+                    log_tail(Cursor::new(input)).unwrap(),
+                    expected,
+                    "{count} lines, terminated={terminated}"
+                );
+            }
+        }
+        assert_eq!(
+            log_tail(Cursor::new("\n".repeat(151))).unwrap(),
+            "\n".repeat(150)
+        );
+        for text in ["á", "€", "😀"] {
+            let input = text.repeat(150_000);
+            let actual = log_tail(Cursor::new(input.as_bytes())).unwrap();
+            assert_eq!(actual, tail(&input), "UTF-8 cap for {text}");
+            assert!(!actual.contains('�'), "valid UTF-8 must stay valid");
+        }
+        let invalid = vec![0xff; 150_000];
+        let actual = log_tail(Cursor::new(invalid)).unwrap();
+        assert!(actual.len() <= 100 * 1024);
+        assert!(actual.chars().all(|c| c == '�'));
+    }
+
+    #[test]
+    fn log_tail_bounds_io_and_does_not_follow_appends() {
+        use std::io::{Cursor, Read, Seek, SeekFrom};
+        struct GrowingLog {
+            file: Cursor<Vec<u8>>,
+            read: usize,
+        }
+        impl Read for GrowingLog {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.file.read(out)?;
+                self.read += count;
+                Ok(count)
+            }
+        }
+        impl Seek for GrowingLog {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                let result = self.file.seek(pos)?;
+                if matches!(pos, SeekFrom::End(0)) {
+                    self.file
+                        .get_mut()
+                        .extend_from_slice(b"unapproved append\n");
+                }
+                Ok(result)
+            }
+        }
+        let original = format!("{}original end\n", "x".repeat(2_000_000));
+        let mut file = GrowingLog {
+            file: Cursor::new(original.clone().into_bytes()),
+            read: 0,
+        };
+        let actual = log_tail(&mut file).unwrap();
+        assert_eq!(
+            actual,
+            tail(&original),
+            "appends after the observed end must not join this result"
+        );
+        assert_eq!(
+            file.read,
+            100 * 1024 + 3,
+            "read only the fixed tail window, not the entire file"
+        );
+        assert!(file.file.get_ref().ends_with(b"unapproved append\n"));
     }
 
     #[test]
