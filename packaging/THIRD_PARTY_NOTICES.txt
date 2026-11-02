@@ -1,5 +1,5 @@
 AI Monitor — third-party notices
-Cargo.lock SHA-256: 396914ebac5341481f6217ce6ea75f877309420064f008ee5f436b713efd3bf0
+Cargo.lock SHA-256: 10aaa6523c2c55d6bb0b844db2063057b260288cbe861d2a8c48ca61d37ce2aa
 Inventory of resolved macOS dependencies, including build-time components.
 License texts are reproduced from published crates or their recorded upstream commits.
 
