@@ -56,3 +56,26 @@ exclusão, atualização ou reinício na memória real para validar funcionalida
 - v0.3: concluída. PR #2 integrado; release v0.3.0 publicada, download público verificado.
 - v0.4: concluída. PR #3 integrado; release v0.4.0 publicada, download público verificado.
 - v0.5: implementação concluída com testes, revisões locais e instalador validados. Evidências em `docs/reviews/v0.5.0.md`; integração e distribuição rastreadas no PR e na release v0.5.0.
+
+## Port Linux — fases
+
+Decisões fechadas: no Linux o app mostra apenas ícone na bandeja (sem texto
+na barra). Alvos: Omarchy 4 (Arch + Hyprland; barra Quickshell com system
+tray) e Ubuntu ≥ 22.04 (extensão AppIndicator, ativa por padrão).
+Arquiteturas x86_64 e aarch64. Cada fase é testada com o artefato do CI do
+PR na VM Omarchy aarch64 do usuário; não há VM Ubuntu — Ubuntu é coberto
+somente pelo CI. Toda diferença de plataforma fica atrás de
+`cfg`/constantes em `src/platform.rs`; o comportamento macOS é preservado.
+Segredos no Linux usam Secret Service (crate `secret-service`, runtime
+async-io e criptografia em Rust puro, reutilizando o zbus 5 já resolvido);
+não existe fallback em texto puro.
+
+- Fase 1 — **em andamento**: compila e executa como janela normal no Linux;
+  CI Linux (fmt, testes, clippy, integração Secret Service real, build,
+  smoke sob Xvfb, artefato por PR). Sem tray, sem systemd, sem empacotamento.
+- Fase 2: tray via StatusNotifierItem (ksni). No Wayland uma janela não pode
+  ser ocultada (`set_visible` do winit é no-op): fechar destrói a janela e
+  reabrir a recria, com a coleta contínua.
+- Fase 3: backend systemd `--user` para `ai-memory.service` (a unit que
+  `ai-memory setup` instala no Linux), em substituição ao LaunchAgent.
+- Fase 4: `.deb` (Ubuntu) + `PKGBUILD` (Omarchy/Arch) + release v0.6.0.

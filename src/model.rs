@@ -18,20 +18,48 @@ pub struct Config {
     pub proposal_watch: Option<crate::client::Scope>,
 }
 
+#[cfg(target_os = "macos")]
+fn docker_binary_candidates() -> &'static [&'static str] {
+    &[
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+    ]
+}
+#[cfg(target_os = "linux")]
+fn docker_binary_candidates() -> &'static [&'static str] {
+    &["/usr/bin/docker", "/usr/local/bin/docker"]
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn docker_binary_candidates() -> &'static [&'static str] {
+    &["/usr/local/bin/docker", "/usr/bin/docker"]
+}
+
+#[cfg(target_os = "macos")]
+fn config_path(home: Option<std::ffi::OsString>, _xdg: Option<std::ffi::OsString>) -> PathBuf {
+    PathBuf::from(home.unwrap_or_default())
+        .join("Library/Application Support/AI Monitor/config.json")
+}
+#[cfg(not(target_os = "macos"))]
+fn config_path(home: Option<std::ffi::OsString>, xdg: Option<std::ffi::OsString>) -> PathBuf {
+    let xdg = xdg
+        .filter(|v| !v.is_empty() && PathBuf::from(v).is_absolute())
+        .map(PathBuf::from);
+    xdg.unwrap_or_else(|| PathBuf::from(home.unwrap_or_default()).join(".config"))
+        .join("ai-monitor/config.json")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             endpoint: "http://127.0.0.1:49374".into(),
             container: "ai-memory".into(),
-            docker_binary: [
-                "/usr/local/bin/docker",
-                "/opt/homebrew/bin/docker",
-                "/Applications/Docker.app/Contents/Resources/bin/docker",
-            ]
-            .into_iter()
-            .find(|p| std::path::Path::new(p).exists())
-            .unwrap_or("docker")
-            .into(),
+            docker_binary: docker_binary_candidates()
+                .iter()
+                .copied()
+                .find(|p| std::path::Path::new(p).exists())
+                .unwrap_or("docker")
+                .into(),
             resource_seconds: 2,
             api_seconds: 10,
             token: String::new(),
@@ -44,8 +72,10 @@ impl Default for Config {
 
 impl Config {
     pub fn path() -> PathBuf {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Library/Application Support/AI Monitor/config.json")
+        config_path(
+            std::env::var_os("HOME"),
+            std::env::var_os("XDG_CONFIG_HOME"),
+        )
     }
     pub fn normalize(&mut self) {
         self.endpoint = self.endpoint.trim().into();
@@ -601,5 +631,53 @@ mod tests {
             "non-UTF-8 env token still counts as explicit"
         );
         assert!(cfg.token.is_empty());
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_config_path_prefers_absolute_xdg_and_falls_back_to_home() {
+        use std::ffi::OsString;
+        let home = || Some(OsString::from("/home/user"));
+        assert_eq!(
+            config_path(home(), Some(OsString::from("/xdg"))),
+            PathBuf::from("/xdg/ai-monitor/config.json")
+        );
+        for xdg in [
+            Some(OsString::from("relative/xdg")),
+            Some(OsString::from("")),
+            None,
+        ] {
+            assert_eq!(
+                config_path(home(), xdg.clone()),
+                PathBuf::from("/home/user/.config/ai-monitor/config.json"),
+                "xdg={xdg:?} must fall back to HOME/.config"
+            );
+        }
+        let path = config_path(None, None);
+        assert!(
+            !path.is_absolute(),
+            "HOME and XDG unset must produce a relative path: {path:?}"
+        );
+        let Err(msg) = Config::default().save_to(&path) else {
+            panic!("relative path must be refused");
+        };
+        assert!(msg.contains("HOME"), "got: {msg}");
+        // An absolute XDG still wins even without HOME.
+        assert_eq!(
+            config_path(None, Some(OsString::from("/xdg"))),
+            PathBuf::from("/xdg/ai-monitor/config.json")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_config_path_ignores_xdg() {
+        use std::ffi::OsString;
+        assert_eq!(
+            config_path(
+                Some(OsString::from("/Users/u")),
+                Some(OsString::from("/xdg"))
+            ),
+            PathBuf::from("/Users/u/Library/Application Support/AI Monitor/config.json")
+        );
     }
 }

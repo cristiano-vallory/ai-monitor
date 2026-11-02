@@ -1,4 +1,4 @@
-name: macOS checks
+name: Checks
 
 on:
   push:
@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   checks:
+    name: macOS
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -37,3 +38,82 @@ jobs:
         run: bash scripts/build-dmg.sh
       - name: Verify installation from DMG
         run: bash scripts/verify-dmg.sh
+
+  linux:
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Runtime dependencies
+        # Phase 4 packaging must reuse this exact runtime list.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1 libxkbcommon0 libxkbcommon-x11-0 libx11-xcb1 libgl1 libegl1 libgl1-mesa-dri
+      - name: Test-only tools
+        run: sudo apt-get install -y gnome-keyring dbus xvfb
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Tests
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Secret Service integration (real gnome-keyring)
+        run: |
+          dbus-run-session -- bash -c '
+            echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            cargo test --locked -- --ignored secret_service_roundtrip
+          '
+      - name: Secret Service unavailable
+        run: >
+          DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent
+          cargo test --locked -- --ignored secret_service_unavailable
+      - name: Third-party notices are in sync with Cargo.lock
+        run: |
+          expected="Cargo.lock SHA-256: $(sha256sum Cargo.lock | cut -d' ' -f1)"
+          grep -qxF "$expected" packaging/THIRD_PARTY_NOTICES-linux.txt \
+            || { echo 'Cargo.lock mudou: atualize avisos com python3 scripts/collect-licenses.py.'; exit 1; }
+      - name: Release build
+        run: cargo build --release --locked
+      - name: GUI smoke (Xvfb)
+        run: |
+          set +e
+          xvfb-run -a timeout 15 target/release/ai-monitor
+          code=$?
+          set -e
+          if [ "$code" -ne 124 ]; then
+            echo "expected the app to run until the 15 s timeout (124), got $code"
+            exit 1
+          fi
+      - name: Package artifact
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="ai-monitor-${version}-linux-${{ matrix.arch }}"
+          mkdir "$name"
+          cp target/release/ai-monitor LICENSE "$name/"
+          cp packaging/THIRD_PARTY_NOTICES-linux.txt "$name/THIRD_PARTY_NOTICES.txt"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ai-monitor-linux-${{ matrix.arch }}
+          path: |
+            ai-monitor-*-linux-*.tar.gz
+            ai-monitor-*-linux-*.tar.gz.sha256
+          if-no-files-found: error

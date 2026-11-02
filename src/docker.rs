@@ -130,7 +130,7 @@ fn run_process(
     match status {
         None => Err("Docker excedeu o limite de 6 s; nova tentativa automática.".into()),
         Some(s) if !s.success() && !only_missing_container => {
-            Err("Comando Docker falhou. Verifique o Docker Desktop e o contexto ativo.".into())
+            Err(crate::platform::DOCKER_COMMAND_ERROR.into())
         }
         _ if output.len() > MAX_OUTPUT => Err("Resposta Docker excedeu 16 MiB.".into()),
         _ => String::from_utf8(output).map_err(|_| "Resposta Docker inválida.".into()),

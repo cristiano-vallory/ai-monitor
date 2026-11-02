@@ -252,7 +252,7 @@ impl Panel {
         ui.heading("Autenticação humana");
         let human = shared.config.read().unwrap().human.is_some();
         ui.label(if human{"Conexão ativa: sessão humana. Cookies e CSRF somente em memória."}else{"Conexão ativa: Bearer configurado ou acesso anônimo. Login usa credenciais humanas separadas."});
-        ui.small("Não há fallback de sessão humana para Bearer. MCP e workstreams exigem conexão Bearer. Senhas humanas não são guardadas no Keychain.");
+        ui.small(format!("Não há fallback de sessão humana para Bearer. MCP e workstreams exigem conexão Bearer. Senhas humanas não são guardadas no {}.",crate::platform::SECRET_STORE));
         ui.add_enabled_ui(enabled && !self.busy, |ui| {
             if !human {
                 ui.label("Usuário");

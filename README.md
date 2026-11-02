@@ -6,6 +6,8 @@ Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. In
 
 **[Baixar o instalador .dmg](https://github.com/cristianovallory/ai-monitor/releases/latest)** · **[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)**
 
+Linux: prévia em desenvolvimento — consulte a [seção Linux do guia de instalação](INSTALL.md#linux-prévia-em-desenvolvimento).
+
 ## Instalar sem compilar Rust
 
 A versão **0.5.0** conclui a administração avançada: projetos, usuários/permissões, autenticação humana, Keychain opcional, mensagens e operação local. Veja as [notas da atualização](docs/releases/v0.5.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
@@ -158,7 +160,7 @@ O Cargo baixa as dependências; versões resolvidas e checksums estão no `Cargo
 
 ## Testes e contribuição
 
-Os testes usam dados sintéticos e servidores HTTP locais temporários; não exigem token, ai-memory nem Docker em execução. Cobrem limites de consultas, contagens, erros, percentuais multicore, associação de imagens, timeouts e proteção de credenciais. O workflow [macOS checks](.github/workflows/ci.yml) executa formatação, testes, Clippy, geração do DMG Universal e verificação de instalação em pushes e pull requests, sem segredos de aplicação.
+Os testes usam dados sintéticos e servidores HTTP locais temporários; não exigem token, ai-memory nem Docker em execução. Cobrem limites de consultas, contagens, erros, percentuais multicore, associação de imagens, timeouts e proteção de credenciais. O workflow [Checks](.github/workflows/ci.yml) executa formatação, testes, Clippy, geração do DMG Universal e verificação de instalação (macOS), além dos mesmos checks, build, testes de Secret Service e smoke gráfico sob Xvfb (Linux x86_64 e aarch64) em pushes e pull requests, sem segredos de aplicação.
 
 Para contribuir, rode os comandos de validação da seção de desenvolvimento e envie um pull request com exemplos sintéticos. Não anexe configurações, logs, diagnósticos ou capturas com informações privadas.
 
