@@ -10,6 +10,7 @@ O AI Monitor é um cliente de monitoramento. Consulta o servidor ai-memory confi
 - O cliente HTTP não segue redirecionamentos nem usa proxies de ambiente. Respostas de erro não são reproduzidas integralmente, evitando expor detalhes internos do servidor.
 - `docker container inspect` consulta somente IDs de contêiner e imagem. O app não solicita o ambiente interno dos contêineres.
 - O histórico permanece em memória. Sessões, resumos de handoffs e próximos passos são exibidos no painel, sem exportação automática.
+- Os binários de distribuição usam remapeamento de caminhos de compilação. O instalador é montado em uma pasta temporária limpa, com uma lista explícita de arquivos, sem copiar preferências ou o diretório do projeto.
 
 Esses cuidados não tornam o processo um cofre: tokens e dados podem permanecer na memória enquanto o aplicativo está em execução. Use um Mac e um servidor de confiança. O Docker CLI usa as permissões e o contexto do usuário; o app se limita a comandos de leitura, mas não transforma a credencial do daemon em uma credencial tecnicamente restrita a leitura.
 
@@ -56,3 +57,9 @@ Use o [relato privado de vulnerabilidade do GitHub](https://github.com/cristiano
 Não publique uma vulnerabilidade com dados sensíveis em uma issue aberta. Se uma credencial real tiver sido exposta, revogue-a ou rotacione-a no serviço de origem; remover somente o arquivo da versão atual não a remove do histórico.
 
 As correções são desenvolvidas na branch `main`. Não há compromisso de suporte a versões antigas nem prazo garantido de resposta nesta fase inicial.
+
+## Downloads das releases
+
+Baixe o `.dmg` somente das [releases deste repositório](https://github.com/cristianovallory/ai-monitor/releases). O checksum SHA-256 acompanha o instalador; ele detecta alterações/corrupção, mas não substitui autenticação de desenvolvedor nem notarização.
+
+A primeira release é Universal (Apple Silicon e Intel), com assinatura ad hoc e sem notarização Apple. O certificado pessoal Apple Development não é utilizado na distribuição. A assinatura verifica a integridade do bundle; não atesta uma identidade Developer ID. A eventual autorização de abertura pelo Gatekeeper deve ser feita para este app específico, conforme o [guia de instalação](INSTALL.md), sem desativação global das proteções do macOS.

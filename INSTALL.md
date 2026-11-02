@@ -1,24 +1,60 @@
 # Instalação e dependências
 
-Este guia instala o AI Monitor pelo código-fonte no próprio Mac. O aplicativo abre na barra de menus; a janela é opcional. Não há instalador `.dmg`, Homebrew formula ou binário notarizado nesta versão.
+Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na barra de menus; a janela é opcional. A compilação pelo código-fonte continua disponível para desenvolvedores.
+
+## Instalar pelo DMG — sem Rust ou Xcode
+
+1. Acesse a [release v0.2.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.0) e baixe **AI-Monitor-0.2.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
+2. Abra o `.dmg` e arraste **AI Monitor.app** para o atalho **Applications / Aplicativos**.
+3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
+4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
+5. Procure **AI / Docker** na barra de menus. Clique e escolha **Abrir painel**.
+6. Em **Conexão**, ajuste servidor, token opcional e nome do contêiner; use **Salvar e conectar**.
+
+O instalador é **Universal**, com executáveis nativos para Apple Silicon e Intel. O mínimo declarado é macOS 12.0; a interface foi validada em Apple Silicon e o executável Intel foi verificado via Rosetta. Hardware Intel e versões antigas do macOS ainda não foram validados.
+
+Para usar o app pronto, **não instale Rust, Cargo, Xcode, Swift ou Git**. Docker Desktop e ai-memory são necessários apenas para os respectivos dados. O pacote não inclui servidor, dados de usuários nem tokens.
+
+### Primeira abertura e Gatekeeper
+
+Esta release usa **assinatura ad hoc**, sem certificado Developer ID e sem notarização Apple. O macOS pode solicitar uma autorização adicional. Após tentar abrir o app, se a mensagem indicar desenvolvedor não verificado ou ausência de notarização:
+
+1. Confirme que o download veio da release oficial acima.
+2. Abra **Ajustes do Sistema → Privacidade e Segurança**.
+3. Use **Abrir Mesmo Assim** para AI Monitor e confirme a abertura.
+
+Essa é uma exceção para o aplicativo específico, conforme a [orientação da Apple](https://support.apple.com/en-us/102445). Não desative o Gatekeeper globalmente. Um Mac gerenciado pode impedir essa exceção. Se a mensagem indicar arquivo danificado, verifique o checksum e baixe novamente; não ignore um alerta de malware.
+
+### Verificar a integridade do download (opcional)
+
+Baixe também **AI-Monitor-0.2.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
+
+```sh
+cd "$HOME/Downloads"
+shasum -a 256 -c AI-Monitor-0.2.0-macos-universal.dmg.sha256
+```
+
+O resultado deve terminar em `OK`. O checksum detecta alterações ou corrupção do arquivo; não substitui assinatura Developer ID ou notarização.
+
+As próximas seções explicam dependências, configuração das fontes e a **compilação opcional**. Quem instalou pelo DMG pode ir diretamente a [Preparar as fontes de dados](#3-preparar-as-fontes-de-dados).
 
 ## 1. Requisitos
 
 | Requisito | Quando é necessário |
 | --- | --- |
 | macOS com sessão gráfica | Executar o aplicativo; validado em Apple Silicon |
-| Rust estável e Cargo | Compilar e rodar testes |
-| Xcode Command Line Tools | Clang, SDK macOS, Swift e Git para compilação/empacotamento |
+| Rust estável e Cargo | Somente para compilar e rodar testes; dispensados no DMG |
+| Xcode Command Line Tools | Somente para compilação/empacotamento: Clang, SDK macOS, Swift e Git |
 | `iconutil` e `codesign` | Ferramentas do macOS utilizadas pelo script de build |
 | Docker Desktop e Docker CLI | Coletar contêineres, imagens, CPU, memória e tarefas do Docker |
 | Servidor ai-memory acessível | Consultar projetos, sessões e handoffs; integração validada com 3.3.0 |
 | Internet na primeira compilação | Baixar o código e as crates do Cargo |
 
-O ambiente de validação inicial foi macOS 27.0.1, Apple Silicon e Rust 1.99.1. Isso registra o ambiente testado, não um requisito mínimo de Rust. Use Rust estável atualizado. O bundle declara macOS 12.0, mas versões antigas e Macs Intel ainda não foram validados. O [Docker Desktop possui sua própria política de versões do macOS](https://docs.docker.com/desktop/setup/install/mac-install/).
+O ambiente de validação inicial foi macOS 27.0.1, Apple Silicon e Rust 1.99.1; o executável Intel também foi verificado via Rosetta. Isso registra o ambiente testado, não um requisito mínimo de Rust. Para compilar, use Rust estável atualizado. O bundle declara macOS 12.0, mas versões antigas e hardware Intel ainda não foram validados. O [Docker Desktop possui sua própria política de versões do macOS](https://docs.docker.com/desktop/setup/install/mac-install/).
 
 Docker e ai-memory não são necessários para compilar ou testar. O app também abre sem eles, mostrando as fontes indisponíveis. Não é necessário instalar Node.js, Electron, Python, OpenSSL, um banco de dados ou uma chave de provedor de IA.
 
-## 2. Instalar as ferramentas de compilação
+## 2. Instalar as ferramentas de compilação (somente desenvolvedores)
 
 ### Xcode Command Line Tools
 
@@ -102,7 +138,7 @@ open 'dist/AI Monitor.app'
 
 A primeira compilação baixa e compila as crates, podendo demorar alguns minutos. O script usa `cargo build --release --locked`, gera o ícone, monta o bundle e aplica/verifica uma assinatura ad hoc. O aplicativo fica em `dist/AI Monitor.app`.
 
-O script usa Cargo de `~/.cargo/bin/cargo` ou do `PATH`; `CARGO_BIN` permite informar outro executável. Execute o build sem `CARGO_TARGET_DIR` ou `CARGO_BUILD_TARGET` personalizados, pois o empacotamento espera `target/release/ai-monitor`.
+O script usa Cargo de `~/.cargo/bin/cargo` ou do `PATH`; `CARGO_BIN` permite informar outro executável. Ele fixa o diretório de saída em `target/`, o alvo da arquitetura solicitada e o deployment target macOS 12.0. Os flags de release remapeiam caminhos do projeto, Cargo e Rustup para evitar incluir diretórios pessoais nas mensagens de erro compiladas.
 
 **Ao abrir, procure o texto AI/Docker na barra de menus.** Não aparece uma janela nem um ícone no Dock. Clique no indicador e escolha **Abrir painel**. Em **Conexão**, ajuste os campos e clique em **Salvar e conectar**. O botão vermelho da janela apenas oculta o painel; para encerrar, use **Sair do AI Monitor** no menu.
 
@@ -126,7 +162,7 @@ open "$HOME/Applications/AI Monitor.app"
 
 Também é possível arrastar o bundle para Aplicativos no Finder. Depois de compilar e copiar, não é necessário manter Rust, Swift ou o repositório aberto para executar o app. Docker/ai-memory continuam necessários para os respectivos dados.
 
-A assinatura ad hoc não equivale a Developer ID nem notarização Apple. Para esta versão, compile localmente. Se o macOS apresentar um bloqueio, siga as opções oficiais de **Privacidade e Segurança** apenas após confirmar a origem; não desative o Gatekeeper globalmente.
+A assinatura ad hoc não equivale a Developer ID nem notarização Apple. Para downloads da release, consulte [Primeira abertura e Gatekeeper](#primeira-abertura-e-gatekeeper).
 
 Para iniciar no login, adicione o app instalado em **Ajustes do Sistema → Geral → Itens de Início**; a nomenclatura pode variar conforme o macOS. Essa configuração é opcional e não é alterada pelo script.
 
@@ -142,11 +178,11 @@ Para uso pelo terminal, `AI_MEMORY_SERVER_URL` e `AI_MEMORY_AUTH_TOKEN` são opc
   read -r -s 'AI_MEMORY_AUTH_TOKEN?Token ai-memory: '
   printf '\n'
   export AI_MEMORY_AUTH_TOKEN
-  exec './dist/AI Monitor.app/Contents/MacOS/ai-monitor'
+  exec '/Applications/AI Monitor.app/Contents/MacOS/ai-monitor'
 )
 ```
 
-O subshell evita manter o token no ambiente do terminal após o app encerrar. Use a URL da sua instalação; servidores remotos com token exigem HTTPS. Execute o binário diretamente para receber as variáveis do terminal, após encerrar uma instância existente pelo menu.
+O subshell evita manter o token no ambiente do terminal após o app encerrar. Use a URL da sua instalação; servidores remotos com token exigem HTTPS. Ajuste o caminho se instalou em `~/Applications` ou está usando `dist/`. Execute o binário diretamente para receber as variáveis do terminal, após encerrar uma instância existente pelo menu.
 
 O token fornecido por ambiente permanece acessível ao próprio processo; essa opção não é um cofre de segredos. Não coloque valores reais em comandos literais, `.env` do projeto, scripts versionados, issues ou capturas de tela. O app não lê arquivos `.env` e remove `AI_MEMORY_AUTH_TOKEN` do ambiente dos comandos Docker que inicia.
 
@@ -154,7 +190,9 @@ As preferências sem token ficam em `~/Library/Application Support/AI Monitor/co
 
 ## Atualizar
 
-Encerre o app pelo menu. Dentro de uma cópia do repositório sem alterações locais pendentes:
+**Instalado pelo DMG:** baixe a nova release, encerre o app pelo menu e arraste a nova versão para Aplicativos, confirmando a substituição. Ejete o disco e abra o app novamente. As preferências são preservadas; o token deve ser informado novamente.
+
+**Compilado pelo código-fonte:** dentro de uma cópia do repositório sem alterações locais pendentes, com o app encerrado:
 
 ```sh
 git pull --ff-only
@@ -185,13 +223,35 @@ As preferências locais são preservadas. O app não possui atualizador automát
 | Contagem maior que a lista | Limites por projeto: 100 sessões e 200 handoffs; consulte a interpretação no README |
 | Dados ficam em `—` | Fonte indisponível ou amostra vencida; confira a idade da coleta e os erros em Conexão |
 
-Para diagnóstico local, na pasta do repositório:
+Para diagnóstico local do app instalado, sem Rust:
 
 ```sh
-cargo run --locked -- --diagnose
+'/Applications/AI Monitor.app/Contents/MacOS/ai-monitor' --diagnose
 ```
 
-Essa saída pode revelar nomes de recursos, portas e projetos em erros. Revise e remova dados privados antes de anexá-la a uma issue. Não envie seu arquivo de configuração nem um `docker inspect` completo.
+Essa saída pode revelar nomes de recursos, portas e projetos em erros. Revise e remova dados privados antes de anexá-la a uma issue. Não envie seu arquivo de configuração nem um `docker inspect` completo. A opção `--version` informa somente versão e arquitetura, sem consultar as fontes.
+
+## Gerar o instalador para distribuição
+
+Somente mantenedores precisam executar estas etapas. Com as ferramentas de compilação instaladas:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+bash scripts/build-dmg.sh
+bash scripts/verify-dmg.sh
+```
+
+Saídas em `dist/`:
+
+- `AI Monitor.app`: bundle Universal, assinado ad hoc.
+- `AI-Monitor-0.2.0-macos-universal.dmg`: imagem comprimida, somente leitura.
+- `AI-Monitor-0.2.0-macos-universal.dmg.sha256`: checksum para download.
+
+O pacote é montado em uma pasta temporária limpa, a partir do bundle, do atalho `/Applications` e do `LEIA-ME.txt`. Configurações, tokens, dados, repositório e diagnósticos não entram na imagem. O script verifica a assinatura e as arquiteturas; o verificador monta a imagem, copia o app para um destino temporário e executa `--version` antes e depois de ejetar. Essa verificação não abre o painel nem acessa Docker/ai-memory.
+
+O bundle inclui a licença do projeto e os avisos das dependências. Ao alterar `Cargo.lock`, um mantenedor deve regenerar os avisos com `python3 scripts/collect-licenses.py` e revisar o resultado. Esse utilitário opcional usa Python 3 e internet para consultar licenças nos commits públicos de origem; Python não é necessário para instalar, executar ou compilar o app com os avisos já versionados. O build recusa avisos cujo hash não corresponda ao `Cargo.lock`.
+
+Antes de publicar, confira a correspondência entre versão de `Cargo.toml`, `Info.plist` e tag, execute os testes e revise os artefatos. Não envie certificados privados nem use um certificado Apple Development como substituto de Developer ID. Uma futura distribuição notarizada exige configuração própria de assinatura e notarização; não há credenciais Apple no repositório.
 
 ## Desinstalar
 

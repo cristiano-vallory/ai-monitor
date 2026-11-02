@@ -1,0 +1,27 @@
+AI Monitor — instalação para macOS
+
+1. Arraste AI Monitor.app para o atalho Applications (Aplicativos).
+2. Ejete este disco e abra AI Monitor em Aplicativos.
+3. Procure AI/Docker na barra de menus e escolha Abrir painel.
+
+O aplicativo continua monitorando quando você fecha a janela.
+Para encerrar, use Sair do AI Monitor no menu.
+
+Não é necessário instalar Rust, Xcode ou ferramentas de desenvolvimento.
+Docker Desktop e o servidor ai-memory devem estar disponíveis para coletar
+seus respectivos dados. Ajuste o servidor e o contêiner em Conexão.
+
+Esta versão tem assinatura ad hoc e não foi notarizada pela Apple.
+Se o macOS informar que não pode verificar o desenvolvedor, após tentar abrir
+use Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim,
+somente se você confirmou a origem deste download.
+Não desative o Gatekeeper globalmente.
+
+Ao atualizar, encerre a versão anterior pelo menu antes de substituí-la.
+As preferências locais são preservadas; o token não é salvo pelo aplicativo.
+
+Downloads oficiais e checksums:
+https://github.com/cristianovallory/ai-monitor/releases
+
+Guia completo:
+https://github.com/cristianovallory/ai-monitor/blob/main/INSTALL.md

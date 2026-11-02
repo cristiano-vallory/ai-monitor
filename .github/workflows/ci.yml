@@ -19,18 +19,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Rust stable
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Tests
         run: cargo test --locked
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
-      - name: macOS bundle
-        run: bash scripts/build-app.sh
+      - name: Universal macOS DMG
+        run: bash scripts/build-dmg.sh
+      - name: Verify installation from DMG
+        run: bash scripts/verify-dmg.sh

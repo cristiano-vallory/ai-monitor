@@ -6,6 +6,14 @@ mod model;
 mod monitor;
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|a| a == "--version") {
+        println!(
+            "AI Monitor {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::ARCH
+        );
+        return Ok(());
+    }
     let config = model::Config::load();
     if std::env::args().any(|a| a == "--diagnose") {
         let mut system = sysinfo::System::new();

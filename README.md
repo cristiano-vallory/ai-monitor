@@ -4,9 +4,20 @@ Monitor nativo em **Rust para macOS**, com CPU e memória do **ai-memory** e do 
 
 Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. Interface em português brasileiro. Licença [MIT](LICENSE).
 
-**[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)** · **[Código no GitHub](https://github.com/cristianovallory/ai-monitor)**
+**[Baixar o instalador .dmg](https://github.com/cristianovallory/ai-monitor/releases/latest)** · **[Instalação e dependências](INSTALL.md)** · **[Segurança e privacidade](SECURITY.md)**
 
-## Executar
+## Instalar sem compilar Rust
+
+1. Baixe **AI-Monitor-0.2.0-macos-universal.dmg** na [release v0.2.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.0).
+2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
+3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
+4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
+
+O pacote Universal contém código nativo para **Apple Silicon e Intel**. Não exige Rust, Cargo, Xcode ou ferramentas de desenvolvimento para instalar ou executar. O mínimo declarado é macOS 12.0. A interface foi validada em Apple Silicon; o executável Intel foi verificado via Rosetta, sem validação em hardware Intel ou macOS antigos.
+
+Esta primeira release possui **assinatura ad hoc, sem Developer ID nem notarização Apple**. Se o macOS bloquear por desenvolvedor não verificado, após tentar abrir use **Ajustes do Sistema → Privacidade e Segurança → Abrir Mesmo Assim**, confirmando a origem. Consulte o [guia de instalação](INSTALL.md) e a [orientação da Apple](https://support.apple.com/en-us/102445). A release inclui checksum SHA-256; não é necessário desativar o Gatekeeper globalmente.
+
+## Compilar e desenvolver (opcional)
 
 Com Rust estável, Xcode Command Line Tools e Git instalados:
 
@@ -19,7 +30,7 @@ open 'dist/AI Monitor.app'
 
 O app inicia na barra de menus. Clique no indicador e escolha **Abrir painel**. O [guia completo](INSTALL.md) explica como instalar as ferramentas, configurar as fontes, copiar o app para Aplicativos, atualizar e desinstalar.
 
-O script procura Cargo em `~/.cargo/bin/cargo`; também aceita `CARGO_BIN`. O bundle usa assinatura ad hoc local, sem Developer ID nem notarização Apple. A distribuição atual é pelo código-fonte: compile no Mac onde pretende usar. A arquitetura gerada é a do Mac que compila; não há pacote Universal pronto.
+O script procura Cargo em `~/.cargo/bin/cargo`; também aceita `CARGO_BIN`. Sem argumentos, gera a arquitetura do Mac que compila. `bash scripts/build-app.sh --universal` gera as duas arquiteturas; `bash scripts/build-dmg.sh` também cria o instalador e seu checksum. Veja [como gerar uma release](INSTALL.md#gerar-o-instalador-para-distribuição).
 
 Docker Desktop e o servidor ai-memory são fontes externas, instaladas separadamente. Não são necessários para compilar nem executar os testes automatizados. Sem uma fonte, os dados correspondentes aparecem indisponíveis.
 
@@ -122,7 +133,7 @@ ai-memory API ── coletor de sessões ──┘                       └─ 
 | `src/docker.rs` | Comandos Docker, timeouts e conversão de métricas |
 | `src/api.rs` | Consultas HTTP, limites e autenticação |
 | `src/model.rs` | Modelos, preferências e agregações |
-| `scripts/` e `packaging/` | Ícone, bundle `.app` e metadados do macOS |
+| `scripts/` e `packaging/` | Ícone, bundle `.app`, instalador `.dmg`, verificação da instalação e metadados |
 
 ## Dependências
 
@@ -135,21 +146,21 @@ ai-memory API ── coletor de sessões ──┘                       └─ 
 | `serde` / `serde_json` 1 | Serialização e leitura de JSON |
 | `chrono` 0.4 | Datas e horários |
 
-O Cargo baixa as dependências; versões resolvidas e checksums estão no `Cargo.lock`, que é versionado. Não há dependência de Node.js, Electron, Python, banco de dados ou chave de provedor de IA. Os requisitos de sistema e ferramentas estão no [INSTALL.md](INSTALL.md).
+O Cargo baixa as dependências; versões resolvidas e checksums estão no `Cargo.lock`, que é versionado. O aplicativo não depende de Node.js, Electron, Python, banco de dados ou chave de provedor de IA. Os requisitos de sistema e ferramentas estão no [INSTALL.md](INSTALL.md). Os [avisos das dependências](packaging/THIRD_PARTY_NOTICES.txt) acompanham o bundle.
 
 ## Testes e contribuição
 
-Os testes usam dados sintéticos e servidores HTTP locais temporários; não exigem token, ai-memory nem Docker em execução. Cobrem limites de consultas, contagens, erros, percentuais multicore, associação de imagens, timeouts e proteção de credenciais. O workflow [macOS checks](.github/workflows/ci.yml) executa formatação, testes, Clippy e empacotamento em pushes e pull requests, sem segredos de aplicação.
+Os testes usam dados sintéticos e servidores HTTP locais temporários; não exigem token, ai-memory nem Docker em execução. Cobrem limites de consultas, contagens, erros, percentuais multicore, associação de imagens, timeouts e proteção de credenciais. O workflow [macOS checks](.github/workflows/ci.yml) executa formatação, testes, Clippy, geração do DMG Universal e verificação de instalação em pushes e pull requests, sem segredos de aplicação.
 
-Para contribuir, rode os comandos de validação da seção Executar e envie um pull request com exemplos sintéticos. Não anexe configurações, logs, diagnósticos ou capturas com informações privadas.
+Para contribuir, rode os comandos de validação da seção de desenvolvimento e envie um pull request com exemplos sintéticos. Não anexe configurações, logs, diagnósticos ou capturas com informações privadas.
 
 ## Segurança e limites da versão
 
 - Sem telemetria própria, analytics, sincronização externa ou persistência do histórico. O app acessa o servidor e o contexto Docker configurados.
 - Token excluído da serialização, erros HTTP sem o corpo da resposta, URLs validadas e redirecionamentos recusados.
-- `.env`, configurações locais, chaves, diagnósticos e artefatos de build excluídos pelo `.gitignore`. A publicação contém somente código, documentação e arquivos de build revisados.
-- Sem armazenamento no Keychain, atualizador automático, notificações de limites ou instalador assinado nesta versão.
-- Validado em macOS Apple Silicon. O bundle declara macOS 12.0 como mínimo; versões antigas e Intel ainda precisam de validação. O Docker Desktop tem requisitos próprios.
+- `.env`, configurações locais, chaves, diagnósticos e artefatos de build excluídos do Git pelo `.gitignore`. Releases recebem somente o instalador revisado e seu checksum; o bundle é montado a partir de uma lista explícita de arquivos, com caminhos de compilação remapeados.
+- Sem armazenamento no Keychain, atualizador automático, notificações de limites ou notarização Apple nesta versão.
+- Interface validada em macOS Apple Silicon; executável Intel verificado via Rosetta. O bundle declara macOS 12.0 como mínimo; hardware Intel e versões antigas ainda precisam de validação. O Docker Desktop tem requisitos próprios.
 
 Consulte [SECURITY.md](SECURITY.md) para proteção de dados e relato privado de vulnerabilidades. O projeto usa a licença [MIT](LICENSE); as dependências mantêm suas respectivas licenças.
 
