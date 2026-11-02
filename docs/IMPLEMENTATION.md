@@ -85,5 +85,7 @@ não existe fallback em texto puro.
 - Fase 4 — **concluída (PR #10, release v0.6.0)**: `.deb` (Ubuntu) +
   `PKGBUILD` (Omarchy/Arch) + pipeline de release. Validação final na VM
   Omarchy pendente (decisão do usuário: testar ao fim das 4 fases).
-- v0.6.1 — **em andamento (este PR)**: migração de identificadores para
+- v0.6.1 — **concluída (PR #11, release v0.6.1)**: migração de identificadores para
   `cristiano_vallory`/`cristiano-vallory` e correções acumuladas do port.
+- v0.6.2 — intervalo padrão de sessões/handoffs de 10 s para 60 s (PR #12);
+  configs salvas mantêm o valor escolhido.
