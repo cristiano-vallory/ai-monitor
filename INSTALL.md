@@ -4,7 +4,7 @@ Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na 
 
 ## Instalar pelo DMG — sem Rust ou Xcode
 
-1. Acesse a [release v0.2.1](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.2.1) e baixe **AI-Monitor-0.4.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
+1. Acesse a [release v0.5.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.5.0) e baixe **AI-Monitor-0.5.0-macos-universal.dmg**. Os arquivos automáticos **Source code** são o código-fonte, não o instalador.
 2. Abra o `.dmg` e arraste **AI Monitor.app** para o atalho **Applications / Aplicativos**.
 3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
 4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
@@ -27,11 +27,11 @@ Essa é uma exceção para o aplicativo específico, conforme a [orientação da
 
 ### Verificar a integridade do download (opcional)
 
-Baixe também **AI-Monitor-0.4.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
+Baixe também **AI-Monitor-0.5.0-macos-universal.dmg.sha256** da mesma release. Com os dois arquivos em Downloads:
 
 ```sh
 cd "$HOME/Downloads"
-shasum -a 256 -c AI-Monitor-0.4.0-macos-universal.dmg.sha256
+shasum -a 256 -c AI-Monitor-0.5.0-macos-universal.dmg.sha256
 ```
 
 O resultado deve terminar em `OK`. O checksum detecta alterações ou corrupção do arquivo; não substitui assinatura Developer ID ou notarização.
@@ -125,7 +125,7 @@ Instale ou utilize seu servidor seguindo o [projeto ai-memory](https://github.co
 
 O endereço inicial do monitor é `http://127.0.0.1:49374` e o nome de contêiner é `ai-memory`. Esses valores são padrões genéricos, não detectam todas as instalações. Ajuste o endereço e o nome conforme seu ambiente.
 
-Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalação e informe-o na interface do monitor. A identidade autenticada limita quais projetos e handoffs podem ser vistos. O monitor não cria tokens, usuários ou permissões no servidor.
+Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalação e informe-o na interface do monitor. A identidade autenticada limita quais projetos e handoffs podem ser vistos. Com permissão administrativa, a tela Administração avançada permite gerir usuários, grants e chaves; as operações exigem prévia e confirmação.
 
 ## 4. Baixar, compilar e abrir
 
@@ -168,7 +168,7 @@ Para iniciar no login, adicione o app instalado em **Ajustes do Sistema → Gera
 
 ## Autenticação sem salvar segredos
 
-A opção mais simples é inserir o token em **Conexão → Token Bearer** e clicar em **Salvar e conectar**. Ele fica somente na memória do processo e deve ser informado novamente após encerrar o aplicativo. Não é salvo no JSON de preferências nem no Keychain.
+A opção mais simples é inserir o token em **Conexão → Token Bearer** e clicar em **Salvar e conectar**. Ele fica somente na memória do processo e deve ser informado novamente após encerrar o aplicativo. Não é salvo no JSON de preferências. A opção **Guardar o Bearer no Keychain** permite persistir somente esse token, por endereço. Desmarque a opção e salve no mesmo servidor para removê-lo. Variável de ambiente explícita, mesmo vazia, tem prioridade sobre o Keychain.
 
 Para uso pelo terminal, `AI_MEMORY_SERVER_URL` e `AI_MEMORY_AUTH_TOKEN` são opcionais. Exemplo para o **zsh padrão do macOS**, solicitando o token sem escrevê-lo no histórico nem exibi-lo:
 
@@ -190,7 +190,7 @@ As preferências sem token ficam em `~/Library/Application Support/AI Monitor/co
 
 ## Atualizar
 
-**Instalado pelo DMG:** baixe a nova release, encerre o app pelo menu e arraste a nova versão para Aplicativos, confirmando a substituição. Ejete o disco e abra o app novamente. As preferências são preservadas; o token deve ser informado novamente.
+**Instalado pelo DMG:** baixe a nova release, encerre o app pelo menu e arraste a nova versão para Aplicativos, confirmando a substituição. Ejete o disco e abra o app novamente. As preferências são preservadas; informe novamente o token se não optou pelo Keychain. Sessões humanas precisam de novo login.
 
 **Compilado pelo código-fonte:** dentro de uma cópia do repositório sem alterações locais pendentes, com o app encerrado:
 
@@ -215,7 +215,7 @@ As preferências locais são preservadas. O app não possui atualizador automát
 | AI indisponível, Docker funciona | Nome exato do contêiner ou existência de processo ai-memory nativo |
 | Sessões/handoffs indisponíveis | URL da API, porta acessível, versão do servidor e permissões do token |
 | Acesso recusado | Token ausente, inválido ou sem permissão para a identidade desejada |
-| Token some após reiniciar | Comportamento esperado: não é persistido |
+| Token some após reiniciar | Esperado sem Keychain; confira a opção, endereço e permissão de acesso ao Keychain |
 | Funciona pelo terminal, mas não pelo Finder | Variáveis de ambiente não herdadas; configure pela interface e use caminho absoluto do Docker |
 | CPU acima de 100% | Valor por núcleo; consumo multicore pode ultrapassar 100% |
 | Docker inclui o consumo do ai-memory | O total inclui todos os contêineres ativos, inclusive o ai-memory |
@@ -244,8 +244,8 @@ bash scripts/verify-dmg.sh
 Saídas em `dist/`:
 
 - `AI Monitor.app`: bundle Universal, assinado ad hoc.
-- `AI-Monitor-0.4.0-macos-universal.dmg`: imagem comprimida, somente leitura.
-- `AI-Monitor-0.4.0-macos-universal.dmg.sha256`: checksum para download.
+- `AI-Monitor-0.5.0-macos-universal.dmg`: imagem comprimida, somente leitura.
+- `AI-Monitor-0.5.0-macos-universal.dmg.sha256`: checksum para download.
 
 O pacote é montado em uma pasta temporária limpa, a partir do bundle, do atalho `/Applications` e do `LEIA-ME.txt`. Configurações, tokens, dados, repositório e diagnósticos não entram na imagem. O script verifica a assinatura e as arquiteturas; o verificador monta a imagem, copia o app para um destino temporário e executa `--version` antes e depois de ejetar. Essa verificação não abre o painel nem acessa Docker/ai-memory.
 
@@ -277,3 +277,29 @@ prévia e confirme o escopo. Backup e checkpoint globais usam a confirmação
 `GLOBAL`; reconsolidação usa `SESSAO <id>`. Nunca use dados reais para testar
 exclusão/manutenção. O [guia administrativo](docs/ADMINISTRATION.md) detalha
 permissões, limites, backups privados e resultados incertos após falhas de rede.
+
+
+## Administração avançada e serviço local (v0.5)
+
+Não há ferramentas adicionais para login humano/Keychain. Em **Conexão**, salve
+primeiro o endereço e entre com usuário/senha em **Autenticação humana**. Senha,
+cookies e CSRF ficam apenas em memória. O botão de sair retorna explicitamente
+ao Bearer previamente configurado. Senhas temporárias podem exigir troca na
+mesma tela antes de acessar a administração.
+
+Para operação local, **Administração avançada → Serviço deste Mac** exige URL
+loopback e configuração explícita. Docker precisa do CLI e, para atualizar, do
+plugin Compose v2 com suporte a `config --format json`, arquivo Compose único,
+serviço existente e backup privado. Contextos remotos e stacks com overrides
+são recusados. Variáveis arbitrárias do terminal não são herdadas nesses comandos;
+mantenha as dependências de configuração no Compose e seus arquivos locais.
+
+LaunchAgent exige o plist oficial `com.github.akitaonrails.ai-memory`, executando
+`ai-memory serve` diretamente. Plist/binários de manutenção devem ser arquivos
+regulares, sem symlink. Para atualizar: salve backup, pare o serviço, obtenha o
+novo binário de fonte confiável e informe seu SHA-256; o app mantém o anterior
+para rollback. Inicie novamente e confira a saúde. O hash confirma correspondência
+dos bytes, não autenticidade da origem. O monitor não baixa binários automaticamente.
+
+Consulte o [guia administrativo](docs/ADMINISTRATION.md) para semântica das
+prévias, permissões, limites, logs privados e recuperação offline orientada.

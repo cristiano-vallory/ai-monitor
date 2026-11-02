@@ -902,6 +902,9 @@ pub(crate) fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
     }
     match value {
         Value::Object(map) => {
+            if map.len() > 200 {
+                ui.colored_label(Color32::from_rgb(244, 190, 103), "Objeto parcial: somente os primeiros 200 campos. Consulte a fonte completa antes de decidir.");
+            }
             for (key, v) in map.iter().take(200) {
                 if v.is_object() || v.is_array() {
                     ui.push_id(key, |ui| {

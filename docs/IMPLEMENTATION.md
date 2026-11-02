@@ -54,5 +54,5 @@ exclusão, atualização ou reinício na memória real para validar funcionalida
 ## Estado
 
 - v0.3: concluída. PR #2 integrado; release v0.3.0 publicada, download público verificado.
-- v0.4: implementada e validada localmente; aguardando CI/integração/publicação.
-- v0.5: pendente.
+- v0.4: concluída. PR #3 integrado; release v0.4.0 publicada, download público verificado.
+- v0.5: implementação concluída com testes, revisões locais e instalador validados. Evidências em `docs/reviews/v0.5.0.md`; integração e distribuição rastreadas no PR e na release v0.5.0.

@@ -4,17 +4,19 @@
 
 O AI Monitor é um cliente de monitoramento e administração. A coleta automática consulta o servidor ai-memory, comandos de leitura Docker e métricas locais. Escritas administrativas são explícitas, com prévia e confirmação no app. Não possui telemetria própria, analytics nem upload de diagnósticos. Busca, embeddings e reconsolidação podem consumir os providers configurados no servidor quando solicitados pelo usuário.
 
-- O token Bearer é mantido em memória e ignorado na serialização e desserialização da configuração. Não é salvo no JSON nem no Keychain.
+- O token Bearer é mantido em memória e ignorado na serialização e desserialização da configuração. Não é salvo no JSON. O usuário pode optar pelo Keychain, por servidor; senhas e cookies humanos nunca são persistidos.
 - O campo de token da interface é protegido visualmente. Tokens fornecidos por `AI_MEMORY_AUTH_TOKEN` não são repassados aos subprocessos Docker.
 - URLs de servidor com usuário, senha, query ou fragmento são recusadas. Tokens fora de loopback exigem HTTPS.
 - O cliente HTTP não segue redirecionamentos nem usa proxies de ambiente. Respostas de erro não são reproduzidas integralmente, evitando expor detalhes internos do servidor.
-- `docker container inspect` consulta somente IDs de contêiner e imagem. O app não solicita o ambiente interno dos contêineres.
+- Na coleta automática, `docker container inspect` consulta somente IDs de contêiner e imagem. A operação local consulta também estado e labels Compose, e calcula um digest da configuração Compose resolvida sem exibi-la ou persistir seu conteúdo. O app não solicita o ambiente interno dos contêineres.
 - Backups e exportações só são gravados após confirmação, em arquivo novo com permissão `0600`; não são publicados. Backup global inclui banco, wiki/histórico e `config.toml`, que pode conter segredos. O download tem limite de 2 GiB e 5 minutos.
 - Ações administrativas não têm retry automático. Perda de resposta pode deixar resultado incerto: consulte o estado antes de repetir. Confirmações expiram em 5 minutos, são descartadas ao trocar conexão/escopo e os campos ficam bloqueados durante a execução.
+- Login humano usa cookies e CSRF sem fallback para Bearer; `/mcp`, `/identity` e workstreams exigem conexão de máquina separada. Credenciais geradas ficam ocultas até revelar e resultados avançados são removidos após cinco minutos, inclusive com a janela oculta.
+- Serviço local exige loopback, contexto Unix ou LaunchAgent oficial, prévia vinculada a ID/hashes e confirmação. Subprocessos de manutenção usam ambiente restrito, argumentos separados e timeout; não executam shell. Logs privados são consultados sob demanda e não exportados.
 - O histórico permanece em memória. Sessões, resumos de handoffs e próximos passos são exibidos no painel, sem exportação automática.
 - Os binários de distribuição usam remapeamento de caminhos de compilação. O instalador é montado em uma pasta temporária limpa, com uma lista explícita de arquivos, sem copiar preferências ou o diretório do projeto.
 
-Esses cuidados não tornam o processo um cofre: tokens e dados podem permanecer na memória enquanto o aplicativo está em execução. Use um Mac e um servidor de confiança. O Docker CLI usa as permissões e o contexto do usuário; o app se limita a comandos de leitura, mas não transforma a credencial do daemon em uma credencial tecnicamente restrita a leitura.
+Esses cuidados não tornam o processo um cofre: tokens e dados podem permanecer na memória enquanto o aplicativo está em execução. Use um Mac e um servidor de confiança. O Docker CLI usa as permissões e o contexto do usuário; a coleta é de leitura e as ações locais são explícitas, mas o app não transforma a credencial do daemon em uma credencial tecnicamente restrita a leitura.
 
 ## O que não deve ser publicado
 

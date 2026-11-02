@@ -46,6 +46,8 @@ impl Task {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Intent {
+    Advanced(crate::advanced::Operation),
+    Local(crate::local_service::Operation),
     Approve {
         id: String,
     },
@@ -92,6 +94,8 @@ pub struct Action {
 impl Action {
     pub fn label(&self) -> String {
         match &self.intent {
+            Intent::Advanced(op) => op.kind.label().into(),
+            Intent::Local(op) => op.label().into(),
             Intent::Approve { id } => format!("Aprovar proposta {id}"),
             Intent::Reject { id, .. } => format!("Rejeitar proposta {id}"),
             Intent::CancelHandoff { id } => format!("Cancelar handoff {id}"),
@@ -114,7 +118,9 @@ impl Action {
         }
     }
     pub fn warning(&self) -> &'static str {
-        match self.intent {
+        match &self.intent {
+            Intent::Advanced(op) => op.kind.warning(),
+            Intent::Local(_) => crate::local_service::WARNING,
             Intent::Approve { .. } => {
                 "Aplica a proposta à wiki. O servidor verifica conflitos com a página atual."
             }
@@ -163,7 +169,11 @@ impl Action {
         }
     }
     fn validate(&self) -> Result<(), Error> {
-        self.scope.validate()?;
+        match &self.intent {
+            Intent::Advanced(op) => return op.validate(),
+            Intent::Local(op) => return op.validate(),
+            _ => self.scope.validate()?,
+        }
         let required = |s: &str| {
             if s.trim().is_empty() || s.len() > 4096 || s.chars().any(char::is_control) {
                 Err(Error::Invalid(
@@ -232,6 +242,8 @@ impl Action {
             return Err(Error::Cancelled);
         }
         match &self.intent {
+            Intent::Advanced(op) => op.execute(client, true),
+            Intent::Local(op) => op.execute(client.config(), true, cancelled),
             Intent::Approve { id } | Intent::Reject { id, .. } => {
                 let detail: Value =
                     client.get(&["admin", "pending-writes", id], &self.scope_query())?;
@@ -354,6 +366,8 @@ impl Action {
         }
         let mut body = self.body();
         match &self.intent {
+            Intent::Advanced(op) => op.execute(c, false),
+            Intent::Local(op) => op.execute(c.config(), false, cancelled),
             Intent::Approve { id } => c.post(
                 &["admin", "pending-writes", id, "approve"],
                 &self.scope_query(),
@@ -480,6 +494,8 @@ fn download(
 
 #[derive(Clone)]
 pub enum Read {
+    Advanced(crate::advanced::Operation),
+    Local(crate::local_service::Operation),
     Proposal { scope: Scope, id: String },
     Proposals { scope: Scope, status: String },
     Handoffs(Scope),
@@ -488,6 +504,10 @@ pub enum Read {
 impl Read {
     fn execute(&self, c: &Connection) -> Result<Value, Error> {
         match self {
+            Self::Advanced(op) if op.kind.read() => op.execute(c, false),
+            Self::Advanced(_) => Err(Error::Invalid("Escrita exige prévia.".into())),
+            Self::Local(op) if op.read() => op.execute(c.config(), false, || false),
+            Self::Local(_) => Err(Error::Invalid("Escrita exige prévia.".into())),
             Self::Proposal { scope, id } => {
                 scope.validate()?;
                 let v: Value = c.get(
@@ -595,10 +615,13 @@ impl Worker {
                     let client = Connection::new(&job.config)?;
                     match job.work {
                         Work::Read(read) => read.execute(&client),
-                        Work::Preview(action) => {
+                        Work::Preview(mut action) => {
                             let v = action.preview(&client, cancelled)?;
                             if cancelled() {
                                 return Err(Error::Cancelled);
+                            }
+                            if let Intent::Local(op) = &mut action.intent {
+                                op.bind(&v)?;
                             }
                             receipt = Some(Receipt {
                                 action,

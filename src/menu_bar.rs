@@ -91,6 +91,7 @@ mod native {
         ai: Retained<NSMenuItem>,
         docker: Retained<NSMenuItem>,
         freshness: Retained<NSMenuItem>,
+        activity: Retained<NSMenuItem>,
         previous: RefCell<Option<MenuReading>>,
         trace_remaining: Cell<u32>,
     }
@@ -107,20 +108,14 @@ mod native {
             // These selectors use AppKit's target/action ABI: void (id sender).
             #[unsafe(method(openPanel:))]
             fn open_panel(&self,_sender:Option<&AnyObject>) {
-                let state=self.ivars();
-                state.visible.set(true);
-                let app=NSApplication::sharedApplication(self.mtm());
-                for window in app.windows().iter().filter(|w|w.title().to_string()=="AI Monitor") {
-                    window.deminiaturize(None);
-                    window.makeKeyAndOrderFront(None);
-                }
-                #[allow(deprecated)]
-                app.activateIgnoringOtherApps(true);
-                state.ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                state.ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                state.ctx.send_viewport_cmd(ViewportCommand::Focus);
-                state.ctx.request_repaint();
+                self.show_dashboard();
             }
+            #[unsafe(method(openHealth:))]
+            fn open_health(&self,_sender:Option<&AnyObject>) {self.ivars().shared.navigation.store(1,Ordering::Release);self.show_dashboard();}
+            #[unsafe(method(openReview:))]
+            fn open_review(&self,_sender:Option<&AnyObject>) {self.ivars().shared.navigation.store(2,Ordering::Release);self.show_dashboard();}
+            #[unsafe(method(openAdmin:))]
+            fn open_admin(&self,_sender:Option<&AnyObject>) {self.ivars().shared.navigation.store(3,Ordering::Release);self.show_dashboard();}
             #[unsafe(method(hidePanel:))]
             fn hide_panel(&self,_sender:Option<&AnyObject>) {
                 self.hide_dashboard();
@@ -138,6 +133,27 @@ mod native {
     );
 
     impl MenuActions {
+        fn show_dashboard(&self) {
+            let state = self.ivars();
+            state.visible.set(true);
+            let app = NSApplication::sharedApplication(self.mtm());
+            for window in app
+                .windows()
+                .iter()
+                .filter(|w| w.title().to_string() == "AI Monitor")
+            {
+                window.deminiaturize(None);
+                window.makeKeyAndOrderFront(None);
+            }
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+            state.ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            state
+                .ctx
+                .send_viewport_cmd(ViewportCommand::Minimized(false));
+            state.ctx.send_viewport_cmd(ViewportCommand::Focus);
+            state.ctx.request_repaint();
+        }
         fn hide_dashboard(&self) {
             let state = self.ivars();
             state.visible.set(false);
@@ -180,6 +196,48 @@ mod native {
                         .freshness
                         .push_str(&format!(" · {}", health.menu_summary(Utc::now())));
                 }
+                let h = state
+                    .shared
+                    .api
+                    .try_lock()
+                    .ok()
+                    .and_then(|a| {
+                        a.at.filter(|at| {
+                            (Utc::now() - *at).num_seconds() <= (config.api_seconds * 3) as i64
+                        })
+                        .and(a.handoff_total)
+                    })
+                    .map(|n| n.to_string())
+                    .unwrap_or("—".into());
+                let p = if let Ok(health) = state.shared.health.try_lock() {
+                    if let Some(scope) = &config.proposal_watch {
+                        let n = if health.fresh(Utc::now())
+                            && health.pending_scope.as_ref() == Some(scope)
+                        {
+                            health
+                                .pending
+                                .map(|n| {
+                                    if n >= 200 {
+                                        "200+".into()
+                                    } else {
+                                        n.to_string()
+                                    }
+                                })
+                                .unwrap_or("—".into())
+                        } else {
+                            "—".into()
+                        };
+                        reading.title.push_str(&format!(" P{n}"));
+                        format!("Propostas {n} · {}", scope.label())
+                    } else {
+                        "Propostas: selecione um projeto em Conexão".into()
+                    }
+                } else {
+                    "Propostas: aguardando".into()
+                };
+                state
+                    .activity
+                    .setTitle(&NSString::from_str(&format!("Handoffs abertos {h} · {p}")));
                 reading
             };
             let mut previous = state.previous.borrow_mut();
@@ -248,6 +306,7 @@ mod native {
             let ai = item(mtm, "ai-memory · aguardando", None);
             let docker = item(mtm, "Docker · aguardando", None);
             let freshness = item(mtm, "Aguardando a primeira coleta…", None);
+            let activity = item(mtm, "Handoffs / propostas: aguardando", None);
             let actions = MenuActions::new(
                 mtm,
                 MenuState {
@@ -258,6 +317,7 @@ mod native {
                     ai: ai.clone(),
                     docker: docker.clone(),
                     freshness: freshness.clone(),
+                    activity: activity.clone(),
                     previous: RefCell::new(None),
                     trace_remaining: Cell::new(if std::env::args().any(|a| a == "--trace-menu") {
                         120
@@ -270,6 +330,7 @@ mod native {
             menu.addItem(&ai);
             menu.addItem(&docker);
             menu.addItem(&freshness);
+            menu.addItem(&activity);
             menu.addItem(&item(mtm, "CPU: 100% = 1 núcleo · M/G = MiB/GiB", None));
             menu.addItem(&item(
                 mtm,
@@ -279,6 +340,9 @@ mod native {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             for (title, selector) in [
                 ("Abrir painel", sel!(openPanel:)),
+                ("Saúde e sessões", sel!(openHealth:)),
+                ("Revisar propostas e handoffs", sel!(openReview:)),
+                ("Administração avançada", sel!(openAdmin:)),
                 ("Ocultar painel", sel!(hidePanel:)),
                 ("Sair do AI Monitor", sel!(quitMonitor:)),
             ] {

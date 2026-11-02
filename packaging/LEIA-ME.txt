@@ -18,7 +18,7 @@ somente se você confirmou a origem deste download.
 Não desative o Gatekeeper globalmente.
 
 Ao atualizar, encerre a versão anterior pelo menu antes de substituí-la.
-As preferências locais são preservadas; o token não é salvo pelo aplicativo.
+As preferências locais são preservadas; o Bearer só é salvo se você optar pelo Keychain. Sessões humanas não são salvas.
 
 Downloads oficiais e checksums:
 https://github.com/cristianovallory/ai-monitor/releases

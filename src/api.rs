@@ -22,7 +22,9 @@ pub fn endpoint(base: &str, segments: &[&str]) -> Result<Url, String> {
 
 fn get<T: DeserializeOwned>(client: &Client, config: &Config, url: Url) -> Result<T, String> {
     let mut request = client.get(url).header("Cache-Control", "no-cache");
-    if !config.token.is_empty() {
+    if let Some(session) = &config.human {
+        request = session.headers(request, &reqwest::Method::GET);
+    } else if !config.token.is_empty() {
         request = request.bearer_auth(&config.token);
     }
     let response = request

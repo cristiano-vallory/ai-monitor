@@ -71,7 +71,7 @@ de 8 MiB. Redirects e proxies automáticos são desabilitados. Erros mostram a
 classe do problema, sem reproduzir corpos do servidor ou credenciais.
 
 Dados de sessões, páginas e relações ficam na memória do app. Não há telemetria
-externa, exportação automática ou persistência de token. Conteúdo da memória
+externa, exportação automática ou persistência de token fora da opção explícita de Keychain. Conteúdo da memória
 pode ser privado: considere isso ao compartilhar a tela. O projeto público e
 os testes usam somente dados sintéticos.
 
@@ -144,3 +144,94 @@ permanecem em memória; só o download solicitado grava conteúdo em disco.
 Relatórios são apresentados como campos e listas navegáveis. Textos acima de
 100 KiB e estruturas muito profundas são sinalizados como parciais; consulte a
 fonte completa antes de aprovar conteúdo que exceda esses limites.
+
+
+## Administração avançada (v0.5)
+
+O catálogo fica na tela **Administração avançada**. Escolha a operação; os campos
+indicam exatamente os parâmetros aceitos. O seletor de projeto preenche nomes
+conhecidos, e campos editáveis permitem administrar instalações ainda sem projetos.
+Consultas usam **Consultar**. Escritas exigem **Preparar prévia**, revisão dos
+parâmetros e confirmação digitada do alvo. A conexão e outros grupos de escrita
+ficam bloqueados enquanto a operação está em andamento.
+
+| Área | Operações | Prévia e limites |
+| --- | --- | --- |
+| Projetos | Inventário, renomear, mover, mesclar, excluir | Mesclar/excluir têm dry-run do servidor. Renomear/mover consultam inventário e mostram plano, sem simulação transacional. Move mantém `force=false`, `on_conflict=block`; mesclar em destino existente exige `allow_lossy_merge=true` explícito. |
+| Workspaces | Renomear, mesclar, excluir com conteúdo | Prévia somente GET, inclusive para excluir: servidores antigos ignoram dry_run e poderiam excluir workspace vazio. Mescla pode aplicar alguns projetos antes de falhar e pode perder histórico ao unir projetos homônimos. |
+| Sessões | Mover uma sessão por ID | Dry-run com `confirm=false`; destino já existente, sem criar projeto nem forçar sessão ativa. Escolha mover páginas ou regenerá-las posteriormente. |
+| Perfil | Estado, entradas, revisão, instruções e reconstrução | GET apply apenas devolve instruções; não modifica arquivos de agentes. Rebuild segue configuração global/workspace/usuário do servidor e pode chamar provider. |
+| Usuários | Listar, criar, editar nome/e-mail/role, habilitar/desabilitar, redefinir senha | Role humano user/root; vazio em nome/e-mail mantém valor. Desabilitar login não revoga chaves de máquina. Senha temporária é retornada uma vez. |
+| Permissões | Grants por usuário/projeto; conceder/revogar read/write; open/restricted | Consulte os grants antes de alterar. A API controla autorização e protege suas invariantes; o app não contorna recusas. |
+| Chaves | Listar, criar, rotacionar e revogar | IDs explícitos; token novo oculto até revelar. Guarde-o antes de limpar/sair; não é persistido automaticamente no Keychain. |
+| Mensagens | Inbox/outbox, enviar e cancelar por ID | GET não consome; até 200 itens, sem paginação oferecida por essa rota. Envio exige origem e destino; measured exige evidência. Cancelar sem ID é recusado para impedir cancelamento em massa. Enfileirar não inicia agente. |
+| Workstreams | Recentes paginados, estado de run, eventos pesquisáveis | Bearer obrigatório, fingerprints reais de repositório/checkout; 50 por página com deslocamento numérico. Eventos até 100 por busca. Não envia heartbeat, accept, finish ou pop. |
+
+As prévias de inventário **não garantem todos os efeitos de uma operação**.
+Confira backup e a documentação do servidor para cascatas, dados de outros
+projetos, perda de histórico e ações parcialmente aplicadas. Nada é excluído
+para produzir essas prévias. A API reavalia autorização e estado ao executar.
+
+### Autenticação e credenciais
+
+Em **Conexão**, salve o endereço e use Bearer ou login humano. Cookies humanos e
+CSRF ficam em memória; falha/expiração não faz fallback silencioso para Bearer.
+Para MCP/workstreams, saia explicitamente da sessão humana. Senha temporária
+pode exigir troca antes de usar outras APIs. O Keychain é opcional e guarda
+somente o Bearer, separado por URL/base path; não exporta segredos no JSON.
+Alterar o endereço limpa os campos de autenticação antes de reconectar.
+
+Resultados administrativos avançados ficam ocultos nos campos de segredo até
+**Revelar credenciais neste resultado**. São removidos após cinco minutos,
+ao trocar operação/conexão ou ao clicar **Limpar resultado privado**. Isso não
+é garantia de zerar todas as cópias na RAM. Nenhum resultado é salvo em arquivo.
+
+### Menu e acompanhamento
+
+O menu tem atalhos para saúde, revisão e administração; mostra handoffs abertos.
+Selecione um projeto em **Conexão → Propostas na barra de menus** para acompanhar
+pendentes a cada ciclo de saúde, com a janela fechada. `P200+` significa que a
+listagem atingiu o limite; `—` significa indisponível/atrasado, nunca zero presumido.
+A contagem é do projeto e da identidade conectada, não um total global.
+
+### Operação local
+
+**Serviço deste Mac** oferece status, logs, iniciar, parar, reiniciar e atualizar.
+Só funciona com conexão loopback. Configuração local é informada explicitamente
+na tela e fica na memória; o app não infere qual serviço deve ser interrompido.
+
+Docker exige contexto com socket Unix. A prévia fixa ID do contêiner, imagem e
+labels; execução revalida o alvo. Atualização exige backup privado, Compose com
+um único arquivo registrado e serviço com image explícita. Arquivo e configuração
+resolvida (incluindo interpolação) são conferidos por SHA-256 antes e após pull;
+o conteúdo resolvido não é mostrado nem persistido. Executa pull e up -d somente
+no serviço, com no-deps/no-build/pull never; não executa prune, down ou remoção
+de volumes. Stacks com overrides, build local ou dependências de ambiente do
+terminal exigem operação pelo administrador. Configuração/serviço alterados
+externamente durante o comando ainda podem causar corrida; não edite o stack
+concomitantemente. Veja [Compose up](https://docs.docker.com/reference/cli/docker/compose/up/)
+e [contextos](https://docs.docker.com/engine/manage-resources/contexts/).
+
+LaunchAgent aceita o plist oficial, valida label, programa e comando serve,
+e atua no domínio gui do usuário, sem sudo. Atualização exige serviço descarregado,
+nenhum processo ai-memory ativo, backup privado e SHA-256 do novo binário. Usa
+staging ao lado do executável e substituição atômica; conserva cópia privada do
+binário anterior. O serviço permanece parado até **Iniciar**. Arquivos de manutenção
+com symlink são recusados. Um digest confere bytes, não a autenticidade do fornecedor.
+
+Logs são privados: Docker lê até 300 linhas de stdout/stderr (streams concatenados);
+LaunchAgent lê até 150 de cada arquivo indicado no plist. Texto limitado a 100 KiB
+por resultado/stream, sem exportação automática. Erros de comandos não reproduzem
+stderr. Comandos têm prazo de 6–300 s, não repetem automaticamente e podem deixar
+estado incerto após timeout: consulte status e saúde antes de repetir.
+
+**Recuperação offline** apresenta roteiro para parar, conferir backup/config/pepper,
+usar restore/reindex e validar após iniciar. Não há endpoint HTTP para restaurar
+banco completo. O app não executa restore, reset, remoção de DB ou reindex por você.
+Reindex exige banco vazio; não recupera sessões, handoffs, usuários, auditoria ou
+outros dados que existem somente no banco. Preserve o original. Veja o
+[restore upstream](https://github.com/akitaonrails/ai-memory/blob/v3.3.1/crates/ai-memory-cli/src/commands/restore.rs)
+e o [reindex upstream](https://github.com/akitaonrails/ai-memory/blob/v3.3.1/crates/ai-memory-cli/src/commands/reindex.rs).
+
+Importação e sincronização wiki com arquivos externos permanecem fora destas
+três fases e requerem um projeto próprio de recuperação/conflitos.

@@ -37,7 +37,38 @@ fn command_with_timeout(
     timeout: Duration,
     allow_missing_container: bool,
 ) -> Result<String, String> {
+    run_process(binary, args, timeout, allow_missing_container, false, false)
+}
+
+pub fn local_command(
+    binary: &str,
+    args: &[&str],
+    timeout: Duration,
+    logs: bool,
+) -> Result<String, String> {
+    run_process(binary, args, timeout, false, true, logs)
+        .map_err(|_| "Comando local falhou ou excedeu o tempo limite. Confira o estado antes de tentar novamente; não houve repetição automática.".into())
+}
+fn run_process(
+    binary: &str,
+    args: &[&str],
+    timeout: Duration,
+    allow_missing_container: bool,
+    isolated: bool,
+    logs: bool,
+) -> Result<String, String> {
     let mut cmd = Command::new(binary);
+    if isolated {
+        cmd.env_clear().env(
+            "PATH",
+            "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
+        );
+        for key in ["HOME", "TMPDIR"] {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -81,8 +112,11 @@ fn command_with_timeout(
             kill(-pgid, 9);
         }
     }
-    let output = out.join().unwrap_or_default();
+    let mut output = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
+    if logs {
+        output.extend_from_slice(&stderr);
+    }
     let stderr_text = String::from_utf8_lossy(&stderr);
     let only_missing_container = allow_missing_container
         && !stderr_text.trim().is_empty()

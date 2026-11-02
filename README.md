@@ -8,9 +8,9 @@ Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. In
 
 ## Instalar sem compilar Rust
 
-A versão **0.4.0** acrescenta revisão de propostas, manutenção com prévia, backup privado e restauração. Veja as [notas da atualização](docs/releases/v0.4.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
+A versão **0.5.0** conclui a administração avançada: projetos, usuários/permissões, autenticação humana, Keychain opcional, mensagens e operação local. Veja as [notas da atualização](docs/releases/v0.5.0.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
 
-1. Baixe **AI-Monitor-0.4.0-macos-universal.dmg** na [release v0.4.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.4.0).
+1. Baixe **AI-Monitor-0.5.0-macos-universal.dmg** na [release v0.5.0](https://github.com/cristianovallory/ai-monitor/releases/tag/v0.5.0).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
@@ -57,6 +57,7 @@ Ao iniciar, o app fica na barra de menus, sem abrir o painel nem ocupar o Dock. 
 
 O indicador AI prioriza o contêiner configurado. Quando ele não está disponível, o coletor pode usar processos nativos identificados como ai-memory. Os números dos processos Docker Desktop no macOS ficam separados no painel.
 
+- **Saúde e sessões / Revisar propostas e handoffs / Administração avançada:** atalhos diretos. O menu mostra handoffs abertos e propostas pendentes do projeto escolhido em Conexão (`P200+` sinaliza o limite da lista).
 - **Abrir painel:** mostra a janela e restaura uma janela minimizada.
 - **Ocultar painel:** recolhe a janela e mantém a coleta ativa. O botão vermelho de fechar tem o mesmo comportamento.
 - **Sair do AI Monitor:** encerra o monitor e remove o indicador da barra.
@@ -72,7 +73,8 @@ Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repo
 - **Docker:** CPU/memória/tarefas por contêiner, estado, imagem, portas e I/O acumulado; imagens agrupadas por ID e associação aos contêineres; processos do Docker Desktop e ai-memory no Mac.
 - **Central ai-memory:** saúde interna, alertas, tokens, eventos pesquisáveis, wiki, histórico/diff e grafos de relações.
 - **Administrar memória:** propostas e evidências, handoffs, auditoria/curadoria/retenção/embeddings, reconsolidação, feedback, backup/OKF, checkpoints e restauração, com prévia e confirmação.
-- **Conexão:** servidor, token opcional, nome do contêiner, caminho do Docker CLI e intervalos.
+- **Administração avançada:** projetos/workspaces, perfil, usuários/grants/chaves, inbox/workstreams e serviço local Docker/LaunchAgent.
+- **Conexão:** servidor, Bearer/Keychain opcional, login humano, projeto monitorado na barra, contêiner, Docker CLI e intervalos.
 
 ## Conexão e coleta
 
@@ -83,13 +85,13 @@ Abra **Conexão**, ajuste os campos e clique em **Salvar e conectar**.
 | Campo | Padrão | Limites ou comportamento |
 | --- | --- | --- |
 | Servidor ai-memory | `http://127.0.0.1:49374` | Endereço local genérico; altere conforme sua instalação |
-| Token Bearer | Vazio | Opcional conforme a autenticação; somente em memória |
+| Token Bearer | Vazio | Em memória por padrão; Keychain mediante opção explícita |
 | Contêiner ai-memory | `ai-memory` | Nome exato no contexto Docker monitorado |
 | Executável Docker | Detecção de caminhos usuais | Aceita caminho absoluto personalizado |
 | Recursos | 2 segundos | Entre 1 e 60 segundos |
 | Sessões/handoffs | 10 segundos | Entre 5 e 300 segundos; espera após cada varredura |
 
-Configurações são salvas em `~/Library/Application Support/AI Monitor/config.json`, fora do projeto. **O token não é persistido.** URLs com usuário, senha, query ou fragmento são recusadas. Tokens em servidores fora de loopback exigem HTTPS. Redirecionamentos HTTP são recusados. O app não depende do PATH do Finder para encontrar as instalações usuais do Docker Desktop.
+Configurações são salvas em `~/Library/Application Support/AI Monitor/config.json`, fora do projeto. **O token não entra no JSON.** Pode ser guardado opcionalmente no Keychain, separado por endereço de servidor. URLs com usuário, senha, query ou fragmento são recusadas. Tokens em servidores fora de loopback exigem HTTPS. Redirecionamentos HTTP são recusados. O app não depende do PATH do Finder para encontrar as instalações usuais do Docker Desktop.
 
 | Variável opcional | Finalidade |
 | --- | --- |
@@ -100,7 +102,7 @@ Os nomes das variáveis são públicos; **seus valores reais não devem ser vers
 
 A coleta automática usa apenas leituras: `docker ps`, `stats --no-stream`, `image ls`, `container inspect --format '{{.Id}} {{.Image}}'`, `top` e rotas GET da API/saúde. Não solicita o ambiente dos contêineres, não aceita handoffs nem chama LLM para monitorar. As consultas manuais da Central incluem busca (que pode usar embeddings/reranking do servidor). **Administrar memória** oferece escritas HTTP/MCP somente após preparar e confirmar uma operação específica; embeddings e reconsolidação podem consumir providers. Veja o [guia administrativo](docs/ADMINISTRATION.md).
 
-Cada comando Docker tem timeout de 6 s e saída limitada a 16 MiB. Cada requisição HTTP tem timeout de 8 s, conexão de até 2 s e resposta limitada a 8 MiB, sem proxy. Após descobrir projetos e identidade, o coletor distribui projetos entre até quatro trabalhadores, com orçamento de 30 s; requisições em andamento podem terminar depois desse orçamento. Dados parciais e erros são sinalizados; falhas não viram medições zero. Trocar a conexão descarta respostas da configuração anterior.
+Cada comando Docker da coleta tem timeout de 6 s e saída limitada a 16 MiB. Cada requisição HTTP tem timeout de 8 s, conexão de até 2 s e resposta limitada a 8 MiB, sem proxy. Após descobrir projetos e identidade, o coletor distribui projetos entre até quatro trabalhadores, com orçamento de 30 s; requisições em andamento podem terminar depois desse orçamento. Dados parciais e erros são sinalizados; falhas não viram medições zero. Trocar a conexão descarta respostas da configuração anterior.
 
 ## Interpretação das métricas
 
@@ -149,6 +151,8 @@ ai-memory API ── coletor de sessões ──┘                       └─ 
 | `reqwest` 0.12 com `rustls` | Cliente HTTP/HTTPS |
 | `serde` / `serde_json` 1 | Serialização e leitura de JSON |
 | `chrono` 0.4 | Datas e horários |
+| `security-framework` 3 | Keychain nativo opcional |
+| `sha2` 0.10 | Conferência da configuração Compose antes de atualizar |
 
 O Cargo baixa as dependências; versões resolvidas e checksums estão no `Cargo.lock`, que é versionado. O aplicativo não depende de Node.js, Electron, Python, banco de dados ou chave de provedor de IA. Os requisitos de sistema e ferramentas estão no [INSTALL.md](INSTALL.md). Os [avisos das dependências](packaging/THIRD_PARTY_NOTICES.txt) acompanham o bundle.
 
@@ -163,7 +167,7 @@ Para contribuir, rode os comandos de validação da seção de desenvolvimento e
 - Sem telemetria própria, analytics, sincronização externa ou persistência do histórico. O app acessa o servidor e o contexto Docker configurados.
 - Token excluído da serialização, erros HTTP sem o corpo da resposta, URLs validadas e redirecionamentos recusados.
 - `.env`, configurações locais, chaves, diagnósticos e artefatos de build excluídos do Git pelo `.gitignore`. Releases recebem somente o instalador revisado e seu checksum; o bundle é montado a partir de uma lista explícita de arquivos, com caminhos de compilação remapeados.
-- Sem armazenamento no Keychain, atualizador automático, notificações de limites ou notarização Apple nesta versão.
+- Sem atualizador automático do monitor, notificações push ou notarização Apple. O serviço ai-memory pode ser atualizado manualmente após prévia; o app não altera instalações remotas.
 - Interface validada em macOS Apple Silicon; executável Intel verificado via Rosetta. O bundle declara macOS 12.0 como mínimo; hardware Intel e versões antigas ainda precisam de validação. O Docker Desktop tem requisitos próprios.
 
 Consulte [SECURITY.md](SECURITY.md) para proteção de dados e relato privado de vulnerabilidades. O projeto usa a licença [MIT](LICENSE); as dependências mantêm suas respectivas licenças.

@@ -22,6 +22,7 @@ enum Page {
     Overview,
     Central,
     Management,
+    Advanced,
     Sessions,
     Docker,
     Settings,
@@ -53,6 +54,8 @@ pub struct MonitorApp {
     central: crate::console::Console,
     health: crate::health::Snapshot,
     management: crate::management_ui::Management,
+    authentication: crate::auth::Panel,
+    operations: crate::operations_ui::Panel,
 }
 
 impl MonitorApp {
@@ -90,8 +93,11 @@ impl MonitorApp {
         );
         let central = crate::console::Console::new(shared.clone());
         let management = crate::management_ui::Management::new(shared.clone());
+        let operations = crate::operations_ui::Panel::new(shared.clone());
         Self {
             management,
+            operations,
+            authentication: crate::auth::Panel::new(),
             central,
             health: Default::default(),
             #[cfg(target_os = "macos")]
@@ -179,6 +185,7 @@ impl MonitorApp {
                     (Page::Overview, "Visão geral"),
                     (Page::Central, "Central ai-memory"),
                     (Page::Management, "Administrar memória"),
+                    (Page::Advanced, "Administração avançada"),
                     (Page::Sessions, "Sessões e handoffs"),
                     (Page::Docker, "Docker"),
                     (Page::Settings, "Conexão"),
@@ -239,6 +246,10 @@ impl MonitorApp {
             Page::Docker => (
                 "Docker",
                 "Consumo, contêineres e imagens do contexto Docker ativo.",
+            ),
+            Page::Advanced => (
+                "Administração avançada",
+                "Projetos, identidade, mensagens e operação local.",
             ),
             Page::Settings => ("Conexão", "Ajuste as fontes e a frequência de atualização."),
             Page::Management => (
@@ -983,29 +994,66 @@ impl MonitorApp {
         }
     }
 
+    fn reconnect(&mut self, config: Config) {
+        self.config = config.clone();
+        self.draft = config.clone();
+        self.shared.apply(config);
+        self.central.reset();
+        self.management.reset();
+        self.operations.reset();
+        self.health = Default::default();
+        self.history.clear();
+        self.resources = Default::default();
+        self.api = Default::default();
+        self.scope.clear();
+        self.selected_container = None;
+        self.handoff_page = 0;
+        self.paused = false;
+        self.last_sync = Instant::now() - Duration::from_secs(1);
+    }
     fn settings(&mut self, ui: &mut egui::Ui) {
         panel().show(ui,|ui| {
             section(ui,"Fontes de dados");
             egui::Grid::new("config").num_columns(2).spacing([28.,16.]).show(ui,|ui| {
-                ui.label("Servidor ai-memory");ui.add(egui::TextEdit::singleline(&mut self.draft.endpoint).desired_width(400.));ui.end_row();
+                ui.label("Servidor ai-memory");if ui.add(egui::TextEdit::singleline(&mut self.draft.endpoint).desired_width(400.)).changed(){self.draft.token.clear();self.draft.human=None;self.draft.proposal_watch=None;self.settings_message="Servidor alterado. Informe o token desse endereço ou use login humano após conectar.".into();}ui.end_row();
                 ui.label("Token Bearer (opcional)");ui.add(egui::TextEdit::singleline(&mut self.draft.token).password(true).desired_width(400.));ui.end_row();
                 ui.label("Contêiner ai-memory");ui.add(egui::TextEdit::singleline(&mut self.draft.container).desired_width(400.));ui.end_row();
                 ui.label("Executável Docker");ui.add(egui::TextEdit::singleline(&mut self.draft.docker_binary).desired_width(400.));ui.end_row();
                 ui.label("Atualizar recursos");ui.add(egui::DragValue::new(&mut self.draft.resource_seconds).range(1..=60).suffix(" s"));ui.end_row();
                 ui.label("Atualizar sessões / handoffs");ui.add(egui::DragValue::new(&mut self.draft.api_seconds).range(5..=300).suffix(" s"));ui.end_row();
             });
-            ui.add_space(12.);ui.label(RichText::new("O token fica somente na memória deste app. Também é possível fornecer AI_MEMORY_AUTH_TOKEN ao iniciar pelo terminal.").small().color(MUTED));
+            ui.label("Propostas na barra de menus (um projeto, até 200 pendentes)");
+            egui::ComboBox::from_id_salt("watch-proposals").width(460.).selected_text(self.draft.proposal_watch.as_ref().map(crate::client::Scope::label).unwrap_or("Desativado".into())).show_ui(ui,|ui|{
+                if ui.selectable_value(&mut self.draft.proposal_watch,None,"Desativado").clicked(){ui.close();}
+                for p in &self.api.projects {let scope=crate::client::Scope{workspace:p.workspace_name.clone(),project:p.project_name.clone()};let label=scope.label();if ui.selectable_value(&mut self.draft.proposal_watch,Some(scope),label).clicked(){ui.close();}}
+            });
+            ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,"Guardar o Bearer no Keychain para este servidor (opcional)");
+            ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(MUTED));
+            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new("Carregar Bearer do Keychain deste endereço")).clicked(){match crate::keychain::load(&self.draft.endpoint){Ok(Some(token))=>{self.draft.token=token;self.settings_message="Token carregado no campo. Salve para conectar.".into();},Ok(None)=>self.settings_message="Nenhum token guardado para esse endereço.".into(),Err(e)=>self.settings_message=e}}
+
             ui.horizontal(|ui| {
-                if ui.add_enabled(!self.management.busy, egui::Button::new(RichText::new("Salvar e conectar").color(GREEN))).clicked() {
+                if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy, egui::Button::new(RichText::new("Salvar e conectar").color(GREEN))).clicked() {
                     self.draft.normalize();
-                    match self.draft.validate().and_then(|_|self.draft.save()) {
-                        Ok(())=> {self.config=self.draft.clone();self.shared.apply(self.config.clone());self.central.reset();self.management.reset();self.health=Default::default();self.history.clear();self.resources=Default::default();self.api=Default::default();self.scope.clear();self.selected_container=None;self.handoff_page=0;self.paused=false;self.last_sync=Instant::now()-Duration::from_secs(1);self.settings_message="Configuração salva. Reconectando…".into();},
+                    match self.draft.validate().and_then(|_|{
+                        if self.draft.remember_token {crate::keychain::save(&self.draft.endpoint,&self.draft.token)?;}
+                        else if self.config.remember_token && self.config.endpoint==self.draft.endpoint {crate::keychain::forget(&self.draft.endpoint)?;}
+                        self.draft.save()
+                    }) {
+                        Ok(())=> {self.reconnect(self.draft.clone());self.authentication.clear();self.settings_message="Configuração salva. Reconectando…".into();},
                         Err(e)=>self.settings_message=e,
                     }
                 }
                 if ui.button("Restaurar campos padrão").clicked(){self.draft=Config::default();self.settings_message="Campos restaurados ao padrão. Clique em Salvar e conectar para aplicar.".into();}
             });
             if !self.settings_message.is_empty(){ui.label(&self.settings_message);}
+        });
+        ui.add_space(12.);
+        panel().show(ui, |ui| {
+            self.authentication.show(
+                ui,
+                &self.shared,
+                !self.management.busy && !self.operations.busy,
+            )
         });
         ui.add_space(12.);
         panel().show(ui,|ui| {
@@ -1021,6 +1069,18 @@ impl MonitorApp {
 
 impl eframe::App for MonitorApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if let Some(config) = self.authentication.poll(&self.shared) {
+            self.reconnect(config);
+        }
+        self.management.poll(&self.shared);
+        self.operations.poll(&self.shared);
+        ctx.request_repaint_after(Duration::from_secs(1));
+        match self.shared.navigation.swap(0, Ordering::AcqRel) {
+            1 => self.page = Page::Central,
+            2 => self.page = Page::Management,
+            3 => self.page = Page::Advanced,
+            _ => {}
+        }
         #[cfg(target_os = "macos")]
         if let Some(menu_bar) = &self.menu_bar {
             if ctx.input(|i| i.viewport().close_requested()) {
@@ -1032,7 +1092,6 @@ impl eframe::App for MonitorApp {
                 return;
             }
         }
-        self.management.poll(&self.shared);
         self.sync();
         ctx.request_repaint_after(Duration::from_millis(500));
         self.sidebar(ctx);
@@ -1047,7 +1106,18 @@ impl eframe::App for MonitorApp {
                         match self.page {
                             Page::Overview => self.overview(ui),
                             Page::Management => {
-                                self.management.show(ui, &self.shared, &self.api.projects)
+                                ui.add_enabled_ui(
+                                    !self.authentication.busy && !self.operations.busy,
+                                    |ui| self.management.show(ui, &self.shared, &self.api.projects),
+                                );
+                            }
+                            Page::Advanced => {
+                                ui.add_enabled_ui(
+                                    !self.authentication.busy && !self.management.busy,
+                                    |ui| {
+                                        self.operations.show(ui, &self.shared, &self.api.projects);
+                                    },
+                                );
                             }
                             Page::Central => self.central.show(
                                 ui,

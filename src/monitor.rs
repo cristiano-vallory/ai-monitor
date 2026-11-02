@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -18,6 +18,7 @@ pub struct Shared {
     pub api: Mutex<ApiSnapshot>,
     pub health: Mutex<crate::health::Snapshot>,
     pub generation: AtomicU64,
+    pub navigation: AtomicU8,
     pub stop: Arc<AtomicBool>,
 }
 
@@ -30,6 +31,7 @@ impl Shared {
             api: Mutex::new(ApiSnapshot::default()),
             health: Mutex::new(crate::health::Snapshot::default()),
             generation: AtomicU64::new(0),
+            navigation: AtomicU8::new(0),
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
