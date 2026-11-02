@@ -87,8 +87,8 @@ pub struct MonitorApp {
 }
 
 impl MonitorApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
+    pub(crate) fn apply_style(ctx: &egui::Context) {
+        let mut style = (*ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = BG;
         style.visuals.window_fill = PANEL;
@@ -111,14 +111,9 @@ impl MonitorApp {
         style
             .text_styles
             .insert(egui::TextStyle::Small, egui::FontId::proportional(12.));
-        cc.egui_ctx.set_style(style);
-        let shared = Shared::start(config.clone());
-        #[cfg(target_os = "macos")]
-        let menu_bar = crate::menu_bar::MenuBar::new(
-            cc.egui_ctx.clone(),
-            shared.clone(),
-            std::env::args().any(|a| a == "--show-dashboard"),
-        );
+        ctx.set_style(style);
+    }
+    fn build(config: Config, shared: Arc<Shared>) -> Self {
         let central = crate::console::Console::new(shared.clone());
         let management = crate::management_ui::Management::new(shared.clone());
         let operations = crate::operations_ui::Panel::new(shared.clone());
@@ -129,7 +124,7 @@ impl MonitorApp {
             central,
             health: Default::default(),
             #[cfg(target_os = "macos")]
-            menu_bar,
+            menu_bar: None,
             shared,
             draft: config.clone(),
             config,
@@ -150,6 +145,26 @@ impl MonitorApp {
             selected_container: None,
             paused: false,
         }
+    }
+    #[cfg(target_os = "macos")]
+    pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
+        Self::apply_style(&cc.egui_ctx);
+        let shared = Shared::start(config.clone());
+        let mut app = Self::build(config, shared.clone());
+        app.menu_bar = crate::menu_bar::MenuBar::new(
+            cc.egui_ctx.clone(),
+            shared,
+            std::env::args().any(|a| a == "--show-dashboard"),
+        );
+        app
+    }
+    /// Construtor Linux: reutiliza o Shared já iniciado (a janela é criada e
+    /// destruída sob demanda; o app e os coletores vivem no processo). O
+    /// estilo de cada janela é aplicado por linux::prepare_window.
+    #[cfg(target_os = "linux")]
+    pub fn for_shared(shared: Arc<Shared>) -> Self {
+        let config = shared.config.read().unwrap().clone();
+        Self::build(config, shared)
     }
 
     fn sync(&mut self) {
@@ -1062,7 +1077,7 @@ impl MonitorApp {
                 ui.label("Atualizar recursos");ui.add(egui::DragValue::new(&mut self.draft.resource_seconds).range(1..=60).suffix(" s"));ui.end_row();
                 ui.label("Atualizar sessões / handoffs");ui.add(egui::DragValue::new(&mut self.draft.api_seconds).range(5..=300).suffix(" s"));ui.end_row();
             });
-            ui.label("Propostas na barra de menus (um projeto, até 200 pendentes)");
+            ui.label(crate::platform::PROPOSAL_WATCH_LABEL);
             egui::ComboBox::from_id_salt("watch-proposals").width(460.).selected_text(self.draft.proposal_watch.as_ref().map(crate::client::Scope::label).unwrap_or("Desativado".into())).show_ui(ui,|ui|{
                 if ui.selectable_value(&mut self.draft.proposal_watch,None,"Desativado").clicked(){ui.close();}
                 for p in &self.api.projects {let scope=crate::client::Scope{workspace:p.workspace_name.clone(),project:p.project_name.clone()};let label=scope.label();if ui.selectable_value(&mut self.draft.proposal_watch,Some(scope),label).clicked(){ui.close();}}
