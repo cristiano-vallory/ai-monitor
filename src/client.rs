@@ -83,6 +83,9 @@ pub struct Connection {
     config: Config,
 }
 impl Connection {
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
     pub fn new(config: &Config) -> Result<Self, Error> {
         let mut config = config.clone();
         config.normalize();
@@ -145,13 +148,23 @@ impl Connection {
             return Err(Error::Invalid("Caminho inválido.".into()));
         }
         let mut url = endpoint(&self.config.endpoint, path).map_err(Error::Invalid)?;
-        url.query_pairs_mut()
-            .extend_pairs(query.iter().map(|(k, v)| (*k, v.as_str())));
+        if !query.is_empty() {
+            url.query_pairs_mut()
+                .extend_pairs(query.iter().map(|(k, v)| (*k, v.as_str())));
+        }
         let mut request = self
             .client
-            .request(method, url)
+            .request(method.clone(), url)
             .header("Cache-Control", "no-store");
-        if !self.config.token.is_empty() {
+        if let Some(session) = &self.config.human {
+            if matches!(path.first(), Some(&"mcp" | &"workstream" | &"identity")) {
+                return Err(Error::Invalid(
+                    "Este recurso exige conexão Bearer; encerre a sessão humana para usá-lo."
+                        .into(),
+                ));
+            }
+            request = session.headers(request, &method);
+        } else if path.first() != Some(&"auth") && !self.config.token.is_empty() {
             request = request.bearer_auth(&self.config.token);
         }
         Ok(request)
@@ -162,13 +175,26 @@ impl Connection {
         query: &[(&str, String)],
         body: &Value,
     ) -> Result<Value, Error> {
+        self.json(Method::POST, path, query, body)
+    }
+    pub fn json(
+        &self,
+        method: Method,
+        path: &[&str],
+        query: &[(&str, String)],
+        body: &Value,
+    ) -> Result<Value, Error> {
         let response = self
-            .request_builder(Method::POST, path, query)?
+            .request_builder(method, path, query)?
             .timeout(Duration::from_secs(120))
             .json(body)
             .send()
             .map_err(|_| Error::Unavailable)?;
+        let no_content = response.status() == reqwest::StatusCode::NO_CONTENT;
         let bytes = read_response(response)?;
+        if no_content {
+            return Ok(Value::Null);
+        }
         serde_json::from_slice(&bytes).map_err(|_| Error::Format)
     }
 }

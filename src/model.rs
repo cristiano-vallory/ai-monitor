@@ -12,6 +12,10 @@ pub struct Config {
     pub api_seconds: u64,
     #[serde(skip)]
     pub token: String,
+    #[serde(skip)]
+    pub human: Option<crate::auth::Session>,
+    pub remember_token: bool,
+    pub proposal_watch: Option<crate::client::Scope>,
 }
 
 impl Default for Config {
@@ -31,6 +35,9 @@ impl Default for Config {
             resource_seconds: 2,
             api_seconds: 10,
             token: String::new(),
+            human: None,
+            remember_token: false,
+            proposal_watch: None,
         }
     }
 }
@@ -76,13 +83,24 @@ impl Config {
         }
     }
     pub fn load() -> Self {
-        Self::from_sources(
+        let mut config = Self::from_sources(
             std::fs::read(Self::path()).ok().as_deref(),
             std::env::var("AI_MEMORY_SERVER_URL").ok(),
             std::env::var("AI_MEMORY_AUTH_TOKEN").ok(),
-        )
+        );
+        if config.remember_token
+            && config.token.is_empty()
+            && std::env::var_os("AI_MEMORY_AUTH_TOKEN").is_none()
+            && let Ok(Some(token)) = crate::keychain::load(&config.endpoint)
+        {
+            config.token = token;
+        }
+        config
     }
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(scope) = &self.proposal_watch {
+            scope.validate().map_err(|e| e.to_string())?;
+        }
         let endpoint = self.endpoint.trim();
         let token = self.token.trim();
         let url = reqwest::Url::parse(endpoint).map_err(|_| "URL do servidor inválida.")?;
@@ -95,7 +113,7 @@ impl Config {
         {
             return Err("Use uma URL HTTP(S), sem credenciais, query ou fragmento.".into());
         }
-        if !token.is_empty()
+        if (!token.is_empty() || self.human.is_some())
             && url.scheme() == "http"
             && !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
         {

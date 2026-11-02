@@ -1,15 +1,20 @@
+mod advanced;
 mod api;
 mod app;
+mod auth;
 mod client;
 mod console;
 mod docker;
 mod health;
+mod keychain;
+mod local_service;
 mod maintenance;
 mod management_ui;
 mod mcp;
 mod menu_bar;
 mod model;
 mod monitor;
+mod operations_ui;
 mod queries;
 #[cfg(test)]
 mod test_support;

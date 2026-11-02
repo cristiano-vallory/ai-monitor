@@ -28,6 +28,8 @@ pub struct Snapshot {
     pub metrics: Vec<Metric>,
     pub error: Option<Error>,
     pub auxiliary_errors: Vec<String>,
+    pub pending: Option<usize>,
+    pub pending_scope: Option<crate::client::Scope>,
 }
 impl Snapshot {
     pub fn fresh(&self, now: DateTime<Utc>) -> bool {
@@ -103,9 +105,26 @@ pub fn collect(config: &Config, cancelled: impl Fn() -> bool) -> Snapshot {
     if cancelled() {
         return snapshot;
     }
-    match client.get(&["identity"], &[]) {
-        Ok(v) => snapshot.identity = Some(v),
-        Err(e) => snapshot.auxiliary_errors.push(format!("Identidade: {e}")),
+    if config.human.is_some() {
+        match client.get::<Value>(&["auth", "me"], &[]) {
+            Ok(v) if v["role"].is_string() => {
+                snapshot.identity = Some(Identity {
+                    level: format!("human:{}", v["role"].as_str().unwrap()),
+                    ..Identity::default()
+                })
+            }
+            Ok(_) => snapshot
+                .auxiliary_errors
+                .push("Identidade humana: formato incompatível".into()),
+            Err(e) => snapshot
+                .auxiliary_errors
+                .push(format!("Identidade humana: {e}")),
+        }
+    } else {
+        match client.get(&["identity"], &[]) {
+            Ok(v) => snapshot.identity = Some(v),
+            Err(e) => snapshot.auxiliary_errors.push(format!("Identidade: {e}")),
+        }
     }
     if cancelled() {
         return Snapshot::default();
@@ -129,6 +148,27 @@ pub fn collect(config: &Config, cancelled: impl Fn() -> bool) -> Snapshot {
         match client.text(&["admin", "metrics"]) {
             Ok(t) => snapshot.metrics = parse_metrics(&t),
             Err(e) => snapshot.auxiliary_errors.push(format!("Métricas: {e}")),
+        }
+    }
+    if cancelled() {
+        return Snapshot::default();
+    }
+    if let Some(scope) = &config.proposal_watch {
+        snapshot.pending_scope = Some(scope.clone());
+        match client.get::<Value>(
+            &["admin", "pending-writes"],
+            &[
+                ("workspace", scope.workspace.clone()),
+                ("project", scope.project.clone()),
+                ("status", "pending".into()),
+                ("limit", "200".into()),
+            ],
+        ) {
+            Ok(Value::Array(rows)) => snapshot.pending = Some(rows.len()),
+            Ok(_) => snapshot
+                .auxiliary_errors
+                .push("Propostas: formato incompatível".into()),
+            Err(e) => snapshot.auxiliary_errors.push(format!("Propostas: {e}")),
         }
     }
     if cancelled() {
@@ -168,6 +208,39 @@ mod tests {
     use super::*;
     use crate::test_support::{Mock, Response};
     use serde_json::json;
+    #[test]
+    fn pending_watch_is_one_explicit_scope_and_is_not_zero_on_denial() {
+        let mock = Mock::new(|r| {
+            if r.path.starts_with("/admin/pending-writes") {
+                Response::json(403, json!({}))
+            } else if r.path == "/admin/status" {
+                Response::json(200, json!({"version":"3.3.1","counts":{}}))
+            } else {
+                Response::json(200, json!({}))
+            }
+        });
+        let mut config = mock.config();
+        assert!(collect(&config, || false).pending_scope.is_none());
+        config.proposal_watch = Some(crate::client::Scope {
+            workspace: "synthetic".into(),
+            project: "demo".into(),
+        });
+        let result = collect(&config, || false);
+        assert!(result.pending.is_none());
+        assert_eq!(result.pending_scope, config.proposal_watch);
+        let requests = mock.requests();
+        let calls: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path.starts_with("/admin/pending-writes"))
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "GET");
+        assert!(
+            calls[0]
+                .path
+                .contains("workspace=synthetic&project=demo&status=pending&limit=200")
+        );
+    }
     #[test]
     fn permission_denial_is_not_a_healthy_zero_and_never_triggers_writes() {
         let mock = Mock::new(|r| {
