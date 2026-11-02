@@ -265,6 +265,16 @@ impl Operation {
                 "SubState",
                 "-p",
                 "MainPID",
+                "-p",
+                "ExecStartPre",
+                "-p",
+                "ExecStartPost",
+                "-p",
+                "ExecReload",
+                "-p",
+                "ExecStop",
+                "-p",
+                "ExecStopPost",
             ],
             false,
             6,
@@ -290,6 +300,7 @@ impl Operation {
             "active_state": show.active_state,
             "sub_state": show.sub_state,
             "main_pid": show.main_pid,
+            "extra_commands": show.extra_commands,
             "binary": show.binary,
             "unit_sha256": hash(self.s("unit"))?,
             "binary_sha256": hash(&show.binary)?,
@@ -619,6 +630,7 @@ pub struct SystemdShow {
     pub active_state: String,
     pub sub_state: String,
     pub main_pid: String,
+    pub extra_commands: Vec<String>,
 }
 #[cfg(target_os = "linux")]
 fn split_words(s: &str) -> Result<Vec<String>, Error> {
@@ -763,6 +775,16 @@ pub fn parse_systemd_show(text: &str, unit: &str) -> Result<SystemdShow, Error> 
             .map(|d| d.to_owned())
             .collect(),
         exec_start: exec,
+        extra_commands: [
+            get("ExecStartPre"),
+            get("ExecStartPost"),
+            get("ExecReload"),
+            get("ExecStop"),
+            get("ExecStopPost"),
+        ]
+        .into_iter()
+        .filter(|c| !c.is_empty())
+        .collect(),
         binary,
         active_state: get("ActiveState"),
         sub_state: get("SubState"),
@@ -1662,6 +1684,56 @@ esac
         )
         .unwrap();
         assert_eq!(parsed.sub_state, "dead");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn systemd_extra_commands_are_parsed_or_empty() {
+        let parsed = parse_systemd_show(
+            &show(&[
+                ("LoadState", "loaded"),
+                ("FragmentPath", "/u/ai-memory.service"),
+                ("NeedDaemonReload", "no"),
+                ("ActiveState", "inactive"),
+                (
+                    "ExecStart",
+                    "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; }",
+                ),
+                (
+                    "ExecStartPre",
+                    "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory check ; }",
+                ),
+                (
+                    "ExecStop",
+                    "{ path=/usr/bin/kill ; argv[]=/usr/bin/kill ai-memory ; }",
+                ),
+            ]),
+            "/u/ai-memory.service",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.extra_commands.len(),
+            2,
+            "{:?}",
+            parsed.extra_commands
+        );
+        assert!(parsed.extra_commands[0].contains("check"));
+        assert!(parsed.extra_commands[1].contains("kill"));
+        let parsed = parse_systemd_show(
+            &show(&[
+                ("LoadState", "loaded"),
+                ("FragmentPath", "/u/ai-memory.service"),
+                ("NeedDaemonReload", "no"),
+                ("ActiveState", "inactive"),
+                (
+                    "ExecStart",
+                    "{ path=/usr/bin/ai-memory ; argv[]=/usr/bin/ai-memory serve ; }",
+                ),
+            ]),
+            "/u/ai-memory.service",
+        )
+        .unwrap();
+        assert_eq!(parsed.extra_commands.len(), 0);
     }
 
     #[test]

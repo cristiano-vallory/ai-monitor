@@ -20,9 +20,9 @@ use std::{
     },
 };
 
-const BUS_NAME: &str = "io.github.cristianovallory.AiMonitor";
-const OBJECT_PATH: &str = "/io/github/cristianovallory/AiMonitor";
-const INTERFACE: &str = "io.github.cristianovallory.AiMonitor1";
+const BUS_NAME: &str = "io.github.cristiano_vallory.AiMonitor";
+const OBJECT_PATH: &str = "/io/github/cristiano_vallory/AiMonitor";
+const INTERFACE: &str = "io.github.cristiano_vallory.AiMonitor1";
 
 /// Everything a producer needs to reach the app: enqueue a command and wake
 /// the live egui Context if a window is open right now.
@@ -62,7 +62,7 @@ impl Control {
 struct ShowApi {
     control: Arc<Control>,
 }
-#[zbus::interface(name = "io.github.cristianovallory.AiMonitor1")]
+#[zbus::interface(name = "io.github.cristiano_vallory.AiMonitor1")]
 impl ShowApi {
     fn show(&self) {
         self.control.send(Command::Open(0));
@@ -78,7 +78,14 @@ enum SingleInstance {
 
 use crate::commands::NameReply;
 fn single_instance(control: &Arc<Control>) -> SingleInstance {
-    let Ok(conn) = zbus::blocking::Connection::session() else {
+    let Ok(conn) = zbus::blocking::connection::Builder::session()
+        .map_err(|_| ())
+        .and_then(|b| {
+            b.method_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .map_err(|_| ())
+        })
+    else {
         return SingleInstance::NoBus;
     };
     if let Err(e) = conn.object_server().at(
@@ -94,7 +101,8 @@ fn single_instance(control: &Arc<Control>) -> SingleInstance {
     {
         Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => Ok(NameReply::PrimaryOwner),
         Ok(zbus::fdo::RequestNameReply::AlreadyOwner) => Ok(NameReply::AlreadyOwner),
-        // zbus traduz RequestNameReply::Exists para Err(NameTaken).
+        // Com DoNotQueue, Exists e InQueue nunca chegam como Ok: a zbus
+        // mapeia Exists para Err(NameTaken). Mantidos por defesa.
         Ok(zbus::fdo::RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
             Ok(NameReply::Exists)
         }
@@ -206,6 +214,8 @@ fn open_window(
     *control.ctx.lock().unwrap() = None;
     if let Err(e) = result {
         eprintln!("AI Monitor: falha ao abrir a janela: {e}");
+        // Não deixar navegação pendente de um Open que falhou.
+        shared.navigation.store(0, Ordering::Release);
     }
 }
 

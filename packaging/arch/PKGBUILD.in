@@ -1,3 +1,5 @@
+# Maintainer: Cristiano Vallory <cristianovallory@gmail.com>
+# source_x86_64/source_aarch64 usam arrays por arquitetura; o aviso do namcap sobre a arquitetura fixa é esperado.
 pkgname=ai-monitor-bin
 pkgver=@VERSION@
 pkgrel=1
@@ -7,7 +9,7 @@ url='https://github.com/cristiano-vallory/ai-monitor'
 license=('MIT')
 provides=('ai-monitor')
 conflicts=('ai-monitor')
-depends=(glibc gcc-libs libglvnd mesa libdrm libxcb libxkbcommon libxkbcommon-x11 libx11 libxau libxdmcp libxcursor libxext libxfixes libxi libxinerama libxrandr libxrender libxxf86vm libxshmfence wayland)
+depends=(glibc gcc-libs hicolor-icon-theme libglvnd mesa libdrm libxcb libxkbcommon libxkbcommon-x11 libx11 libxau libxdmcp libxcursor libxext libxfixes libxi libxinerama libxrandr libxrender libxxf86vm libxshmfence wayland)
 optdepends=('gnome-keyring: guardar o Bearer no chaveiro do sistema'
             'docker: métricas de contêineres')
 source_x86_64=("@SOURCE_BASE@/ai-monitor-@VERSION@-linux-x86_64.tar.gz")

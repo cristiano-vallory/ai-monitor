@@ -62,7 +62,7 @@ Package: ai-monitor
 Version: $version
 Architecture: $debarch
 Maintainer: Cristiano Vallory <cristianovallory@gmail.com>
-Depends: libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libgl1-mesa-dri, libdrm2, libx11-6, libx11-xcb1, libxau6, libxdmcp6, libxcb1, libxcb-dri2-0, libxcb-dri3-0, libxcb-glx0, libxcb-present0, libxcb-randr0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcursor1, libxext6, libxfixes3, libxi6, libxinerama1, libxrandr2, libxrender1, libxxf86vm1, libxkbcommon0, libxkbcommon-x11-0, libxshmfence1, libwayland-client0, libwayland-egl1, libwayland-cursor0, libwayland-egl1-mesa
+Depends: libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libgl1-mesa-dri, libdrm2, libx11-6, libx11-xcb1, libxau6, libxdmcp6, libxcb1, libxcb-dri2-0, libxcb-dri3-0, libxcb-glx0, libxcb-present0, libxcb-randr0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcursor1, libxext6, libxfixes3, libxi6, libxinerama1, libxrandr2, libxrender1, libxxf86vm1, libxkbcommon0, libxkbcommon-x11-0, libxshmfence1, libwayland-client0, libwayland-egl1, libwayland-cursor0
 Recommends: gnome-keyring
 Suggests: docker.io
 Section: utils

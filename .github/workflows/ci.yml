@@ -73,9 +73,9 @@ jobs:
         # Phase 4 packaging must reuse this exact runtime list.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1 libegl1 libgl1-mesa-dri libdrm2 libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxcb1 libxcb-dri2-0 libxcb-dri3-0 libxcb-glx0 libxcb-present0 libxcb-randr0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xkb1 libxcursor1 libxext6 libxfixes3 libxi6 libxinerama1 libxrandr2 libxrender1 libxxf86vm1 libxkbcommon0 libxkbcommon-x11-0 libxshmfence1 libwayland-egl1 libwayland-client0 libwayland-cursor0 libwayland-egl1-mesa
+          sudo apt-get install -y libgl1 libegl1 libgl1-mesa-dri libdrm2 libx11-6 libx11-xcb1 libxau6 libxdmcp6 libxcb1 libxcb-dri2-0 libxcb-dri3-0 libxcb-glx0 libxcb-present0 libxcb-randr0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xkb1 libxcursor1 libxext6 libxfixes3 libxi6 libxinerama1 libxrandr2 libxrender1 libxxf86vm1 libxkbcommon0 libxkbcommon-x11-0 libxshmfence1 libwayland-client0 libwayland-cursor0 libwayland-egl1
       - name: Test-only tools
-        run: sudo apt-get install -y gnome-keyring dbus xvfb xdotool python3-gi gir1.2-glib-2.0 python3-xlib desktop-file-utils
+        run: sudo apt-get install -y gnome-keyring dbus dbus-user-session xvfb xdotool python3-gi gir1.2-glib-2.0 python3-xlib desktop-file-utils
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Tests
@@ -125,6 +125,7 @@ jobs:
           export XDG_RUNTIME_DIR=/run/user/$(id -u)
           export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
           for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          [ -S "$XDG_RUNTIME_DIR/bus" ] || { echo "user bus socket never appeared at $XDG_RUNTIME_DIR/bus" >&2; exit 1; }
           cargo test --locked -- --ignored systemd_backend_full_lifecycle
       - name: Fallback smoke (no tray host)
         run: |
