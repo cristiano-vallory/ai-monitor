@@ -11,6 +11,12 @@ pub const SETTINGS_SHORTCUT: &str = "⌘,";
 #[cfg(not(target_os = "macos"))]
 pub const SETTINGS_SHORTCUT: &str = "Ctrl+,";
 
+/// A aba de Ajustes do que aparece fora da janela (propostas vigiadas).
+#[cfg(target_os = "macos")]
+pub const TRAY_TAB: &str = "Barra de menus";
+#[cfg(not(target_os = "macos"))]
+pub const TRAY_TAB: &str = "Bandeja";
+
 #[cfg(target_os = "macos")]
 pub const SECRET_STORE: &str = "Keychain";
 #[cfg(not(target_os = "macos"))]

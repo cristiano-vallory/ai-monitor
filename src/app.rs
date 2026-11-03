@@ -45,7 +45,6 @@ enum Page {
     Review,
     Maintenance,
     Admin,
-    Settings,
 }
 impl Page {
     /// Nome da página na lateral.
@@ -59,7 +58,6 @@ impl Page {
             Page::Review => "Revisão",
             Page::Maintenance => "Manutenção e backup",
             Page::Admin => "Administração",
-            Page::Settings => "Ajustes",
         }
     }
     /// Título na barra superior.
@@ -94,6 +92,53 @@ fn compact(width: f32) -> bool {
     width < COMPACT_BELOW
 }
 
+/// A janela de Ajustes (Settings.dc.html), em pontos.
+const SETTINGS_SIZE: [f32; 2] = [780., 620.];
+/// macOS: a faixa do título, no cromo, sob os botões da janela (a barra de
+/// título é transparente). No Linux, o título é do gerenciador de janelas.
+#[cfg(target_os = "macos")]
+const SETTINGS_TITLE: f32 = 34.;
+#[cfg(not(target_os = "macos"))]
+const SETTINGS_TITLE: f32 = 0.;
+fn settings_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("settings")
+}
+/// Abas da janela de Ajustes, na ordem do cromo.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum SettingsTab {
+    #[default]
+    General,
+    Connection,
+    Tray,
+    Account,
+}
+impl SettingsTab {
+    const ALL: [SettingsTab; 4] = [
+        SettingsTab::General,
+        SettingsTab::Connection,
+        SettingsTab::Tray,
+        SettingsTab::Account,
+    ];
+    /// Rótulo da aba e título da janela.
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => "Geral",
+            SettingsTab::Connection => "Conexão",
+            SettingsTab::Tray => crate::platform::TRAY_TAB,
+            SettingsTab::Account => "Conta",
+        }
+    }
+}
+/// A janela de Ajustes: aberta ou não, a aba, um pedido de trazê-la à frente
+/// e o último `SetTheme` enviado a ela (`None` = nada enviado a esta janela).
+#[derive(Default)]
+struct SettingsWindow {
+    open: bool,
+    tab: SettingsTab,
+    raise: bool,
+    theme: Option<egui::SystemTheme>,
+}
+
 pub struct MonitorApp {
     #[cfg(target_os = "macos")]
     menu_bar: Option<crate::menu_bar::MenuBar>,
@@ -121,6 +166,10 @@ pub struct MonitorApp {
     /// `Shared::health_served` lido junto com `health`: até que pedido de
     /// "Atualizar agora" a saúde na tela atende.
     health_served: u64,
+    settings: SettingsWindow,
+    /// Grava a troca de tema (`save_theme`); os testes trocam para não
+    /// escrever no disco.
+    save_theme: fn(Appearance) -> Result<(), String>,
 }
 
 impl MonitorApp {
@@ -142,6 +191,8 @@ impl MonitorApp {
     #[cfg(target_os = "linux")]
     pub(crate) fn attach(&mut self, ctx: &egui::Context) {
         self.window_theme = None;
+        // Ajustes fechou junto com a janela anterior.
+        self.close_settings();
         self.apply_theme(ctx);
     }
     /// Troca de aparência: vale na hora, grava só o tema (`save_theme`) sem
@@ -193,6 +244,8 @@ impl MonitorApp {
             last_sync: Instant::now() - Duration::from_secs(1),
             settings_message: String::new(),
             paused: false,
+            settings: SettingsWindow::default(),
+            save_theme,
         }
     }
     #[cfg(target_os = "macos")]
@@ -355,7 +408,15 @@ impl MonitorApp {
                             Page::Review => pending.clone().map(Aside::Warning),
                             _ => None,
                         };
-                        if nav_item(ui, page, self.page == page, compact, aside).clicked() {
+                        let item = nav_item(
+                            ui,
+                            page.label(),
+                            Some(self.page == page),
+                            compact,
+                            aside,
+                            |painter, rect, color| paint_icon(painter, rect, page, color),
+                        );
+                        if item.clicked() {
                             self.page = page;
                         }
                     }
@@ -364,13 +425,14 @@ impl MonitorApp {
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     let settings = nav_item(
                         ui,
-                        Page::Settings,
-                        self.page == Page::Settings,
+                        "Ajustes",
+                        None,
                         compact,
                         Some(Aside::Shortcut(crate::platform::SETTINGS_SHORTCUT)),
+                        settings_icon,
                     );
                     if settings.clicked() {
-                        self.page = Page::Settings;
+                        self.open_settings();
                     }
                     // Fontes, de baixo para cima, entre bordas de 10 px e a linha.
                     ui.add_space(16.);
@@ -513,7 +575,7 @@ impl MonitorApp {
             )
             .is_some_and(|r| r.clicked())
         {
-            self.page = Page::Settings;
+            self.open_settings();
         }
         if !self.api.errors.is_empty() {
             strip(
@@ -545,87 +607,411 @@ impl MonitorApp {
         self.paused = false;
         self.last_sync = Instant::now() - Duration::from_secs(1);
     }
-    fn settings(&mut self, ui: &mut egui::Ui) {
+    /// Abre Ajustes, ou a traz à frente se já estiver aberta.
+    fn open_settings(&mut self) {
+        self.settings.open = true;
+        self.settings.raise = true;
+    }
+    /// Fecha a janela de Ajustes; o rascunho e a aba ficam.
+    fn close_settings(&mut self) {
+        self.settings = SettingsWindow {
+            tab: self.settings.tab,
+            ..Default::default()
+        };
+    }
+    /// macOS: a janela principal escondida. Ajustes fecha junto; senão
+    /// voltaria com ela.
+    #[cfg(target_os = "macos")]
+    fn hide(&mut self, ctx: &egui::Context) {
+        self.close_settings();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+    /// A janela de Ajustes, aberta: uma viewport imediata, que só existe nos
+    /// frames em que a principal a mostra. Sem janelas nativas (testes), o
+    /// egui a embute como `egui::Window`.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.settings.open {
+            return;
+        }
+        let title = self.settings.tab.label();
+        let builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size(SETTINGS_SIZE)
+            .with_resizable(false)
+            .with_app_id("ai-monitor");
+        // macOS: o cromo vai até o topo, sob o título e os botões da janela.
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false);
+        ctx.show_viewport_immediate(settings_id(), builder, |ctx, class| {
+            if class == egui::ViewportClass::Embedded {
+                let mut open = true;
+                self.settings.raise = false;
+                egui::Window::new(title)
+                    .id(egui::Id::new("settings-window"))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                    .frame(egui::Frame::window(&ctx.style()).inner_margin(0))
+                    .show(ctx, |ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(SETTINGS_SIZE.into(), egui::Sense::hover());
+                        self.settings_ui(ui, rect, false);
+                    });
+                if !open {
+                    self.close_settings();
+                }
+                return;
+            }
+            if std::mem::take(&mut self.settings.raise) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            // A barra de título acompanha o tema do app, como a da principal.
+            let window = theme::window_theme(self.config.theme, theme::platform_theme());
+            if self.settings.theme != Some(window) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(window));
+                self.settings.theme = Some(window);
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    let rect = ui.max_rect();
+                    self.settings_ui(ui, rect, true);
+                });
+            // O botão de fechar da janela só fecha a janela: o rascunho fica.
+            if ctx.input(|i| i.viewport().close_requested()) {
+                self.close_settings();
+            }
+        });
+    }
+    /// O conteúdo da janela em `rect`: cromo com as abas, corpo que rola e
+    /// rodapé de 52. `native` = janela própria (no macOS, com a faixa do
+    /// título, que arrasta a janela).
+    fn settings_ui(&mut self, ui: &mut egui::Ui, rect: egui::Rect, native: bool) {
         let p = theme::palette(ui.visuals());
-        panel(ui).show(ui, |ui| {
-            section(ui, "Aparência");
-            let mut choice = self.config.theme;
+        let title = if native { SETTINGS_TITLE } else { 0. };
+        // Abas de 50 com 2 acima e 8 abaixo.
+        let chrome = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), title + 60.));
+        let footer =
+            egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 52.), rect.max);
+        let body = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), chrome.bottom()),
+            egui::pos2(rect.right(), footer.top()),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(chrome, 0., p.surf2);
+        painter.rect_filled(body, 0., p.surf);
+        painter.rect_filled(footer, 0., p.surf2);
+        let line = Stroke::new(1.0_f32, p.line);
+        painter.hline(rect.x_range(), chrome.bottom() - 0.5, line);
+        painter.hline(rect.x_range(), footer.top() + 0.5, line);
+        // macOS: a faixa do título arrasta a janela (de tamanho fixo: o
+        // duplo clique não maximiza, ao contrário da principal).
+        #[cfg(target_os = "macos")]
+        if native {
+            let strip = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), title));
+            let strip = ui.interact(strip, ui.id().with("settings-drag"), egui::Sense::drag());
+            if strip.drag_started_by(egui::PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+        }
+        let tabs = SettingsTab::ALL.len() as f32;
+        let left = rect.center().x - (tabs * 96. + (tabs - 1.) * 4.) / 2.;
+        for (i, tab) in SettingsTab::ALL.into_iter().enumerate() {
+            let at = egui::Rect::from_min_size(
+                egui::pos2(left + i as f32 * 100., rect.top() + title + 2.),
+                Vec2::new(96., 50.),
+            );
+            if settings_tab(ui, at, tab, self.settings.tab == tab).clicked() {
+                self.settings.tab = tab;
+            }
+        }
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(body)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("settings-body")
+            .auto_shrink(false)
+            .show(&mut content, |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(40, 22))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing = Vec2::new(20., 18.);
+                        match self.settings.tab {
+                            SettingsTab::General => self.general(ui),
+                            SettingsTab::Connection => self.connection(ui),
+                            SettingsTab::Tray => self.tray(ui),
+                            SettingsTab::Account => self.authentication.show(
+                                ui,
+                                &self.shared,
+                                !self.management.busy && !self.operations.busy,
+                            ),
+                        }
+                    });
+            });
+        let busy = self.management.busy || self.authentication.busy || self.operations.busy;
+        let mut bottom = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(footer.shrink2(Vec2::new(20., 0.)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        bottom.spacing_mut().item_spacing.x = 12.;
+        if link(&mut bottom, "Restaurar padrões").clicked() {
+            self.restore_defaults();
+        }
+        bottom.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(!busy, crate::widgets::Button::primary("Salvar e conectar"))
+                .clicked()
+            {
+                self.save_settings();
+            }
+            if !self.settings_message.is_empty() {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    message(ui, &self.settings_message);
+                });
+            }
+        });
+    }
+    /// Geral: aparência, aplicada na hora, e os intervalos de coleta.
+    fn general(&mut self, ui: &mut egui::Ui) {
+        setting_row(ui, "Aparência:", |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.;
                 for (value, label) in [
                     (Appearance::System, "Sistema"),
                     (Appearance::Light, "Claro"),
                     (Appearance::Dark, "Escuro"),
                 ] {
-                    ui.selectable_value(&mut choice, value, label);
-                }
-            });
-            if choice != self.config.theme {
-                self.choose_theme(choice, save_theme);
-            }
-        });
-        ui.add_space(12.);
-        panel(ui).show(ui,|ui| {
-            section(ui,"Fontes de dados");
-            egui::Grid::new("config").num_columns(2).spacing([28.,16.]).show(ui,|ui| {
-                ui.label("Servidor ai-memory");if ui.add(egui::TextEdit::singleline(&mut self.draft.endpoint).desired_width(400.)).changed(){self.draft.token.clear();self.draft.human=None;self.draft.proposal_watch=None;self.settings_message="Servidor alterado. Informe o token desse endereço ou use login humano após conectar.".into();}ui.end_row();
-                ui.label("Token Bearer (opcional)");ui.add(egui::TextEdit::singleline(&mut self.draft.token).password(true).desired_width(400.));ui.end_row();
-                ui.label("Contêiner ai-memory");ui.add(egui::TextEdit::singleline(&mut self.draft.container).desired_width(400.));ui.end_row();
-                ui.label("Executável Docker");ui.add(egui::TextEdit::singleline(&mut self.draft.docker_binary).desired_width(400.));ui.end_row();
-                ui.label("Atualizar recursos");ui.add(egui::DragValue::new(&mut self.draft.resource_seconds).range(1..=60).suffix(" s"));ui.end_row();
-                ui.label("Atualizar sessões / handoffs");ui.add(egui::DragValue::new(&mut self.draft.api_seconds).range(5..=300).suffix(" s"));ui.end_row();
-            });
-            ui.label(crate::platform::PROPOSAL_WATCH_LABEL);
-            egui::ComboBox::from_id_salt("watch-proposals").width(460.).selected_text(self.draft.proposal_watch.as_ref().map(crate::client::Scope::label).unwrap_or("Desativado".into())).show_ui(ui,|ui|{
-                if ui.selectable_value(&mut self.draft.proposal_watch,None,"Desativado").clicked(){ui.close();}
-                for p in &self.api.projects {let scope=crate::client::Scope{workspace:p.workspace_name.clone(),project:p.project_name.clone()};let label=scope.label();if ui.selectable_value(&mut self.draft.proposal_watch,Some(scope),label).clicked(){ui.close();}}
-            });
-            ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,format!("Guardar o Bearer no {} para este servidor (opcional)",crate::platform::SECRET_STORE));
-            ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(p.text2));
-            if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new(format!("Carregar Bearer do {} deste endereço",crate::platform::SECRET_STORE))).clicked(){
-                self.draft.normalize();
-                match crate::keychain::load(&self.draft.endpoint){
-                    Ok(Some(token))=>{self.draft.token=token.trim().into();self.settings_message="Token carregado no campo. Salve para conectar.".into();},
-                    Ok(None)=>self.settings_message="Nenhum token guardado para esse endereço.".into(),
-                    Err(e)=>self.settings_message=e
-                }
-            }
-
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy, egui::Button::new(RichText::new("Salvar e conectar").color(p.acc))).clicked() {
-                    self.draft.normalize();
-                    match self.draft.validate().and_then(|_|{
-                        match keychain_change(&self.config,&self.draft) {
-                            KeychainChange::Save{endpoint,token}=>crate::keychain::save(endpoint,token)?,
-                            KeychainChange::Forget(endpoint)=>crate::keychain::forget(endpoint)?,
-                            KeychainChange::Keep=>{}
-                        }
-                        self.draft.save()
-                    }) {
-                        Ok(())=> {self.reconnect(self.draft.clone());self.authentication.clear();self.settings_message="Configuração salva. Reconectando…".into();},
-                        Err(e)=>self.settings_message=e,
+                    let chosen = self.config.theme == value;
+                    if appearance(ui, value, label, chosen).clicked() && !chosen {
+                        let save = self.save_theme;
+                        self.choose_theme(value, save);
                     }
                 }
-                if ui.button("Restaurar campos padrão").clicked(){self.restore_defaults();}
             });
-            if !self.settings_message.is_empty(){ui.label(&self.settings_message);}
-        });
-        ui.add_space(12.);
-        panel(ui).show(ui, |ui| {
-            self.authentication.show(
+            crate::widgets::caption(
                 ui,
-                &self.shared,
-                !self.management.busy && !self.operations.busy,
-            )
+                "“Sistema” acompanha o macOS e, no Linux, a preferência de cor do portal (GNOME, Omarchy).",
+            );
         });
-        ui.add_space(12.);
-        panel(ui).show(ui,|ui| {
-            section(ui,"Diagnóstico da conexão");ui.label(format!("ai-memory {}",{let v=server_version(&self.api,&self.health);if v.is_empty(){"—"}else{v}}));
-            ui.label(format!("Recursos: {} · API: {}",age(self.resources.at),age(self.api.at)));
-            ui.label("As consultas respeitam o usuário do token. Handoffs de outros usuários podem não estar visíveis.");
-            if self.api.errors.is_empty()&&self.api.error.is_none(){ui.label(RichText::new(if self.api.at.is_some(){"Última coleta da API concluída sem erros."}else{"Conectando…"}).color(p.acc));}
-            for e in &self.api.errors{ui.label(RichText::new(e).color(p.warn));}
-            if let Some(e)=&self.resources.inventory_error{ui.label(RichText::new(e).color(p.warn));}
+        setting_row(ui, "Atualizar a cada:", |ui| {
+            interval(
+                ui,
+                &mut self.draft.resource_seconds,
+                1..=60,
+                "Intervalo de recursos em segundos",
+                "s · CPU e memória",
+                "(1–60)",
+            );
+            interval(
+                ui,
+                &mut self.draft.api_seconds,
+                5..=300,
+                "Intervalo de sessões em segundos",
+                "s · sessões e handoffs",
+                "(5–300)",
+            );
         });
+    }
+    /// Conexão: servidor e token, contêiner e Docker, e o diagnóstico.
+    fn connection(&mut self, ui: &mut egui::Ui) {
+        use crate::{
+            platform::SECRET_STORE,
+            widgets::{Button, caption, checkbox, text_field},
+        };
+        let p = theme::palette(ui.visuals());
+        let busy = self.management.busy || self.authentication.busy || self.operations.busy;
+        setting_row(ui, "Servidor ai-memory:", |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.;
+                let endpoint = mono_field(ui, &mut self.draft.endpoint, 280.);
+                name(ui, &endpoint, "Servidor ai-memory");
+                if endpoint.changed() {
+                    self.draft.token.clear();
+                    self.draft.human = None;
+                    self.draft.proposal_watch = None;
+                    self.settings_message = "Servidor alterado. Informe o token desse endereço ou use login humano após conectar.".into();
+                }
+                let version = server_version(&self.api, &self.health);
+                let (color, state) = match (&self.api.error, self.api.at) {
+                    (Some(e), _) => (p.bad, e.clone()),
+                    (None, Some(_)) if version.is_empty() => (p.acc, "Conectado".to_owned()),
+                    (None, Some(_)) => (p.acc, format!("Conectado · {version}")),
+                    (None, None) => (p.text2, "Aguardando primeira coleta".to_owned()),
+                };
+                connection_state(ui, color, &state);
+            });
+        });
+        setting_row(ui, "Token:", |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.;
+                let token = text_field(
+                    ui,
+                    &mut self.draft.token,
+                    280.,
+                    "Opcional",
+                    true,
+                    usize::MAX,
+                );
+                name(ui, &token, "Token");
+                let load = format!("Carregar do {SECRET_STORE}");
+                if ui
+                    .add_enabled(!busy, Button::secondary(&load).small().on_surf())
+                    .clicked()
+                {
+                    self.load_token();
+                }
+            });
+        });
+        setting_row(ui, "", |ui| {
+            checkbox(
+                ui,
+                &mut self.draft.remember_token,
+                &format!("Guardar no {SECRET_STORE} para este servidor"),
+            );
+            caption(
+                ui,
+                "Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.",
+            );
+        });
+        divider(ui);
+        setting_row(ui, "Contêiner ai-memory:", |ui| {
+            let container = text_field(ui, &mut self.draft.container, 200., "", false, usize::MAX);
+            name(ui, &container, "Contêiner ai-memory");
+        });
+        setting_row(ui, "Executável Docker:", |ui| {
+            let docker = mono_field(ui, &mut self.draft.docker_binary, 220.);
+            name(ui, &docker, "Executável Docker");
+        });
+        divider(ui);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.;
+            ui.label(
+                RichText::new("Diagnóstico da conexão").font(crate::widgets::Type::Section.font()),
+            );
+            let version = server_version(&self.api, &self.health);
+            let small = |text: String| RichText::new(text).size(12.);
+            ui.label(small(format!(
+                "ai-memory {}",
+                if version.is_empty() { "—" } else { version }
+            )));
+            ui.label(small(format!(
+                "Recursos: {} · API: {}",
+                age(self.resources.at),
+                age(self.api.at)
+            )));
+            ui.label(small("As consultas respeitam o usuário do token. Handoffs de outros usuários podem não estar visíveis.".into()).color(p.text2));
+            if self.api.errors.is_empty() && self.api.error.is_none() {
+                ui.label(
+                    small(
+                        if self.api.at.is_some() {
+                            "Última coleta da API concluída sem erros."
+                        } else {
+                            "Conectando…"
+                        }
+                        .into(),
+                    )
+                    .color(p.acc),
+                );
+            }
+            for e in &self.api.errors {
+                ui.label(small(e.clone()).color(p.warn));
+            }
+            if let Some(e) = &self.resources.inventory_error {
+                ui.label(small(e.clone()).color(p.warn));
+            }
+        });
+    }
+    /// Barra de menus (macOS) ou bandeja (Linux): o projeto das propostas.
+    fn tray(&mut self, ui: &mut egui::Ui) {
+        setting_row(ui, "Propostas:", |ui| {
+            ui.scope(|ui| {
+                ui.spacing_mut().icon_width = 10.;
+                ui.spacing_mut().icon_spacing = 6.;
+                ui.spacing_mut().button_padding = Vec2::new(10., 4.);
+                ui.spacing_mut().interact_size.y = 26.;
+                let selected = self
+                    .draft
+                    .proposal_watch
+                    .as_ref()
+                    .map(crate::client::Scope::label)
+                    .unwrap_or("Desativado".into());
+                egui::ComboBox::from_id_salt("watch-proposals")
+                    .width(280.)
+                    .selected_text(RichText::new(selected).size(12.))
+                    .icon(|ui, rect, _, _| {
+                        let p = theme::palette(ui.visuals());
+                        let icon = egui::Rect::from_center_size(rect.center(), Vec2::splat(10.));
+                        crate::widgets::chevron(ui.painter(), icon, true, p.text);
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(&mut self.draft.proposal_watch, None, "Desativado")
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                        for p in &self.api.projects {
+                            let scope = crate::client::Scope {
+                                workspace: p.workspace_name.clone(),
+                                project: p.project_name.clone(),
+                            };
+                            let label = scope.label();
+                            if ui
+                                .selectable_value(
+                                    &mut self.draft.proposal_watch,
+                                    Some(scope),
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+            crate::widgets::caption(ui, crate::platform::PROPOSAL_WATCH_LABEL);
+        });
+    }
+    /// "Carregar do Keychain/chaveiro": o token guardado para o endereço do
+    /// rascunho vai ao campo.
+    fn load_token(&mut self) {
+        self.draft.normalize();
+        match crate::keychain::load(&self.draft.endpoint) {
+            Ok(Some(token)) => {
+                self.draft.token = token.trim().into();
+                self.settings_message = "Token carregado no campo. Salve para conectar.".into();
+            }
+            Ok(None) => self.settings_message = "Nenhum token guardado para esse endereço.".into(),
+            Err(e) => self.settings_message = e,
+        }
+    }
+    /// "Salvar e conectar": valida, grava (o token no Keychain/chaveiro e a
+    /// config) e reconecta; com erro, só a mensagem.
+    fn save_settings(&mut self) {
+        self.draft.normalize();
+        match self.draft.validate().and_then(|_| {
+            match keychain_change(&self.config, &self.draft) {
+                KeychainChange::Save { endpoint, token } => crate::keychain::save(endpoint, token)?,
+                KeychainChange::Forget(endpoint) => crate::keychain::forget(endpoint)?,
+                KeychainChange::Keep => {}
+            }
+            self.draft.save()
+        }) {
+            Ok(()) => {
+                self.reconnect(self.draft.clone());
+                self.authentication.clear();
+                self.settings_message = "Configuração salva. Reconectando…".into();
+            }
+            Err(e) => self.settings_message = e,
+        }
     }
     /// Destino de `shared.navigation` (barra de menus e bandeja): 1 = Saúde,
     /// 2 = Revisão, 3 = Administração; o resto não navega.
@@ -637,11 +1023,11 @@ impl MonitorApp {
             _ => return,
         };
     }
-    /// Um frame da janela: lateral, barras e a página. Sem coleta nem
-    /// navegação externa, para rodar sem janela nos testes.
+    /// Um frame da janela: lateral, barras, a página e Ajustes, se aberta.
+    /// Sem coleta nem navegação externa, para rodar sem janela nos testes.
     fn ui(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
-            self.page = Page::Settings;
+            self.open_settings();
         }
         self.sidebar(ctx, compact(ctx.content_rect().width()));
         self.top_bar(ctx);
@@ -742,10 +1128,10 @@ impl MonitorApp {
                             }
                             // Mostradas acima, fora desta rolagem.
                             Page::Sessions | Page::Docker => {}
-                            Page::Settings => self.settings(ui),
                         }
                     });
             });
+        self.settings_window(ctx);
     }
 }
 
@@ -767,7 +1153,7 @@ impl eframe::App for MonitorApp {
                 menu_bar.hide();
             }
             if !menu_bar.is_visible() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.hide(ctx);
                 return;
             }
         }
@@ -782,21 +1168,375 @@ impl Drop for MonitorApp {
     }
 }
 
-fn panel(ui: &egui::Ui) -> egui::Frame {
-    let p = theme::palette(ui.visuals());
-    egui::Frame::new()
-        .fill(p.surf)
-        .stroke(Stroke::new(1.0_f32, p.line))
-        .corner_radius(10.)
-        .inner_margin(16)
+/// Uma linha de Ajustes (Settings.dc.html): o rótulo alinhado à direita numa
+/// coluna de 170 e os controles à esquerda, a 20 dele, empilhados a 8.
+/// `label` vazio = só a coluna (um controle sob o da linha anterior).
+pub(crate) fn setting_row<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 20.;
+        ui.allocate_ui_with_layout(
+            Vec2::new(170., 26.),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(Vec2::new(170., 26.));
+                if !label.is_empty() {
+                    ui.label(RichText::new(label).size(13.));
+                }
+            },
+        );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 8.;
+            add(ui)
+        })
+        .inner
+    })
+    .inner
 }
-fn section(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .size(17.)
-            .strong()
-            .family(theme::semibold()),
+/// Nome acessível de um controle cujo rótulo é o da coluna da esquerda.
+pub(crate) fn name(ui: &egui::Ui, control: &egui::Response, label: &str) {
+    ui.ctx()
+        .accesskit_node_builder(control.id, |node| node.set_label(label));
+}
+/// `widgets::text_field` em mono (endereço e caminho), sem dica nem limite.
+fn mono_field(ui: &mut egui::Ui, text: &mut String, width: f32) -> egui::Response {
+    let p = theme::palette(ui.visuals());
+    let background = ui.painter().add(egui::Shape::Noop);
+    let response = ui.add(
+        egui::TextEdit::singleline(text)
+            .frame(false)
+            .font(egui::FontId::monospace(12.))
+            .margin(egui::Margin::symmetric(8, 0))
+            .min_size(Vec2::new(width, 26.))
+            .desired_width(width - 16.)
+            .vertical_align(egui::Align::Center),
     );
+    let border = if response.has_focus() { p.acc } else { p.line };
+    ui.painter().set(
+        background,
+        egui::epaint::RectShape::new(
+            response.rect,
+            5.,
+            p.field,
+            Stroke::new(1.0_f32, border),
+            egui::StrokeKind::Inside,
+        ),
+    );
+    response
+}
+/// Um intervalo em segundos: campo de 56 × 24 (arrasta ou digita; o valor
+/// fica em `range`), a unidade e os limites em text2.
+fn interval(
+    ui: &mut egui::Ui,
+    value: &mut u64,
+    range: std::ops::RangeInclusive<u64>,
+    label: &str,
+    unit: &str,
+    limits: &str,
+) {
+    let p = theme::palette(ui.visuals());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.;
+        let field = ui
+            .scope(|ui| {
+                let visuals = ui.visuals_mut();
+                visuals.text_edit_bg_color = Some(p.field);
+                let widgets = &mut visuals.widgets;
+                for state in [
+                    &mut widgets.inactive,
+                    &mut widgets.hovered,
+                    &mut widgets.active,
+                ] {
+                    state.bg_fill = p.field;
+                    state.weak_bg_fill = p.field;
+                    state.bg_stroke = Stroke::new(1.0_f32, p.line);
+                    state.corner_radius = egui::CornerRadius::same(5);
+                    state.expansion = 0.;
+                }
+                widgets.active.bg_stroke = Stroke::new(1.0_f32, p.acc);
+                ui.spacing_mut().interact_size = Vec2::new(56., 24.);
+                ui.spacing_mut().button_padding = Vec2::new(6., 0.);
+                ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
+                ui.add_sized([56., 24.], egui::DragValue::new(value).range(range))
+            })
+            .inner;
+        name(ui, &field, label);
+        ui.label(RichText::new(unit).size(13.));
+        ui.label(RichText::new(limits).size(12.).color(p.text2));
+    });
+}
+/// Uma miniatura de aparência (88 × 58, as duas metades do tema) com o nome
+/// embaixo; a escolhida leva o anel acc de 3 e o nome em SemiBold.
+/// AccessKit: `RadioButton` marcado ou não.
+fn appearance(ui: &mut egui::Ui, value: Appearance, label: &str, chosen: bool) -> egui::Response {
+    let p = theme::palette(ui.visuals());
+    let (light, dark) = (&theme::LIGHT, &theme::DARK);
+    // (fundo, tinta) de cada metade: o cromo e o corpo de cada tema.
+    let halves = match value {
+        Appearance::System => [(light.surf2, light.text2), (dark.surf, dark.text2)],
+        Appearance::Light => [(light.surf2, light.text2), (light.surf, light.text2)],
+        Appearance::Dark => [(dark.side, dark.text2), (dark.surf2, dark.text2)],
+    };
+    let family = if chosen {
+        theme::semibold()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), egui::FontId::new(12., family), p.text);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(galley.size().x.max(88.), 58. + 6. + galley.size().y),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::RadioButton,
+            ui.is_enabled(),
+            chosen,
+            label,
+        )
+    });
+    let painter = ui.painter();
+    let thumb = egui::Rect::from_min_size(
+        egui::pos2(rect.center().x - 44., rect.top()),
+        Vec2::new(88., 58.),
+    );
+    for (i, (fill, ink)) in halves.into_iter().enumerate() {
+        let half = egui::Rect::from_min_size(
+            thumb.min + Vec2::new(44. * i as f32, 0.),
+            Vec2::new(44., 58.),
+        );
+        let (outer, inner) = (8, 0);
+        let corners = if i == 0 {
+            egui::CornerRadius {
+                nw: outer,
+                sw: outer,
+                ne: inner,
+                se: inner,
+            }
+        } else {
+            egui::CornerRadius {
+                nw: inner,
+                sw: inner,
+                ne: outer,
+                se: outer,
+            }
+        };
+        painter.rect_filled(half, corners, fill);
+        // Três traços de 4, a 5 um do outro, com 8 acima e 6 dos lados.
+        let ink = crate::widgets::tone(ink, 0.3);
+        for (row, (share, color)) in [(0.7, ink), (0.5, ink), (0.6, p.acc)]
+            .into_iter()
+            .enumerate()
+        {
+            let bar = egui::Rect::from_min_size(
+                half.min + Vec2::new(6., 8. + row as f32 * 9.),
+                Vec2::new((44. - 12.) * share, 4.),
+            );
+            painter.rect_filled(bar, 2., color);
+        }
+    }
+    let ring = if chosen {
+        Stroke::new(3.0_f32, p.acc)
+    } else {
+        Stroke::new(1.0_f32, p.line)
+    };
+    painter.rect_stroke(thumb, 8., ring, egui::StrokeKind::Outside);
+    painter.galley(
+        egui::pos2(rect.center().x - galley.size().x / 2., thumb.bottom() + 6.),
+        galley,
+        p.text,
+    );
+    response
+}
+/// Uma aba do cromo de Ajustes: 96 × 50, ícone de 20 sobre o rótulo de 11;
+/// a escolhida em sel/acc. AccessKit: `Tab`, marcada como selecionada.
+fn settings_tab(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    tab: SettingsTab,
+    selected: bool,
+) -> egui::Response {
+    let p = theme::palette(ui.visuals());
+    let label = tab.label();
+    let response = ui.interact(
+        rect,
+        ui.id().with(("settings-tab", label)),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Tab);
+        node.set_selected(selected);
+    });
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 8., p.sel);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 8., crate::widgets::tone(p.line, 0.5));
+    }
+    let color = if selected { p.acc } else { p.text2 };
+    let family = if selected {
+        theme::semibold()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let galley = painter.layout_no_wrap(label.to_owned(), egui::FontId::new(11., family), color);
+    let top = rect.center().y - (20. + 4. + galley.size().y) / 2.;
+    let icon = egui::Rect::from_min_size(egui::pos2(rect.center().x - 10., top), Vec2::splat(20.));
+    tab_icon(painter, icon, tab, color);
+    painter.galley(
+        egui::pos2(rect.center().x - galley.size().x / 2., icon.bottom() + 4.),
+        galley,
+        color,
+    );
+    response
+}
+/// Os ícones das abas (paths de 24 do artboard, traço 1,7). Arcos viram
+/// polilinhas; a engrenagem, oito dentes.
+fn tab_icon(painter: &egui::Painter, rect: egui::Rect, tab: SettingsTab, color: Color32) {
+    use crate::widgets::{dot, strokes};
+    let scale = rect.width() / 24.;
+    let stroke = Stroke::new(1.7 * scale, color);
+    let at = |(x, y): (f32, f32)| rect.min + Vec2::new(x, y) * scale;
+    match tab {
+        SettingsTab::General => {
+            painter.circle_stroke(at((12., 12.)), 3. * scale, stroke);
+            let gear = (0..8)
+                .flat_map(|k| {
+                    let a = k as f32 * 45.;
+                    [(7.3, a - 14.), (9.6, a - 9.), (9.6, a + 9.), (7.3, a + 14.)]
+                })
+                .map(|(r, degrees): (f32, f32)| {
+                    let t = degrees.to_radians();
+                    at((12. + r * t.cos(), 12. + r * t.sin()))
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(gear, stroke));
+        }
+        SettingsTab::Connection => {
+            for (a, b, r) in [
+                ((2., 9.), (22., 9.), 15.),
+                ((5., 12.5), (19., 12.5), 10.),
+                ((8.5, 16.), (15.5, 16.), 5.),
+            ] {
+                strokes(painter, rect, &[&arc(a, b, r)], 1.7, color);
+            }
+            dot(painter, rect, (12., 19.5), 1.7, color);
+        }
+        SettingsTab::Tray => strokes(
+            painter,
+            rect,
+            &[
+                &[(3., 5.), (21., 5.), (21., 9.), (3., 9.), (3., 5.)],
+                &[(14., 9.), (14., 19.), (17., 16.), (19., 20.)],
+            ],
+            1.7,
+            color,
+        ),
+        SettingsTab::Account => {
+            painter.circle_stroke(at((12., 8.)), 4. * scale, stroke);
+            strokes(
+                painter,
+                rect,
+                &[&arc((4., 21.), (20., 21.), 8.)],
+                1.7,
+                color,
+            );
+        }
+    }
+}
+/// Pontos do arco de raio `r` de `a` a `b` (mesma altura, `a` à esquerda),
+/// curvado para cima, como o `a r r 0 0 1` dos paths.
+fn arc(a: (f32, f32), b: (f32, f32), r: f32) -> Vec<(f32, f32)> {
+    let half = (b.0 - a.0) / 2.;
+    let center = (a.0 + half, a.1 + (r * r - half * half).max(0.).sqrt());
+    let angle = |(x, y): (f32, f32)| (y - center.1).atan2(x - center.0);
+    let (mut from, to) = (angle(a), angle(b));
+    if from > to {
+        from -= std::f32::consts::TAU;
+    }
+    (0..=16)
+        .map(|i| {
+            let t = from + (to - from) * i as f32 / 16.;
+            (center.0 + r * t.cos(), center.1 + r * t.sin())
+        })
+        .collect()
+}
+/// Um botão em estilo de link: texto 12 em text2 (text sob o ponteiro).
+fn link(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let p = theme::palette(ui.visuals());
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(12.),
+        Color32::PLACEHOLDER,
+    );
+    let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+    let color = if response.hovered() { p.text } else { p.text2 };
+    ui.painter().galley(rect.min, galley, color);
+    response
+}
+/// `settings_message` no rodapé: 12, em até duas linhas na largura que
+/// sobra; além delas, reticências e o texto inteiro no tooltip.
+fn message(ui: &mut egui::Ui, text: &str) {
+    let p = theme::palette(ui.visuals());
+    let mut job = egui::text::LayoutJob::simple(
+        text.to_owned(),
+        egui::FontId::proportional(12.),
+        p.text,
+        ui.available_width(),
+    );
+    job.wrap.max_rows = 2;
+    let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
+    let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    ui.painter().galley(rect.min, galley, p.text);
+    if elided {
+        response.on_hover_text(text);
+    }
+}
+/// A divisória de largura inteira do corpo de Ajustes.
+fn divider(ui: &mut egui::Ui) {
+    let p = theme::palette(ui.visuals());
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0_f32, p.line),
+    );
+}
+/// O estado da conexão ao lado do servidor: ponto e texto na cor do estado,
+/// numa linha (cortado, o texto inteiro vai ao tooltip). AccessKit: `Label`.
+fn connection_state(ui: &mut egui::Ui, color: Color32, text: &str) {
+    let galley = crate::widgets::one_line(
+        ui,
+        text,
+        egui::FontId::proportional(12.),
+        color,
+        ui.available_width() - 13.,
+    );
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(13. + galley.size().x, 26.), egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    let painter = ui.painter();
+    painter.circle_filled(egui::pos2(rect.left() + 3.5, rect.center().y), 3.5, color);
+    let elided = galley.elided;
+    painter.galley(
+        egui::pos2(rect.left() + 13., rect.center().y - galley.size().y / 2.),
+        galley,
+        color,
+    );
+    if elided {
+        response.on_hover_text(text);
+    }
 }
 /// O que fica à direita do rótulo de um item da lateral.
 enum Aside {
@@ -807,21 +1547,26 @@ enum Aside {
 }
 /// Item da lateral: ícone, rótulo numa linha só e, à direita, o contador ou o
 /// atalho. No compacto, só o ícone; o rótulo vai ao tooltip no compacto e
-/// sempre que for cortado.
+/// sempre que for cortado. `selected: None` = um item que não é página
+/// (Ajustes, que abre a janela própria): botão, nunca marcado.
 fn nav_item(
     ui: &mut egui::Ui,
-    page: Page,
-    selected: bool,
+    label: &str,
+    selected: Option<bool>,
     compact: bool,
     aside: Option<Aside>,
+    paint: impl FnOnce(&egui::Painter, egui::Rect, Color32),
 ) -> egui::Response {
     let p = theme::palette(ui.visuals());
-    let label = page.label();
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    response.widget_info(|| match selected {
+        Some(selected) => {
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+        }
+        None => egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label),
     });
+    let selected = selected == Some(true);
     let painter = ui.painter();
     if selected {
         painter.rect_filled(rect, 7., p.sel);
@@ -837,7 +1582,7 @@ fn nav_item(
             Vec2::splat(16.),
         )
     };
-    paint_icon(painter, icon, page, color);
+    paint(painter, icon, color);
     if compact {
         return response.on_hover_text(label);
     }
@@ -986,22 +1731,27 @@ fn paint_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: Colo
             ]);
             line(&[(9.5, 12.), (11.5, 14.), (15., 10.5)]);
         }
-        Page::Settings => {
-            for segment in [
-                [(4., 6.), (13., 6.)],
-                [(17., 6.), (20., 6.)],
-                [(15., 4.), (15., 8.)],
-                [(4., 12.), (7., 12.)],
-                [(11., 12.), (20., 12.)],
-                [(9., 10.), (9., 14.)],
-                [(4., 18.), (15., 18.)],
-                [(19., 18.), (20., 18.)],
-                [(17., 16.), (17., 20.)],
-            ] {
-                line(&segment);
-            }
-        }
     }
+}
+/// O ícone de Ajustes (controles deslizantes), no traço dos da lateral.
+fn settings_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    crate::widgets::strokes(
+        painter,
+        rect,
+        &[
+            &[(4., 6.), (13., 6.)],
+            &[(17., 6.), (20., 6.)],
+            &[(15., 4.), (15., 8.)],
+            &[(4., 12.), (7., 12.)],
+            &[(11., 12.), (20., 12.)],
+            &[(9., 10.), (9., 14.)],
+            &[(4., 18.), (15., 18.)],
+            &[(19., 18.), (20., 18.)],
+            &[(17., 16.), (17., 20.)],
+        ],
+        1.8,
+        color,
+    );
 }
 /// Uma fonte de dados no rodapé da lateral: ponto de estado e `label`. O
 /// tooltip e o AccessKit dizem "`name`: estado" (conectado, o erro ou a
@@ -1445,6 +2195,8 @@ mod tests {
         let mut app = MonitorApp::build(config.clone(), Shared::unstarted(config));
         app.draft.endpoint = "https://draft.example".into();
         app.draft.container = "draft-ai".into();
+        // Nenhum teste grava o tema no disco de quem roda.
+        app.save_theme = |_| Ok(());
         app
     }
 
@@ -1646,8 +2398,9 @@ mod tests {
         );
     }
 
-    /// As 9 páginas, na ordem da lateral (Ajustes no rodapé).
-    const PAGES: [Page; 9] = [
+    /// As 8 páginas, na ordem da lateral. Ajustes, no rodapé, abre a janela
+    /// própria e não é página.
+    const PAGES: [Page; 8] = [
         Page::Overview,
         Page::Sessions,
         Page::Docker,
@@ -1656,7 +2409,6 @@ mod tests {
         Page::Review,
         Page::Maintenance,
         Page::Admin,
-        Page::Settings,
     ];
     /// Toda página tem de estar em PAGES: um membro novo quebra este match.
     #[test]
@@ -1670,8 +2422,7 @@ mod tests {
                 | Page::Explore
                 | Page::Review
                 | Page::Maintenance
-                | Page::Admin
-                | Page::Settings => {}
+                | Page::Admin => {}
             }
             assert_eq!(PAGES.iter().filter(|&&p| p == page).count(), 1, "{page:?}");
         }
@@ -1687,7 +2438,6 @@ mod tests {
                 "Revisão",
                 "Manutenção e backup",
                 "Administração",
-                "Ajustes",
             ]
         );
         for page in PAGES {
@@ -1766,22 +2516,27 @@ mod tests {
                         "the {counter} counter must be painted whole"
                     );
                 }
-                for page in PAGES {
+                // As páginas e Ajustes, no rodapé, com o atalho ao lado.
+                for label in PAGES.iter().map(|p| p.label()).chain(["Ajustes"]) {
                     let painted: Vec<bool> = texts
                         .iter()
-                        .filter(|(text, _)| text == page.label())
+                        .filter(|(text, _)| text == label)
                         .map(|&(_, elided)| elided)
                         .collect();
-                    assert!(!painted.is_empty(), "{page:?} must be painted");
-                    let fits = page != Page::Sessions || sessions_fit;
+                    assert!(!painted.is_empty(), "{label} must be painted");
+                    let fits = label != Page::Sessions.label() || sessions_fit;
                     assert_eq!(
                         painted.iter().any(|&elided| elided),
                         !fits,
-                        "{page:?} cut = {} at {} px, {selected:?} selected, counter {counter:?}",
+                        "{label} cut = {} at {} px, {selected:?} selected, counter {counter:?}",
                         !fits,
                         sidebar_width(&ctx)
                     );
                 }
+                assert!(
+                    texts.contains(&(crate::platform::SETTINGS_SHORTCUT.to_owned(), false)),
+                    "the shortcut is painted whole next to Ajustes"
+                );
             }
         }
     }
@@ -1847,6 +2602,18 @@ mod tests {
                     };
                     assert_eq!(toggled, Some(Some(want)), "{theme:?} {other:?} on {page:?}");
                 }
+                // Ajustes não é página: um botão na lateral, nunca marcado.
+                let settings: Vec<_> = update
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| {
+                        n.role() == Role::Button
+                            && n.label() == Some("Ajustes")
+                            && n.bounds().is_some_and(|b| b.x1 <= 232.)
+                    })
+                    .map(|(_, n)| n.toggled())
+                    .collect();
+                assert_eq!(settings, vec![None], "{theme:?} Ajustes on {page:?}");
             }
         }
     }
@@ -1865,12 +2632,9 @@ mod tests {
             let width = sidebar_width(&ctx);
             let mut rows: Vec<(String, egui::Rect)> = PAGES
                 .iter()
-                .map(|p| {
-                    (
-                        p.label().to_owned(),
-                        widget_rect(&out, Role::Button, p.label()),
-                    )
-                })
+                .map(|p| p.label())
+                .chain(["Ajustes"])
+                .map(|label| (label.to_owned(), widget_rect(&out, Role::Button, label)))
                 .collect();
             for source in [
                 "ai-memory: aguardando primeira coleta",
@@ -2592,32 +3356,949 @@ mod tests {
         }
     }
 
-    #[test]
-    fn command_comma_opens_settings() {
-        let comma = |modifiers| egui::Event::Key {
+    /// A tecla vírgula com `modifiers`.
+    fn comma(modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
             key: egui::Key::Comma,
             physical_key: None,
             pressed: true,
             repeat: false,
             modifiers,
-        };
+        }
+    }
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    /// O atalho de Ajustes como o sistema o entrega: ⌘, no macOS e Ctrl+,
+    /// no Linux (os dois também marcam `command`); e a outra tecla, que não
+    /// abre (Ctrl no macOS, Alt no Linux).
+    #[cfg(target_os = "macos")]
+    const SHORTCUT: egui::Modifiers = egui::Modifiers {
+        mac_cmd: true,
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    #[cfg(target_os = "macos")]
+    const NOT_SHORTCUT: egui::Modifiers = egui::Modifiers::CTRL;
+    #[cfg(not(target_os = "macos"))]
+    const SHORTCUT: egui::Modifiers = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    #[cfg(not(target_os = "macos"))]
+    const NOT_SHORTCUT: egui::Modifiers = egui::Modifiers::ALT;
+    /// Janelas de Ajustes embutidas (sem janelas nativas, o egui as mostra
+    /// como `egui::Window`), pelo título, que é a aba.
+    fn settings_windows(out: &egui::FullOutput) -> usize {
+        SettingsTab::ALL
+            .iter()
+            .map(|tab| widgets(out, egui::accesskit::Role::Window, tab.label()).len())
+            .sum()
+    }
+    /// Ajustes aberta na aba `tab`, com AccessKit, já desenhada uma vez.
+    fn settings_open_on(tab: SettingsTab) -> (MonitorApp, egui::Context, egui::FullOutput) {
+        let mut app = app_with_unsaved_draft();
+        app.settings.tab = tab;
+        app.open_settings();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        frame(&mut app, &ctx, [1320., 860.], vec![]);
+        let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+        (app, ctx, out)
+    }
+    /// Clica no campo `field`, vai ao fim do texto e digita `text`.
+    fn type_into(
+        app: &mut MonitorApp,
+        ctx: &egui::Context,
+        out: &egui::FullOutput,
+        role: egui::accesskit::Role,
+        field: &str,
+        text: &str,
+    ) {
+        let size = [1320., 860.];
+        let at = crate::widgets::tests::rect_of(&update_node(out, role, field));
+        click_at(app, ctx, size, at.center());
+        frame(app, ctx, size, vec![key(egui::Key::End)]);
+        frame(app, ctx, size, vec![egui::Event::Text(text.into())]);
+    }
+    /// O papel do eframe numa viewport imediata: roda a janela num pass
+    /// próprio de 780 × 620, com os eventos de `input`, e guarda o construtor
+    /// e a saída de cada pass. `close` manda o botão de fechar da janela no
+    /// próximo pass.
+    struct Native {
+        passes: std::rc::Rc<std::cell::RefCell<Vec<(egui::ViewportBuilder, egui::FullOutput)>>>,
+        input: std::rc::Rc<std::cell::RefCell<Vec<egui::Event>>>,
+        close: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+    impl Native {
+        fn install(ctx: &egui::Context) -> Self {
+            ctx.set_embed_viewports(false);
+            let native = Self {
+                passes: Default::default(),
+                input: Default::default(),
+                close: Default::default(),
+            };
+            let (passes, input, close) = (
+                native.passes.clone(),
+                native.input.clone(),
+                native.close.clone(),
+            );
+            egui::Context::set_immediate_viewport_renderer(move |ctx, viewport| {
+                let mut raw = egui::RawInput {
+                    viewport_id: viewport.ids.this,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        SETTINGS_SIZE.into(),
+                    )),
+                    events: std::mem::take(&mut *input.borrow_mut()),
+                    ..Default::default()
+                };
+                let mut info = egui::ViewportInfo::default();
+                if close.take() {
+                    info.events.push(egui::ViewportEvent::Close);
+                }
+                raw.viewports.insert(viewport.ids.this, info);
+                let mut show = viewport.viewport_ui_cb;
+                let out = ctx.run(raw, |ctx| show(ctx));
+                passes.borrow_mut().push((viewport.builder, out));
+            });
+            native
+        }
+        /// A saída do último pass da janela.
+        fn last(&self) -> egui::FullOutput {
+            self.passes
+                .borrow()
+                .last()
+                .expect("a native pass")
+                .1
+                .clone()
+        }
+        /// Clique completo em `pos` dentro da janela, um frame da principal
+        /// por evento.
+        fn click(&self, app: &mut MonitorApp, ctx: &egui::Context, pos: egui::Pos2) {
+            for events in crate::widgets::tests::click_frames(pos) {
+                *self.input.borrow_mut() = events;
+                frame(app, ctx, [1320., 860.], vec![]);
+            }
+        }
+    }
+    /// A janela de Ajustes neste frame da principal: o que egui manda ao
+    /// eframe criar ou manter (ausente = a janela fecha).
+    fn settings_viewport(out: &egui::FullOutput) -> Option<&egui::ViewportOutput> {
+        out.viewport_output.get(&settings_id())
+    }
+    fn commands(out: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
+        settings_viewport(out).map_or(vec![], |v| v.commands.clone())
+    }
+
+    #[test]
+    fn the_shortcut_opens_settings_once_and_never_leaves_the_page() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        let ctx = styled();
+        ctx.enable_accesskit();
+        for (case, modifiers) in [
+            ("a bare comma", egui::Modifiers::NONE),
+            ("the other platform's key", NOT_SHORTCUT),
+        ] {
+            frame(&mut app, &ctx, size, vec![comma(modifiers)]);
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert!(!app.settings.open, "{case} must not open Ajustes");
+            assert_eq!(settings_windows(&out), 0, "{case}");
+        }
+        // Com a janela aberta, o atalho de novo não abre outra.
+        for press in 0..3 {
+            frame(&mut app, &ctx, size, vec![comma(SHORTCUT)]);
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert!(app.settings.open, "press {press}");
+            assert_eq!(settings_windows(&out), 1, "press {press}: one window");
+            assert_eq!(
+                widgets(&out, Role::Tab, "Geral").len(),
+                1,
+                "press {press}: one set of tabs"
+            );
+            assert_eq!(app.page, Page::Docker, "press {press}: the page stays");
+        }
+    }
+
+    #[test]
+    fn settings_is_its_own_780_by_620_window_titled_by_the_tab_and_raised_by_the_shortcut() {
+        use egui::{ViewportCommand::*, accesskit::Role};
+        let size = [1320., 860.];
         let mut app = app_with_unsaved_draft();
         let ctx = styled();
-        assert_eq!(app.page, Page::Overview);
-        frame(
+        ctx.enable_accesskit();
+        let native = Native::install(&ctx);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(settings_viewport(&out).is_none(), "closed until asked");
+        let out = frame(&mut app, &ctx, size, vec![comma(SHORTCUT)]);
+        let window = settings_viewport(&out).expect("a native window");
+        // Imediata: desenhada dentro do frame da principal, filha dela.
+        assert!(window.viewport_ui_cb.is_none());
+        assert_eq!(window.parent, egui::ViewportId::ROOT);
+        assert_eq!(window.builder.title.as_deref(), Some("Geral"));
+        assert_eq!(window.builder.inner_size, Some(Vec2::new(780., 620.)));
+        assert_eq!(window.builder.resizable, Some(false));
+        // macOS: o cromo vai até o topo, sob o título e os botões da janela.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            (
+                window.builder.fullsize_content_view,
+                window.builder.titlebar_shown
+            ),
+            (Some(true), Some(false))
+        );
+        assert_eq!(out.viewport_output.len(), 2, "the main window and Ajustes");
+        assert!(window.commands.contains(&Focus), "{:?}", window.commands);
+        assert_eq!(
+            settings_windows(&out),
+            0,
+            "nothing embedded in the main window"
+        );
+        let inside = native.last();
+        let tabs: Vec<_> = SettingsTab::ALL
+            .iter()
+            .map(|t| update_node(&inside, Role::Tab, t.label()).is_selected())
+            .collect();
+        assert_eq!(tabs, [Some(true), Some(false), Some(false), Some(false)]);
+        // O frame seguinte não pede foco; o atalho, com ela aberta, sim.
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(!commands(&out).contains(&Focus), "{:?}", commands(&out));
+        let out = frame(&mut app, &ctx, size, vec![comma(SHORTCUT)]);
+        let raised = commands(&out);
+        assert!(
+            raised.contains(&Minimized(false)) && raised.contains(&Focus),
+            "{raised:?}"
+        );
+        assert_eq!(out.viewport_output.len(), 2, "still one Ajustes");
+        // A aba escolhida vira o título da janela.
+        let conexao =
+            crate::widgets::tests::rect_of(&update_node(&native.last(), Role::Tab, "Conexão"));
+        native.click(&mut app, &ctx, conexao.center());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(app.settings.tab, SettingsTab::Connection);
+        assert_eq!(
+            settings_viewport(&out).unwrap().builder.title.as_deref(),
+            Some("Conexão")
+        );
+        update_node(&native.last(), Role::TextInput, "Servidor ai-memory");
+    }
+
+    #[test]
+    fn the_settings_title_bar_follows_the_app_theme() {
+        use egui::ViewportCommand::SetTheme;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        let native = Native::install(&ctx);
+        let themes = |out: &egui::FullOutput| -> Vec<egui::ViewportCommand> {
+            commands(out)
+                .into_iter()
+                .filter(|c| matches!(c, SetTheme(_)))
+                .collect()
+        };
+        let system = theme::window_theme(Appearance::System, theme::platform_theme());
+        app.open_settings();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(themes(&out), vec![SetTheme(system)], "a new window gets it");
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(themes(&out), vec![], "unchanged, not resent");
+        app.choose_theme(Appearance::Light, |_| Ok(()));
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(themes(&out), vec![SetTheme(egui::SystemTheme::Light)]);
+        // Fechada e aberta de novo: outra janela, que também precisa dele.
+        native.close.set(true);
+        frame(&mut app, &ctx, size, vec![]);
+        assert!(!app.settings.open);
+        app.open_settings();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(themes(&out), vec![SetTheme(egui::SystemTheme::Light)]);
+    }
+
+    #[test]
+    fn the_native_close_button_closes_only_the_window_and_keeps_the_draft() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.settings.tab = SettingsTab::Connection;
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let native = Native::install(&ctx);
+        app.open_settings();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(settings_viewport(&out).is_some());
+        native.close.set(true);
+        frame(&mut app, &ctx, size, vec![]);
+        assert!(!app.settings.open, "the close button closes Ajustes");
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            settings_viewport(&out).is_none(),
+            "and the window goes away"
+        );
+        assert_eq!(app.draft.endpoint, "https://draft.example");
+        assert_eq!(app.draft.container, "draft-ai");
+        assert_eq!(app.config.endpoint, "https://connected.example");
+        assert_eq!(app.shared.generation.load(Ordering::Acquire), 0);
+        // De novo: a mesma aba e o mesmo rascunho.
+        frame(&mut app, &ctx, size, vec![comma(SHORTCUT)]);
+        let inside = native.last();
+        assert_eq!(
+            update_node(&inside, Role::TextInput, "Servidor ai-memory").value(),
+            Some("https://draft.example")
+        );
+        assert_eq!(
+            update_node(&inside, Role::Tab, "Conexão").is_selected(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_window_close_button_closes_only_the_window_and_keeps_the_draft() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let (mut app, ctx, out) = settings_open_on(SettingsTab::Connection);
+        assert_eq!(
+            update_node(&out, Role::TextInput, "Servidor ai-memory").value(),
+            Some("https://draft.example"),
+            "precondition: the draft is in the window"
+        );
+        let close = widget_rect(&out, Role::Button, "Close window");
+        click_at(&mut app, &ctx, size, close.center());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(!app.settings.open);
+        assert_eq!(settings_windows(&out), 0);
+        assert_eq!(app.draft.endpoint, "https://draft.example");
+        assert_eq!(app.draft.container, "draft-ai");
+        assert_eq!(app.config.endpoint, "https://connected.example");
+        assert_eq!(app.shared.generation.load(Ordering::Acquire), 0);
+        frame(&mut app, &ctx, size, vec![comma(SHORTCUT)]);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(
+            update_node(&out, Role::TextInput, "Contêiner ai-memory").value(),
+            Some("draft-ai"),
+            "reopened on the same tab with the same draft"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn hiding_the_main_window_closes_settings_with_it() {
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        let _native = Native::install(&ctx);
+        app.open_settings();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(settings_viewport(&out).is_some(), "precondition: open");
+        // O frame em que `update` encontra a principal escondida.
+        let out = ctx.run(egui::RawInput::default(), |ctx| app.hide(ctx));
+        assert!(
+            out.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Visible(false))
+        );
+        assert!(settings_viewport(&out).is_none(), "Ajustes goes with it");
+        // A principal de volta vem sozinha; o rascunho ficou.
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            settings_viewport(&out).is_none(),
+            "the main window must come back alone, not with Ajustes"
+        );
+        assert!(!app.settings.open);
+        assert_eq!(app.draft.endpoint, "https://draft.example");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_settings_title_strip_drags_the_window_and_never_maximizes_it() {
+        use egui::{Event, PointerButton, ViewportCommand};
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        let native = Native::install(&ctx);
+        app.open_settings();
+        frame(&mut app, &ctx, size, vec![]);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // Arrasta da faixa do título (34) ou da linha das abas, entre elas.
+        let drag = |app: &mut MonitorApp, from: egui::Pos2| {
+            let to = from + Vec2::new(40., 0.);
+            [
+                vec![Event::PointerMoved(from), press(from, true)],
+                vec![Event::PointerMoved(to)],
+                vec![press(to, false)],
+            ]
+            .into_iter()
+            .flat_map(|events| {
+                *native.input.borrow_mut() = events;
+                commands(&frame(app, &ctx, size, vec![]))
+            })
+            .collect::<Vec<_>>()
+        };
+        let title = egui::pos2(390., 17.);
+        let sent = drag(&mut app, title);
+        assert!(
+            sent.contains(&ViewportCommand::StartDrag),
+            "the title strip must drag the window: {sent:?}"
+        );
+        let sent = drag(&mut app, egui::pos2(60., 60.));
+        assert!(
+            !sent.contains(&ViewportCommand::StartDrag),
+            "below the title strip: {sent:?}"
+        );
+        let mut sent = Vec::new();
+        for pressed in [true, false, true, false] {
+            *native.input.borrow_mut() = vec![press(title, pressed)];
+            sent.extend(commands(&frame(&mut app, &ctx, size, vec![])));
+        }
+        assert!(
+            !sent
+                .iter()
+                .any(|c| matches!(c, ViewportCommand::Maximized(_))),
+            "a double click must not maximize a fixed-size window: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn the_account_tab_keeps_the_human_session_controls() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let (mut app, ctx, out) = settings_open_on(SettingsTab::Account);
+        widget_rect(
+            &out,
+            Role::Label,
+            "Bearer configurado ou acesso anônimo. Login usa credenciais humanas separadas.",
+        );
+        app.shared.config.write().unwrap().human =
+            Some(crate::auth::Session::for_test("sessao", "csrf"));
+        let out = frame(&mut app, &ctx, size, vec![]);
+        widget_rect(
+            &out,
+            Role::Label,
+            "Sessão humana. Cookies e CSRF somente em memória.",
+        );
+        assert!(widgets(&out, Role::TextInput, "Usuário").is_empty());
+        for button in [
+            "Consultar identidade e capacidades",
+            "Sair da sessão humana e voltar ao Bearer",
+        ] {
+            widget_rect(&out, Role::Button, button);
+        }
+        let fields = ["Senha atual", "Nova senha", "Confirmar nova senha"];
+        assert!(
+            fields
+                .iter()
+                .all(|f| widgets(&out, Role::PasswordInput, f).is_empty()),
+            "the password fields wait for Alterar minha senha"
+        );
+        let change = widget_rect(&out, Role::Button, "Alterar minha senha");
+        click_at(&mut app, &ctx, size, change.center());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        for field in fields {
+            widget_rect(&out, Role::PasswordInput, field);
+        }
+        assert!(!update_node(&out, Role::Button, "Alterar senha e renovar sessão").is_disabled());
+        // Ocupado em Revisão: os campos e botões da conta esperam.
+        app.management.busy = true;
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(update_node(&out, Role::Button, "Alterar senha e renovar sessão").is_disabled());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_new_linux_window_opens_without_the_settings_of_the_last_one() {
+        let mut app = app_with_unsaved_draft();
+        app.open_settings();
+        app.attach(&styled());
+        assert!(!app.settings.open);
+        assert_eq!(
+            app.draft.endpoint, "https://draft.example",
+            "the draft stays"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_item_and_open_settings_open_the_window_from_the_page() {
+        use egui::accesskit::Role;
+        for (size, compact) in [([1320., 860.], false), ([720., 560.], true)] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Docker;
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let texts = sidebar_texts(&ctx, &out);
+            let shortcut = crate::platform::SETTINGS_SHORTCUT;
+            for text in ["Ajustes", shortcut] {
+                assert_eq!(
+                    texts.iter().any(|(t, _)| t == text),
+                    !compact,
+                    "{size:?}: {text} painted only in the full sidebar"
+                );
+            }
+            // Oito páginas marcáveis e Ajustes, um botão.
+            let update = out.platform_output.accesskit_update.as_ref().unwrap();
+            let pages = update
+                .nodes
+                .iter()
+                .filter(|(_, n)| {
+                    n.role() == Role::Button
+                        && n.toggled().is_some()
+                        && n.bounds()
+                            .is_some_and(|b| b.x1 <= sidebar_width(&ctx) as f64)
+                })
+                .count();
+            assert_eq!(pages, 8, "{size:?}");
+            let item = widget_rect(&out, Role::Button, "Ajustes");
+            click_at(&mut app, &ctx, size, item.center());
+            assert!(app.settings.open, "{size:?}: the item opens Ajustes");
+            assert_eq!(app.page, Page::Docker, "{size:?}: the page stays");
+        }
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Sessions;
+        app.api.error = Some("Falha ao conectar.".into());
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(!app.settings.open);
+        let open = widget_rect(&out, Role::Button, "Abrir Ajustes");
+        click_at(&mut app, &ctx, size, open.center());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(app.settings.open, "Abrir Ajustes opens the window");
+        assert_eq!(settings_windows(&out), 1);
+        assert_eq!(app.page, Page::Sessions);
+    }
+
+    #[test]
+    fn the_tabs_switch_the_content_and_expose_the_selected_one() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let (mut app, ctx, mut out) = settings_open_on(SettingsTab::General);
+        // As quatro abas de 96 × 50, a 4 uma da outra, centradas na janela.
+        let tabs: Vec<egui::Rect> = SettingsTab::ALL
+            .iter()
+            .map(|t| widget_rect(&out, Role::Tab, t.label()))
+            .collect();
+        let window = widget_rect(&out, Role::Window, "Geral");
+        assert!(
+            tabs.iter().all(|r| r.size() == Vec2::new(96., 50.)),
+            "{tabs:?}"
+        );
+        assert!(
+            tabs.windows(2)
+                .all(|w| (w[1].left() - w[0].right() - 4.).abs() < 0.01),
+            "{tabs:?}"
+        );
+        let middle = (tabs[0].left() + tabs[3].right()) / 2.;
+        assert!(
+            (middle - window.center().x).abs() < 1.,
+            "{middle} in {window:?}"
+        );
+        // (aba, um controle só dela), saindo de Geral e voltando a ela.
+        for (tab, role, only) in [
+            (
+                SettingsTab::Connection,
+                Role::TextInput,
+                "Servidor ai-memory",
+            ),
+            (SettingsTab::Tray, Role::ComboBox, "Desativado"),
+            (SettingsTab::Account, Role::TextInput, "Usuário"),
+            (SettingsTab::General, Role::RadioButton, "Sistema"),
+        ] {
+            assert!(
+                widgets(&out, role, only).is_empty(),
+                "{tab:?}: not shown before"
+            );
+            let at = widget_rect(&out, Role::Tab, tab.label());
+            click_at(&mut app, &ctx, size, at.center());
+            out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.settings.tab, tab);
+            for other in SettingsTab::ALL {
+                assert_eq!(
+                    update_node(&out, Role::Tab, other.label()).is_selected(),
+                    Some(other == tab),
+                    "on {tab:?}: {other:?}"
+                );
+            }
+            assert_eq!(
+                widgets(&out, Role::Window, tab.label()).len(),
+                1,
+                "the title is the tab"
+            );
+            assert_eq!(
+                widgets(&out, role, only).len(),
+                1,
+                "{tab:?} shows its content"
+            );
+        }
+        let tray = if cfg!(target_os = "macos") {
+            "Barra de menus"
+        } else {
+            "Bandeja"
+        };
+        assert_eq!(SettingsTab::Tray.label(), tray);
+    }
+
+    #[test]
+    fn every_control_is_on_its_tab_and_the_ones_left_out_do_not_exist() {
+        use SettingsTab::*;
+        use egui::accesskit::Role;
+        let store = crate::platform::SECRET_STORE;
+        let load = format!("Carregar do {store}");
+        let remember = format!("Guardar no {store} para este servidor");
+        let controls: [(SettingsTab, Role, &str); 17] = [
+            (General, Role::RadioButton, "Sistema"),
+            (General, Role::RadioButton, "Claro"),
+            (General, Role::RadioButton, "Escuro"),
+            (
+                General,
+                Role::SpinButton,
+                "Intervalo de recursos em segundos",
+            ),
+            (
+                General,
+                Role::SpinButton,
+                "Intervalo de sessões em segundos",
+            ),
+            (Connection, Role::TextInput, "Servidor ai-memory"),
+            (Connection, Role::PasswordInput, "Token"),
+            (Connection, Role::Button, &load),
+            (Connection, Role::CheckBox, &remember),
+            (Connection, Role::TextInput, "Contêiner ai-memory"),
+            (Connection, Role::TextInput, "Executável Docker"),
+            (Connection, Role::Label, "Diagnóstico da conexão"),
+            (Tray, Role::ComboBox, "Desativado"),
+            (Tray, Role::Label, crate::platform::PROPOSAL_WATCH_LABEL),
+            (Account, Role::TextInput, "Usuário"),
+            (Account, Role::PasswordInput, "Senha"),
+            (Account, Role::Button, "Entrar com sessão humana"),
+        ];
+        let left_out = [
+            "Densidade:",
+            "Densidade",
+            "Confortável",
+            "Compacta",
+            "Ao iniciar:",
+            "Abrir o painel",
+            "Iniciar com a sessão do usuário",
+            "Mostrar na barra:",
+            "Só o ícone",
+            "Ícone + CPU",
+            "Completo",
+            "Alertas:",
+            "Ponto âmbar no ícone quando a saúde tiver alertas",
+            "Autenticação:",
+            "Autenticação",
+            "Token Bearer",
+            "Login humano",
+            "Anônimo",
+            "Testar conexão",
+        ];
+        for tab in SettingsTab::ALL {
+            let (_, _, out) = settings_open_on(tab);
+            for (home, role, name) in &controls {
+                assert_eq!(
+                    widgets(&out, *role, name).len(),
+                    usize::from(*home == tab),
+                    "{role:?} {name:?} on {tab:?}"
+                );
+            }
+            for button in ["Restaurar padrões", "Salvar e conectar"] {
+                widget_rect(&out, Role::Button, button);
+            }
+            let update = out.platform_output.accesskit_update.as_ref().unwrap();
+            let painted = crate::widgets::tests::texts(&out);
+            for text in left_out {
+                assert!(
+                    !update
+                        .nodes
+                        .iter()
+                        .any(|(_, n)| n.label() == Some(text) || n.value() == Some(text)),
+                    "{tab:?}: {text:?} is out"
+                );
+                assert!(
+                    !painted.iter().any(|(t, _)| t == text),
+                    "{tab:?}: {text:?} painted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_intervals_keep_their_limits_when_typed() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let resources = "Intervalo de recursos em segundos";
+        let sessions = "Intervalo de sessões em segundos";
+        // (campo, digitado, valor): os limites e um além de cada um.
+        for (field, typed, want) in [
+            (resources, "0", 1),
+            (resources, "1", 1),
+            (resources, "60", 60),
+            (resources, "61", 60),
+            (sessions, "4", 5),
+            (sessions, "5", 5),
+            (sessions, "300", 300),
+            (sessions, "301", 300),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            // Sementes fora de todos os casos: cada digitação muda o valor.
+            app.draft.resource_seconds = 7;
+            app.draft.api_seconds = 42;
+            app.open_settings();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            frame(&mut app, &ctx, size, vec![]);
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let node = update_node(&out, Role::SpinButton, field);
+            let limits = if field == resources {
+                (1., 60.)
+            } else {
+                (5., 300.)
+            };
+            assert_eq!(
+                (node.min_numeric_value(), node.max_numeric_value()),
+                (Some(limits.0), Some(limits.1)),
+                "{field}"
+            );
+            let at = crate::widgets::tests::rect_of(&node);
+            click_at(&mut app, &ctx, size, at.center());
+            // Ganho o foco, o texto inteiro fica selecionado.
+            frame(&mut app, &ctx, size, vec![]);
+            frame(&mut app, &ctx, size, vec![egui::Event::Text(typed.into())]);
+            frame(&mut app, &ctx, size, vec![key(egui::Key::Enter)]);
+            frame(&mut app, &ctx, size, vec![]);
+            let (got, other) = if field == resources {
+                (app.draft.resource_seconds, (app.draft.api_seconds, 42))
+            } else {
+                (app.draft.api_seconds, (app.draft.resource_seconds, 7))
+            };
+            assert_eq!(got, want, "{field}: typed {typed}");
+            assert_eq!(other.0, other.1, "{field}: the other interval is untouched");
+            assert_eq!(app.config.resource_seconds, 2, "only the draft changes");
+        }
+    }
+
+    #[test]
+    fn changing_the_server_clears_the_token_the_human_session_and_the_watched_project() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let scope = crate::client::Scope {
+            workspace: "ws".into(),
+            project: "proj".into(),
+        };
+        let mut app = app_with_unsaved_draft();
+        app.draft.token = "segredo".into();
+        app.draft.human = Some(crate::auth::Session::for_test("sessao", "csrf"));
+        app.draft.proposal_watch = Some(scope.clone());
+        app.settings.tab = SettingsTab::Connection;
+        app.open_settings();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        frame(&mut app, &ctx, size, vec![]);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        // Outro campo (o contêiner) não limpa nada.
+        type_into(
             &mut app,
             &ctx,
-            [1320., 860.],
-            vec![comma(egui::Modifiers::NONE)],
+            &out,
+            Role::TextInput,
+            "Contêiner ai-memory",
+            "x",
         );
-        assert_eq!(app.page, Page::Overview, "a bare comma must not navigate");
-        frame(
+        assert_eq!(app.draft.container, "draft-aix", "precondition: typed");
+        assert_eq!(app.draft.token, "segredo");
+        assert!(app.draft.human.is_some());
+        assert_eq!(app.draft.proposal_watch, Some(scope));
+        assert!(app.settings_message.is_empty());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        type_into(
             &mut app,
             &ctx,
-            [1320., 860.],
-            vec![comma(egui::Modifiers::COMMAND)],
+            &out,
+            Role::TextInput,
+            "Servidor ai-memory",
+            "/",
         );
-        assert_eq!(app.page, Page::Settings, "Cmd/Ctrl + , must open Ajustes");
+        assert_eq!(app.draft.endpoint, "https://draft.example/");
+        assert_eq!(app.draft.token, "", "the token was for the old server");
+        assert!(app.draft.human.is_none(), "so was the human session");
+        assert_eq!(app.draft.proposal_watch, None, "and the watched project");
+        let message =
+            "Servidor alterado. Informe o token desse endereço ou use login humano após conectar.";
+        assert_eq!(app.settings_message, message);
+        // A mensagem se lê inteira no rodapé, em até duas linhas.
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let shown = widget_rect(&out, Role::Label, message);
+        let save = widget_rect(&out, Role::Button, "Salvar e conectar");
+        assert!(
+            (shown.center().y - save.center().y).abs() < 14. && shown.right() < save.left(),
+            "in the footer, beside Salvar: {shown:?} / {save:?}"
+        );
+        let galleys: Vec<_> = crate::widgets::tests::shapes(&out)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.text() == message => Some(t.galley),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(galleys.len(), 1);
+        assert!(
+            !galleys[0].elided && galleys[0].rows.len() <= 2,
+            "{} rows, cut {}",
+            galleys[0].rows.len(),
+            galleys[0].elided
+        );
+        assert_eq!(app.config.endpoint, "https://connected.example");
+        assert_eq!(
+            app.shared.generation.load(Ordering::Acquire),
+            0,
+            "nothing saved"
+        );
+    }
+
+    #[test]
+    fn saving_an_invalid_config_shows_the_error_and_does_not_reconnect() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let (mut app, ctx, out) = settings_open_on(SettingsTab::General);
+        // Inválida antes do clique: nada chega ao Keychain nem ao disco.
+        app.draft.endpoint = "  não é uma URL  ".into();
+        let save = widget_rect(&out, Role::Button, "Salvar e conectar");
+        click_at(&mut app, &ctx, size, save.center());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(app.settings_message, "URL do servidor inválida.");
+        widget_rect(&out, Role::Label, "URL do servidor inválida.");
+        assert_eq!(
+            app.shared.generation.load(Ordering::Acquire),
+            0,
+            "no reconnect"
+        );
+        assert_eq!(app.config.endpoint, "https://connected.example");
+        assert_eq!(app.draft.endpoint, "não é uma URL", "kept, trimmed, to fix");
+        assert!(app.settings.open, "the window stays to fix it");
+    }
+
+    #[test]
+    fn save_and_load_wait_while_review_login_or_admin_is_busy() {
+        use egui::accesskit::Role;
+        let load = format!("Carregar do {}", crate::platform::SECRET_STORE);
+        for busy in ["", "management", "authentication", "operations"] {
+            let (mut app, ctx, _) = settings_open_on(SettingsTab::Connection);
+            match busy {
+                "management" => app.management.busy = true,
+                "authentication" => app.authentication.busy = true,
+                "operations" => app.operations.busy = true,
+                _ => {}
+            }
+            let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+            let disabled = |name: &str| update_node(&out, Role::Button, name).is_disabled();
+            assert_eq!(disabled("Salvar e conectar"), !busy.is_empty(), "{busy:?}");
+            assert_eq!(disabled(&load), !busy.is_empty(), "{busy:?}");
+            assert!(
+                !disabled("Restaurar padrões"),
+                "{busy:?}: restoring only touches the draft"
+            );
+            app.settings.tab = SettingsTab::Account;
+            let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+            assert_eq!(
+                update_node(&out, Role::Button, "Entrar com sessão humana").is_disabled(),
+                !busy.is_empty(),
+                "{busy:?}: the login"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_defaults_resets_only_the_draft() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let (mut app, ctx, out) = settings_open_on(SettingsTab::Connection);
+        let restore = widget_rect(&out, Role::Button, "Restaurar padrões");
+        click_at(&mut app, &ctx, size, restore.center());
+        assert_eq!(app.draft.endpoint, Config::default().endpoint);
+        assert_eq!(app.draft.container, "ai-memory");
+        assert_eq!(
+            app.settings_message,
+            "Campos restaurados ao padrão. Clique em Salvar e conectar para aplicar."
+        );
+        assert_eq!(app.config.endpoint, "https://connected.example");
+        assert_eq!(app.shared.generation.load(Ordering::Acquire), 0);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(
+            update_node(&out, Role::TextInput, "Servidor ai-memory").value(),
+            Some(Config::default().endpoint.as_str())
+        );
+    }
+
+    thread_local! {
+        static SAVED_THEMES: std::cell::RefCell<Vec<Appearance>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    #[test]
+    fn a_theme_card_applies_at_once_saves_only_the_theme_and_does_not_reconnect() {
+        use egui::accesskit::{Role, Toggled};
+        let size = [1320., 860.];
+        let (mut app, ctx, _) = settings_open_on(SettingsTab::General);
+        app.save_theme = |theme| {
+            SAVED_THEMES.with(|saved| saved.borrow_mut().push(theme));
+            Ok(())
+        };
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::System,
+            "precondition"
+        );
+        assert!(ctx.style().visuals.dark_mode, "precondition: dark");
+        for (label, choice, dark) in [
+            ("Claro", Appearance::Light, false),
+            ("Escuro", Appearance::Dark, true),
+        ] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let card = widget_rect(&out, Role::RadioButton, label);
+            click_at(&mut app, &ctx, size, card.center());
+            assert_eq!(app.config.theme, choice);
+            assert_eq!(app.draft.theme, choice);
+            assert_eq!(app.shared.config.read().unwrap().theme, choice);
+            // O próximo `update` aplica antes de desenhar.
+            app.apply_theme(&ctx);
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(ctx.style().visuals.dark_mode, dark, "{label}");
+            for other in ["Sistema", "Claro", "Escuro"] {
+                assert_eq!(
+                    update_node(&out, Role::RadioButton, other).toggled(),
+                    Some(if other == label {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    }),
+                    "{label}: {other}"
+                );
+            }
+        }
+        // De novo o escolhido: nada a gravar.
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let card = widget_rect(&out, Role::RadioButton, "Escuro");
+        click_at(&mut app, &ctx, size, card.center());
+        assert_eq!(
+            SAVED_THEMES.with(|saved| saved.borrow().clone()),
+            [Appearance::Light, Appearance::Dark]
+        );
+        assert_eq!(app.shared.generation.load(Ordering::Acquire), 0);
+        assert_eq!(app.draft.endpoint, "https://draft.example");
+        assert_eq!(app.config.endpoint, "https://connected.example");
     }
 
     /// Nós do AccessKit com este papel e texto (o rótulo, ou o valor nos de
@@ -3584,7 +5265,7 @@ mod tests {
                 }
             }
         }
-        // "Abrir Ajustes" leva a Ajustes.
+        // "Abrir Ajustes" abre a janela de Ajustes, sem sair da página.
         let mut app = app_with_unsaved_draft();
         app.page = Page::Docker;
         app.api.error = Some("Falha ao conectar.".into());
@@ -3593,14 +5274,15 @@ mod tests {
         let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
         let open = widget_rect(&out, Role::Button, "Abrir Ajustes");
         click_at(&mut app, &ctx, [1320., 860.], open.center());
-        assert_eq!(app.page, Page::Settings);
+        assert!(app.settings.open);
+        assert_eq!(app.page, Page::Docker);
     }
 
     #[test]
     fn navigating_away_keeps_the_docker_search() {
         use egui::accesskit::Role;
         let size = [1320., 860.];
-        for away in ["Visão geral", "Ajustes"] {
+        for away in ["Visão geral", "Explorar"] {
             let mut app = app_with_unsaved_draft();
             app.page = Page::Docker;
             app.resources = docker_data();
@@ -3635,6 +5317,26 @@ mod tests {
             update_node(&out, Role::TextInput, "redis");
             assert_eq!(container_rows(&out).len(), 1, "{away}");
         }
+        // Ajustes abre a janela própria: a página e a busca ficam.
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        app.resources = docker_data();
+        *app.docker.search_mut() = "redis".into();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        click_at(
+            &mut app,
+            &ctx,
+            size,
+            widget_rect(&out, Role::Button, "Ajustes").center(),
+        );
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(app.settings.open);
+        assert_eq!(app.page, Page::Docker);
+        assert_eq!(app.docker.search_mut(), "redis");
+        update_node(&out, Role::TextInput, "redis");
+        assert_eq!(container_rows(&out).len(), 1);
     }
 
     /// A linha `name` da tabela da Visão geral ("nome · CPU …").
