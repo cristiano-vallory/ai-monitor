@@ -7,7 +7,10 @@ mod client;
 mod commands;
 mod console;
 mod docker;
+mod docker_ui;
+mod handoff_text;
 mod health;
+mod health_ui;
 mod keychain;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -19,15 +22,18 @@ mod menu_bar;
 mod model;
 mod monitor;
 mod operations_ui;
+mod overview_ui;
 mod platform;
 #[cfg(target_os = "linux")]
 mod portal;
 mod queries;
+mod sessions_ui;
 #[cfg(test)]
 mod test_support;
 mod theme;
 #[cfg(target_os = "linux")]
 mod tray;
+mod widgets;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version") {
@@ -49,6 +55,7 @@ fn main() -> eframe::Result {
             Ok(images) => resources.images = images,
             Err(e) => resources.inventory_error = Some(e),
         }
+        resources.docker_context = docker::context(&config.docker_binary);
         let api = api::collect(
             &config,
             &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

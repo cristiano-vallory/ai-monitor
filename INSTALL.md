@@ -125,7 +125,7 @@ Instale ou utilize seu servidor seguindo o [projeto ai-memory](https://github.co
 
 O endereço inicial do monitor é `http://127.0.0.1:49374` e o nome de contêiner é `ai-memory`. Esses valores são padrões genéricos, não detectam todas as instalações. Ajuste o endereço e o nome conforme seu ambiente.
 
-Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalação e informe-o na interface do monitor. A identidade autenticada limita quais projetos e handoffs podem ser vistos. Com permissão administrativa, a tela Administração avançada permite gerir usuários, grants e chaves; as operações exigem prévia e confirmação.
+Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalação e informe-o na interface do monitor. A identidade autenticada limita quais projetos e handoffs podem ser vistos. Com permissão administrativa, a página Administração permite gerir usuários, grants e chaves; as operações exigem prévia e confirmação.
 
 ## 4. Baixar, compilar e abrir
 
@@ -272,14 +272,15 @@ prévias. A administração exige autoridade apropriada; uma chave pessoal `aim_
 é User e não se torna root por pertencer a um administrador. Reconsolidação e
 embeddings dependem dos providers configurados no servidor e podem gerar cobrança.
 
-Abra **Administrar memória**, selecione o projeto, prepare uma operação, leia a
+Abra **Revisão** (propostas e handoffs) ou **Manutenção e backup** (manutenção,
+backup e restauração), selecione o projeto, prepare uma operação, leia a
 prévia e confirme o escopo. Backup e checkpoint globais usam a confirmação
 `GLOBAL`; reconsolidação usa `SESSAO <id>`. Nunca use dados reais para testar
 exclusão/manutenção. O [guia administrativo](docs/ADMINISTRATION.md) detalha
 permissões, limites, backups privados e resultados incertos após falhas de rede.
 
 
-## Administração avançada e serviço local (v0.5)
+## Administração e serviço local (v0.5)
 
 Não há ferramentas adicionais para login humano/Keychain. Em **Ajustes**, salve
 primeiro o endereço e entre com usuário/senha em **Autenticação humana**. Senha,
@@ -287,7 +288,7 @@ cookies e CSRF ficam apenas em memória. O botão de sair retorna explicitamente
 ao Bearer previamente configurado. Senhas temporárias podem exigir troca na
 mesma tela antes de acessar a administração.
 
-Para operação local, **Administração avançada → Serviço deste Mac** exige URL
+Para operação local, **Administração → Serviço deste Mac** exige URL
 loopback e configuração explícita. Docker precisa do CLI e, para atualizar, do
 plugin Compose v2 com suporte a `config --format json`, arquivo Compose único,
 serviço existente e backup privado. Contextos remotos e stacks com overrides

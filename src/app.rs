@@ -1,7 +1,6 @@
-use crate::{model::*, monitor::Shared, theme};
+use crate::{management_ui::Section, model::*, monitor::Shared, theme};
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
-use egui_extras::{Column, TableBuilder};
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::Ordering},
@@ -39,24 +38,42 @@ fn keychain_change<'a>(current: &'a Config, draft: &'a Config) -> KeychainChange
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Page {
     Overview,
-    Central,
-    Management,
-    Advanced,
     Sessions,
     Docker,
+    Health,
+    Explore,
+    Review,
+    Maintenance,
+    Admin,
     Settings,
 }
 impl Page {
-    /// Nome da página na lateral e na barra superior.
+    /// Nome da página na lateral.
     fn label(self) -> &'static str {
         match self {
             Page::Overview => "Visão geral",
-            Page::Central => "Central ai-memory",
-            Page::Management => "Administrar memória",
-            Page::Advanced => "Administração avançada",
             Page::Sessions => "Sessões e handoffs",
             Page::Docker => "Docker",
+            Page::Health => "Saúde",
+            Page::Explore => "Explorar",
+            Page::Review => "Revisão",
+            Page::Maintenance => "Manutenção e backup",
+            Page::Admin => "Administração",
             Page::Settings => "Ajustes",
+        }
+    }
+    /// Título na barra superior.
+    fn title(self) -> &'static str {
+        match self {
+            Page::Health => "Saúde do ai-memory",
+            page => page.label(),
+        }
+    }
+    /// A página que mostra esta parte da `Management`.
+    fn of(section: Section) -> Self {
+        match section {
+            Section::Review => Page::Review,
+            Section::Maintenance => Page::Maintenance,
         }
     }
 }
@@ -86,18 +103,12 @@ pub struct MonitorApp {
     resources: ResourceSnapshot,
     api: ApiSnapshot,
     page: Page,
-    docker_tab: usize,
-    session_tab: usize,
-    handoff_page: usize,
-    filter: String,
-    scope: String,
-    only_open: bool,
-    running_only: bool,
+    sessions: crate::sessions_ui::Sessions,
+    docker: crate::docker_ui::Docker,
     history: VecDeque<Sample>,
-    minutes: i64,
+    overview: crate::overview_ui::Overview,
     last_sync: Instant,
     settings_message: String,
-    selected_container: Option<String>,
     paused: bool,
     central: crate::console::Console,
     health: crate::health::Snapshot,
@@ -107,6 +118,9 @@ pub struct MonitorApp {
     /// Último `SetTheme` enviado à janela nativa; `None` = nada enviado ao
     /// contexto atual.
     window_theme: Option<egui::SystemTheme>,
+    /// `Shared::health_served` lido junto com `health`: até que pedido de
+    /// "Atualizar agora" a saúde na tela atende.
+    health_served: u64,
 }
 
 impl MonitorApp {
@@ -163,6 +177,7 @@ impl MonitorApp {
             authentication: crate::auth::Panel::new(),
             central,
             health: Default::default(),
+            health_served: 0,
             #[cfg(target_os = "macos")]
             menu_bar: None,
             shared,
@@ -171,18 +186,12 @@ impl MonitorApp {
             resources: Default::default(),
             api: Default::default(),
             page: Page::Overview,
-            docker_tab: 0,
-            session_tab: 0,
-            handoff_page: 0,
-            filter: String::new(),
-            scope: String::new(),
-            only_open: true,
-            running_only: false,
+            sessions: Default::default(),
+            docker: Default::default(),
             history: VecDeque::new(),
-            minutes: 5,
+            overview: Default::default(),
             last_sync: Instant::now() - Duration::from_secs(1),
             settings_message: String::new(),
-            selected_container: None,
             paused: false,
         }
     }
@@ -213,7 +222,12 @@ impl MonitorApp {
             return;
         }
         self.last_sync = Instant::now();
-        self.health = self.shared.health.lock().unwrap().clone();
+        {
+            // O coletor grava as duas sob este lock.
+            let health = self.shared.health.lock().unwrap();
+            self.health = health.clone();
+            self.health_served = self.shared.health_served.load(Ordering::Acquire);
+        }
         let mut resources_changed = false;
         {
             let incoming = self.shared.resources.lock().unwrap();
@@ -301,11 +315,21 @@ impl MonitorApp {
                     }
                 }
                 let badge = handoff_badge(&self.api);
+                let pending = review_badge(&self.health, &self.config, Utc::now());
                 for (title, pages) in [
-                    ("Monitorar", [Page::Overview, Page::Sessions, Page::Docker]),
+                    (
+                        "Monitorar",
+                        &[Page::Overview, Page::Sessions, Page::Docker][..],
+                    ),
                     (
                         "ai-memory",
-                        [Page::Central, Page::Management, Page::Advanced],
+                        &[
+                            Page::Health,
+                            Page::Explore,
+                            Page::Review,
+                            Page::Maintenance,
+                            Page::Admin,
+                        ][..],
                     ),
                 ] {
                     if !compact {
@@ -325,14 +349,14 @@ impl MonitorApp {
                                 );
                             });
                     }
-                    for page in pages {
+                    for &page in pages {
                         let aside = match page {
                             Page::Sessions => badge.clone().map(Aside::Count),
+                            Page::Review => pending.clone().map(Aside::Warning),
                             _ => None,
                         };
                         if nav_item(ui, page, self.page == page, compact, aside).clicked() {
                             self.page = page;
-                            self.filter.clear();
                         }
                     }
                     ui.add_space(10.);
@@ -347,7 +371,6 @@ impl MonitorApp {
                     );
                     if settings.clicked() {
                         self.page = Page::Settings;
-                        self.filter.clear();
                     }
                     // Fontes, de baixo para cima, entre bordas de 10 px e a linha.
                     ui.add_space(16.);
@@ -428,7 +451,7 @@ impl MonitorApp {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(self.page.label())
+                                    RichText::new(self.page.title())
                                         .size(15.)
                                         .family(theme::semibold()),
                                 )
@@ -473,699 +496,33 @@ impl MonitorApp {
             });
     }
 
-    fn notices(&self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
+    /// Avisos globais, no topo de todas as páginas: Docker e ai-memory fora
+    /// (Bad; o do ai-memory leva a Ajustes) e dados parciais da API (Warn).
+    fn notices(&mut self, ui: &mut egui::Ui) {
+        use crate::widgets::{Tone, strip};
         if let Some(e) = &self.resources.docker_error {
-            notice(ui, e, p.warn);
+            strip(ui, Tone::Bad, "Docker indisponível.", e, None);
         }
-        if let Some(e) = &self.api.error {
-            notice(ui, e, p.warn);
+        if let Some(e) = &self.api.error
+            && strip(
+                ui,
+                Tone::Bad,
+                "Sem conexão com o ai-memory.",
+                e,
+                Some("Abrir Ajustes"),
+            )
+            .is_some_and(|r| r.clicked())
+        {
+            self.page = Page::Settings;
         }
         if !self.api.errors.is_empty() {
-            notice(
+            strip(
                 ui,
-                &format!(
-                    "Dados parciais: {} aviso(s). Consulte Ajustes.",
-                    self.api.errors.len()
-                ),
-                p.warn,
+                Tone::Warn,
+                "Dados parciais:",
+                &format!("{} aviso(s). Consulte Ajustes.", self.api.errors.len()),
+                None,
             );
-        }
-    }
-
-    fn ai_cards(&self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        let usage = self.resources.ai_usage(&self.config.container);
-        ui.columns(4, |cols| {
-            metric(
-                &mut cols[0],
-                "CPU · AI-MEMORY",
-                usage.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
-                "100% = um núcleo",
-                p.acc,
-            );
-            metric(
-                &mut cols[1],
-                "MEMÓRIA · AI-MEMORY",
-                usage.as_ref().map(|u| bytes(u.memory)),
-                "Uso atual do serviço",
-                p.series2,
-            );
-            metric(
-                &mut cols[2],
-                "THREADS / TAREFAS",
-                usage.as_ref().and_then(|u| u.tasks.map(number_u64)),
-                "Processos + threads Linux",
-                p.text,
-            );
-            metric(
-                &mut cols[3],
-                "HANDOFFS ABERTOS",
-                self.api.at.map(|_| {
-                    format!(
-                        "{}{}",
-                        number(self.api.handoff_total.unwrap_or(self.api.handoffs.len())),
-                        if self.api.handoff_total.is_some() {
-                            ""
-                        } else {
-                            "+"
-                        }
-                    )
-                }),
-                "Visíveis para esta conexão",
-                p.warn,
-            );
-        });
-    }
-
-    fn overview(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        self.ai_cards(ui);
-        ui.add_space(14.);
-        ui.horizontal(|ui| {
-            section(ui, "Histórico de recursos");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                for n in [10, 5, 1] {
-                    ui.selectable_value(&mut self.minutes, n, format!("{n} min"));
-                }
-            });
-        });
-        let interval = self.config.resource_seconds;
-        ui.columns(2, |cols| {
-            chart(
-                &mut cols[0],
-                "CPU",
-                &self.history,
-                self.minutes,
-                false,
-                interval,
-            );
-            chart(
-                &mut cols[1],
-                "Memória",
-                &self.history,
-                self.minutes,
-                true,
-                interval,
-            );
-        });
-        ui.add_space(14.);
-        let total = self.resources.docker_total();
-        ui.columns(4, |cols| {
-            metric(
-                &mut cols[0],
-                "CPU · CONTÊINERES",
-                total.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
-                "Soma dos contêineres ativos",
-                p.series2,
-            );
-            metric(
-                &mut cols[1],
-                "MEMÓRIA · CONTÊINERES",
-                total.as_ref().map(|u| bytes(u.memory)),
-                "Inclui o ai-memory",
-                p.series2,
-            );
-            metric(
-                &mut cols[2],
-                "CONTÊINERES ATIVOS",
-                self.resources
-                    .at
-                    .filter(|_| self.resources.docker_error.is_none())
-                    .map(|_| {
-                        format!(
-                            "{} / {}",
-                            self.resources
-                                .containers
-                                .iter()
-                                .filter(|c| c.state == "running")
-                                .count(),
-                            self.resources.containers.len()
-                        )
-                    }),
-                "Em execução / existentes",
-                p.acc,
-            );
-            metric(
-                &mut cols[3],
-                "SESSÕES ABERTAS",
-                self.api.open_session_links().map(number_u64),
-                "Vínculos por projeto (API)",
-                p.text,
-            );
-        });
-        ui.add_space(14.);
-        ui.horizontal(|ui| {
-            section(ui, "Contêineres em execução");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Ver todos").clicked() {
-                    self.page = Page::Docker;
-                }
-            });
-        });
-        let running: Vec<_> = self
-            .resources
-            .containers
-            .iter()
-            .filter(|c| c.state == "running")
-            .collect();
-        let prev_selected = self.selected_container.clone();
-        container_table(ui, &running, &mut self.selected_container, 180.);
-        if self.selected_container != prev_selected && self.selected_container.is_some() {
-            self.page = Page::Docker;
-            self.docker_tab = 0;
-        }
-        ui.add_space(16.);
-        panel(ui).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("ESTE MAC").small().color(p.text2));
-                ui.label(format!(
-                    "CPU {}%",
-                    decimal(self.resources.host_cpu.into(), 1)
-                ));
-                ui.separator();
-                ui.label(format!(
-                    "Memória {} / {}",
-                    bytes(self.resources.host_memory),
-                    bytes(self.resources.host_total)
-                ));
-                ui.separator();
-                ui.label(format!("{} projetos", number(self.api.projects.len())));
-            });
-        });
-    }
-
-    fn sessions(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        let previous_filter = (self.filter.clone(), self.scope.clone());
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut self.session_tab,
-                0,
-                format!(
-                    "Handoffs abertos ({})",
-                    self.api.handoff_total.map(number).unwrap_or_else(
-                        || if self.api.at.is_some() {
-                            format!("{}+", number(self.api.handoffs.len()))
-                        } else {
-                            "—".into()
-                        }
-                    )
-                ),
-            );
-            ui.selectable_value(&mut self.session_tab, 1, "Sessões");
-            ui.selectable_value(&mut self.session_tab, 2, "Projetos");
-        });
-        ui.add_space(8.);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Buscar projeto, agente ou ID…")
-                    .desired_width(280.),
-            );
-            egui::ComboBox::from_id_salt("scope")
-                .selected_text(if self.scope.is_empty() {
-                    "Todos os projetos"
-                } else {
-                    &self.scope
-                })
-                .width(240.)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.scope, String::new(), "Todos os projetos");
-                    for p in &self.api.projects {
-                        let scope = format!("{} / {}", p.workspace_name, p.project_name);
-                        ui.selectable_value(&mut self.scope, scope.clone(), scope);
-                    }
-                });
-            if self.session_tab == 1 {
-                ui.checkbox(&mut self.only_open, "Só abertas");
-            }
-        });
-        ui.add_space(8.);
-        if previous_filter != (self.filter.clone(), self.scope.clone()) {
-            self.handoff_page = 0;
-        }
-        let needle = self.filter.to_lowercase();
-        if self.session_tab == 0 {
-            ui.label(
-                RichText::new(
-                    "Handoffs permanecem abertos até serem aceitos. Esta tela apenas consulta.",
-                )
-                .small()
-                .color(p.text2),
-            );
-            if !self.api.warnings.is_empty() {
-                ui.label(
-                    RichText::new(handoff_warning_message(
-                        self.api.handoffs.len(),
-                        self.api.handoff_total,
-                    ))
-                    .color(p.warn),
-                );
-            }
-            let hs: Vec<_> = self
-                .api
-                .handoffs
-                .iter()
-                .filter(|h| handoff_matches(h, &self.scope, &needle))
-                .collect();
-            if hs.is_empty() {
-                empty(
-                    ui,
-                    "Nenhum handoff aberto",
-                    if self.api.at.is_some() {
-                        "Nenhum resultado visível para os filtros e as permissões atuais."
-                    } else {
-                        "Aguardando a consulta ao ai-memory."
-                    },
-                );
-            }
-            let pages = hs.len().div_ceil(20).max(1);
-            self.handoff_page = self.handoff_page.min(pages - 1);
-            if !hs.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} encontrados · página {} de {}",
-                            number(hs.len()),
-                            self.handoff_page + 1,
-                            pages
-                        ))
-                        .small()
-                        .color(p.text2),
-                    );
-                    if ui
-                        .add_enabled(self.handoff_page > 0, egui::Button::new("Anterior"))
-                        .clicked()
-                    {
-                        self.handoff_page -= 1;
-                    }
-                    if ui
-                        .add_enabled(self.handoff_page + 1 < pages, egui::Button::new("Próxima"))
-                        .clicked()
-                    {
-                        self.handoff_page += 1;
-                    }
-                });
-            }
-            for h in hs.into_iter().skip(self.handoff_page * 20).take(20) {
-                panel(ui).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        badge(ui, "ABERTO", p.warn);
-                        ui.label(RichText::new(&h.scope).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(date(&h.at)).small().color(p.text2));
-                        });
-                    });
-                    ui.label(
-                        RichText::new(format!("{} · {}", h.agent, h.id))
-                            .small()
-                            .color(p.text2),
-                    );
-                    if h.redacted {
-                        ui.label("Resumo restrito pelas permissões do servidor.");
-                    } else {
-                        ui.label(h.summary.as_deref().unwrap_or("Sem resumo."));
-                    }
-                    if let Some(steps) = &h.next_steps
-                        && !steps.is_empty()
-                    {
-                        egui::CollapsingHeader::new("Próximos passos")
-                            .id_salt(&h.id)
-                            .show(ui, |ui| {
-                                for step in steps {
-                                    ui.label(format!("• {step}"));
-                                }
-                            });
-                    }
-                    if ui.small_button("Copiar ID").clicked() {
-                        ui.ctx().copy_text(h.id.clone());
-                    }
-                });
-                ui.add_space(4.);
-            }
-        } else if self.session_tab == 1 {
-            ui.label(RichText::new("Últimas 100 sessões por projeto. Aberta = sem encerramento registrado; não comprova atividade atual. Vínculos entre projetos podem se repetir.").small().color(p.text2));
-            let ss: Vec<_> = self
-                .api
-                .sessions
-                .iter()
-                .filter(|s| {
-                    (!self.only_open || s.ended_at.is_none())
-                        && (self.scope.is_empty() || s.scope == self.scope)
-                        && format!("{} {} {}", s.scope, s.agent_kind, s.session_id)
-                            .to_lowercase()
-                            .contains(&needle)
-                })
-                .collect();
-            ui.label(
-                RichText::new(format!("{} registros", number(ss.len())))
-                    .small()
-                    .color(p.text2),
-            );
-            TableBuilder::new(ui)
-                .striped(true)
-                .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::initial(100.))
-                .column(Column::remainder().at_least(180.))
-                .column(Column::initial(90.))
-                .column(Column::initial(90.))
-                .column(Column::initial(140.))
-                .column(Column::initial(75.))
-                .header(30., |mut h| {
-                    for title in [
-                        "ESTADO",
-                        "PROJETO / SESSÃO",
-                        "AGENTE",
-                        "EVENTOS",
-                        "INÍCIO",
-                        "ID",
-                    ] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(54., ss.len(), |mut row| {
-                        let s = ss[row.index()];
-                        row.col(|ui| {
-                            badge(
-                                ui,
-                                if s.ended_at.is_none() {
-                                    "ABERTA"
-                                } else {
-                                    "ENCERRADA"
-                                },
-                                if s.ended_at.is_none() { p.acc } else { p.text2 },
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(short_project(&s.scope)).on_hover_text(&s.scope);
-                                ui.label(
-                                    RichText::new(short_id(&s.session_id))
-                                        .small()
-                                        .color(p.text2),
-                                )
-                                .on_hover_text(s.cwd.as_deref().unwrap_or(""));
-                            });
-                        });
-                        row.col(|ui| {
-                            ui.label(&s.agent_kind);
-                        });
-                        row.col(|ui| {
-                            ui.label(number_u64(s.observation_count));
-                        });
-                        row.col(|ui| {
-                            ui.label(date(&s.started_at));
-                        });
-                        row.col(|ui| {
-                            if ui.small_button("Copiar").clicked() {
-                                ui.ctx().copy_text(s.session_id.clone());
-                            }
-                        });
-                    });
-                });
-        } else {
-            ui.label(RichText::new("Atividade = último evento ou atualização informado pela API. Contagens por projeto podem compartilhar sessões.").small().color(p.text2));
-            TableBuilder::new(ui)
-                .striped(true)
-                .column(Column::remainder().at_least(200.))
-                .column(Column::initial(70.))
-                .column(Column::initial(80.))
-                .column(Column::initial(100.))
-                .column(Column::initial(150.))
-                .header(30., |mut h| {
-                    for title in ["PROJETO", "PÁGINAS", "ABERTAS", "EVENTOS", "ATIVIDADE"] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|mut body| {
-                    for p in self.api.projects.iter().filter(|p| {
-                        let scope = format!("{} / {}", p.workspace_name, p.project_name);
-                        (self.scope.is_empty() || self.scope == scope)
-                            && scope.to_lowercase().contains(&needle)
-                    }) {
-                        body.row(36., |mut row| {
-                            row.col(|ui| {
-                                ui.label(&p.project_name).on_hover_text(&p.workspace_name);
-                            });
-                            row.col(|ui| {
-                                ui.label(number_u64(p.page_count));
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    p.open_session_count.map(number_u64).unwrap_or("—".into()),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.label(p.observation_count.map(number_u64).unwrap_or("—".into()));
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    p.last_activity.as_deref().map(date).unwrap_or("—".into()),
-                                );
-                            });
-                        });
-                    }
-                });
-        }
-    }
-
-    fn docker(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        let total = self.resources.docker_total();
-        ui.columns(4, |cols| {
-            metric(
-                &mut cols[0],
-                "CPU · CONTÊINERES",
-                total.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
-                "100% = um núcleo",
-                p.series2,
-            );
-            metric(
-                &mut cols[1],
-                "MEMÓRIA · CONTÊINERES",
-                total.as_ref().map(|u| bytes(u.memory)),
-                "Cache inativo excluído pelo Docker",
-                p.series2,
-            );
-            metric(
-                &mut cols[2],
-                "THREADS / TAREFAS",
-                total.as_ref().and_then(|u| u.tasks.map(number_u64)),
-                "Processos + threads Linux",
-                p.text,
-            );
-            metric(
-                &mut cols[3],
-                "IMAGENS LOCAIS",
-                self.resources
-                    .images_at
-                    .map(|_| number(self.resources.images.len())),
-                "IDs únicos; tags agrupadas",
-                p.acc,
-            );
-        });
-        ui.add_space(16.);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.docker_tab, 0, "Contêineres");
-            ui.selectable_value(&mut self.docker_tab, 1, "Imagens");
-            ui.selectable_value(
-                &mut self.docker_tab,
-                2,
-                format!("Processos no {}", crate::platform::HOST),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Buscar nome, imagem ou ID…")
-                    .desired_width(300.),
-            );
-            if self.docker_tab == 0 {
-                ui.checkbox(&mut self.running_only, "Só em execução");
-            }
-        });
-        ui.add_space(6.);
-        let needle = self.filter.to_lowercase();
-        if self.docker_tab == 0 {
-            let cs: Vec<_> = self
-                .resources
-                .containers
-                .iter()
-                .filter(|c| {
-                    (!self.running_only || c.state == "running")
-                        && format!("{} {} {}", c.name, c.image, c.id)
-                            .to_lowercase()
-                            .contains(&needle)
-                })
-                .collect();
-            container_table(ui, &cs, &mut self.selected_container, 420.);
-            if let Some(c) = cs
-                .iter()
-                .copied()
-                .find(|c| Some(&c.id) == self.selected_container.as_ref())
-            {
-                ui.add_space(10.);
-                panel(ui).show(ui, |ui| {
-                    section(ui, &c.name);
-                    ui.label(RichText::new(&c.image).color(p.text2));
-                    ui.label(format!("Status: {}", c.status));
-                    ui.label(format!(
-                        "Portas: {}",
-                        if c.ports.is_empty() { "—" } else { &c.ports }
-                    ));
-                    ui.label(format!(
-                        "Rede acumulada: {}  ·  Disco acumulado: {}",
-                        c.net_io, c.block_io
-                    ));
-                    if let Some(u) = &c.usage {
-                        ui.label(format!(
-                            "Limite de memória do contêiner: {}",
-                            bytes(u.limit)
-                        ));
-                    }
-                    if c.name == self.config.container {
-                        ui.separator();
-                        ui.label(RichText::new("Processos dentro do ai-memory").strong());
-                        if let Some(e) = &self.resources.ai_process_error {
-                            ui.label(e);
-                        }
-                        for (pid, name, threads) in &self.resources.ai_processes {
-                            ui.label(format!(
-                                "PID {pid}    {name}    {} threads",
-                                number_u64(*threads)
-                            ));
-                        }
-                    }
-                    if ui.small_button("Copiar ID").clicked() {
-                        ui.ctx().copy_text(c.id.clone());
-                    }
-                });
-            }
-        } else if self.docker_tab == 1 {
-            if let Some(e) = &self.resources.inventory_error {
-                notice(ui, e, p.warn);
-            }
-            ui.label(
-                RichText::new(format!(
-                    "Inventário {} · imagens associadas a contêineres parados continuam em uso.",
-                    age(self.resources.images_at)
-                ))
-                .small()
-                .color(p.text2),
-            );
-            ui.label(RichText::new("Tamanho lógico por imagem; camadas compartilhadas impedem somar estes valores como espaço real em disco.").small().color(p.text2));
-            let images: Vec<_> = self
-                .resources
-                .images
-                .iter()
-                .filter(|i| {
-                    format!("{} {}", i.tags.join(" "), i.id)
-                        .to_lowercase()
-                        .contains(&needle)
-                })
-                .collect();
-            TableBuilder::new(ui)
-                .striped(true)
-                .resizable(true)
-                .column(Column::remainder().at_least(220.))
-                .column(Column::initial(100.))
-                .column(Column::initial(120.))
-                .column(Column::initial(200.))
-                .header(30., |mut h| {
-                    for title in ["IMAGEM / TAGS", "TAMANHO", "USO", "CONTÊINERES"] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(54., images.len(), |mut row| {
-                        let i = images[row.index()];
-                        row.col(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(i.tags.first().map(String::as_str).unwrap_or("<sem tag>"))
-                                    .on_hover_text(i.tags.join("\n"));
-                                ui.label(RichText::new(short_id(&i.id)).small().color(p.text2));
-                            });
-                        });
-                        row.col(|ui| {
-                            ui.label(bytes(i.size));
-                        });
-                        row.col(|ui| {
-                            badge(
-                                ui,
-                                if i.running > 0 {
-                                    "EM EXECUÇÃO"
-                                } else if !i.containers.is_empty() {
-                                    "ASSOCIADA"
-                                } else {
-                                    "SEM VÍNCULO"
-                                },
-                                if i.running > 0 { p.acc } else { p.text2 },
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.label(if i.containers.is_empty() {
-                                "—".into()
-                            } else {
-                                i.containers.join(", ")
-                            });
-                        });
-                    });
-                });
-        } else {
-            ui.label(
-                RichText::new(crate::platform::PROCESSES_CAPTION)
-                    .small()
-                    .color(p.text2),
-            );
-            TableBuilder::new(ui)
-                .striped(true)
-                .column(Column::initial(80.))
-                .column(Column::remainder())
-                .column(Column::initial(90.))
-                .column(Column::initial(110.))
-                .column(Column::initial(90.))
-                .header(30., |mut h| {
-                    for title in ["PID", "PROCESSO", "CPU", "MEMÓRIA RSS", "THREADS"] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|mut body| {
-                    for p in self
-                        .resources
-                        .processes
-                        .iter()
-                        .filter(|p| process_matches(p, &needle))
-                    {
-                        body.row(36., |mut row| {
-                            row.col(|ui| {
-                                ui.label(p.pid.to_string());
-                            });
-                            row.col(|ui| {
-                                ui.label(&p.name).on_hover_text(&p.group);
-                            });
-                            row.col(|ui| {
-                                ui.label(format!("{}%", decimal(p.usage.cpu, 1)));
-                            });
-                            row.col(|ui| {
-                                ui.label(bytes(p.usage.memory));
-                            });
-                            row.col(|ui| {
-                                ui.label(p.usage.tasks.map(number_u64).unwrap_or("—".into()));
-                            });
-                        });
-                    }
-                });
         }
     }
 
@@ -1183,9 +540,8 @@ impl MonitorApp {
         self.history.clear();
         self.resources = Default::default();
         self.api = Default::default();
-        self.scope.clear();
-        self.selected_container = None;
-        self.handoff_page = 0;
+        self.sessions.reset();
+        self.docker.reset();
         self.paused = false;
         self.last_sync = Instant::now() - Duration::from_secs(1);
     }
@@ -1271,6 +627,16 @@ impl MonitorApp {
             if let Some(e)=&self.resources.inventory_error{ui.label(RichText::new(e).color(p.warn));}
         });
     }
+    /// Destino de `shared.navigation` (barra de menus e bandeja): 1 = Saúde,
+    /// 2 = Revisão, 3 = Administração; o resto não navega.
+    fn navigate(&mut self, code: u8) {
+        self.page = match code {
+            1 => Page::Health,
+            2 => Page::Review,
+            3 => Page::Admin,
+            _ => return,
+        };
+    }
     /// Um frame da janela: lateral, barras e a página. Sem coleta nem
     /// navegação externa, para rodar sem janela nos testes.
     fn ui(&mut self, ctx: &egui::Context) {
@@ -1288,21 +654,73 @@ impl MonitorApp {
             )
             .show(ctx, |ui| {
                 self.notices(ui);
-                // Na largura mínima, tabelas e linhas de Sessões e Docker
-                // passam da área: rolam na horizontal em vez de cortar.
+                // Sessões e Docker controlam a própria rolagem (listas,
+                // detalhe, inspetor) e cabem na largura.
+                if self.page == Page::Sessions {
+                    if self.sessions.show(ui, &self.api, Utc::now()) {
+                        self.management.open_handoffs();
+                        self.page = Page::Review;
+                    }
+                    return;
+                }
+                if self.page == Page::Docker {
+                    self.docker
+                        .show(ui, &self.resources, &self.config.container, Utc::now());
+                    return;
+                }
+                // Na largura mínima, o que passar da área rola na horizontal
+                // em vez de cortar.
                 egui::ScrollArea::both()
                     .id_salt("main-scroll")
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.page {
-                            Page::Overview => self.overview(ui),
-                            Page::Management => {
-                                ui.add_enabled_ui(
-                                    !self.authentication.busy && !self.operations.busy,
-                                    |ui| self.management.show(ui, &self.shared, &self.api.projects),
-                                );
+                            Page::Overview => {
+                                use crate::overview_ui::{Data, Go};
+                                let data = Data {
+                                    resources: &self.resources,
+                                    history: &self.history,
+                                    api: &self.api,
+                                    health: &self.health,
+                                    config: &self.config,
+                                    now: Utc::now(),
+                                };
+                                match self.overview.show(ui, &data) {
+                                    Some(Go::Health) => self.page = Page::Health,
+                                    Some(Go::Sessions) => self.page = Page::Sessions,
+                                    Some(Go::Docker(id)) => {
+                                        self.page = Page::Docker;
+                                        if let Some(id) = id {
+                                            self.docker.open(&id);
+                                        }
+                                    }
+                                    None => {}
+                                }
                             }
-                            Page::Advanced => {
+                            Page::Review | Page::Maintenance => {
+                                let section = if self.page == Page::Review {
+                                    Section::Review
+                                } else {
+                                    Section::Maintenance
+                                };
+                                let go = ui
+                                    .add_enabled_ui(
+                                        !self.authentication.busy && !self.operations.busy,
+                                        |ui| {
+                                            self.management.show(
+                                                ui,
+                                                &self.shared,
+                                                &self.api.projects,
+                                                section,
+                                            )
+                                        },
+                                    )
+                                    .inner;
+                                if let Some(section) = go {
+                                    self.page = Page::of(section);
+                                }
+                            }
+                            Page::Admin => {
                                 ui.add_enabled_ui(
                                     !self.authentication.busy && !self.management.busy,
                                     |ui| {
@@ -1310,14 +728,20 @@ impl MonitorApp {
                                     },
                                 );
                             }
-                            Page::Central => self.central.show(
+                            Page::Health => crate::health_ui::show(
                                 ui,
                                 &self.shared,
-                                &self.api.projects,
                                 &self.health,
+                                self.shared.health_asked.load(Ordering::Acquire)
+                                    > self.health_served,
+                                self.paused,
+                                Utc::now(),
                             ),
-                            Page::Sessions => self.sessions(ui),
-                            Page::Docker => self.docker(ui),
+                            Page::Explore => {
+                                self.central.show(ui, &self.shared, &self.api.projects)
+                            }
+                            // Mostradas acima, fora desta rolagem.
+                            Page::Sessions | Page::Docker => {}
                             Page::Settings => self.settings(ui),
                         }
                     });
@@ -1335,12 +759,7 @@ impl eframe::App for MonitorApp {
         self.management.poll(&self.shared);
         self.operations.poll(&self.shared);
         ctx.request_repaint_after(Duration::from_secs(1));
-        match self.shared.navigation.swap(0, Ordering::AcqRel) {
-            1 => self.page = Page::Central,
-            2 => self.page = Page::Management,
-            3 => self.page = Page::Advanced,
-            _ => {}
-        }
+        self.navigate(self.shared.navigation.swap(0, Ordering::AcqRel));
         #[cfg(target_os = "macos")]
         if let Some(menu_bar) = &self.menu_bar {
             if ctx.input(|i| i.viewport().close_requested()) {
@@ -1379,37 +798,11 @@ fn section(ui: &mut egui::Ui, text: &str) {
             .family(theme::semibold()),
     );
 }
-fn table_head(ui: &mut egui::Ui, text: &str) {
-    let p = theme::palette(ui.visuals());
-    ui.label(RichText::new(text).size(10.5).color(p.text2));
-}
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(text.to_owned(), egui::FontId::proportional(10.0), color);
-    let (rect, response) =
-        ui.allocate_exact_size(galley.size() + Vec2::new(14.0, 8.0), egui::Sense::hover());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
-    ui.painter()
-        .rect_filled(rect, 4.0, color.gamma_multiply(0.12));
-    ui.painter()
-        .galley(rect.min + Vec2::new(7.0, 4.0), galley, color);
-}
-/// Texto em uma linha só, com reticências se passar de `width`.
-fn one_line(
-    ui: &egui::Ui,
-    text: &str,
-    font: egui::FontId,
-    color: Color32,
-    width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
-    ui.painter().layout_job(job)
-}
 /// O que fica à direita do rótulo de um item da lateral.
 enum Aside {
     Count(String),
+    /// Contador que pede atenção (warn).
+    Warning(String),
     Shortcut(&'static str),
 }
 /// Item da lateral: ícone, rótulo numa linha só e, à direita, o contador ou o
@@ -1451,16 +844,17 @@ fn nav_item(
     let mut right = rect.right() - 10.;
     match aside {
         Some(Aside::Count(count)) => {
-            let galley =
-                painter.layout_no_wrap(count, egui::FontId::new(11., theme::semibold()), p.text2);
-            let size = Vec2::new((galley.size().x + 12.).max(18.), galley.size().y + 2.);
-            let pill = egui::Rect::from_min_size(
-                egui::pos2(right - size.x, rect.center().y - size.y / 2.),
-                size,
-            );
-            painter.rect_filled(pill, 9., p.line);
-            painter.galley(pill.center() - galley.size() / 2., galley, p.text2);
-            right = pill.left() - 8.;
+            right = count_pill(painter, right, rect, count, p.line, p.text2)
+        }
+        Some(Aside::Warning(count)) => {
+            right = count_pill(
+                painter,
+                right,
+                rect,
+                count,
+                crate::widgets::tone(p.warn, 0.16),
+                p.warn,
+            )
         }
         Some(Aside::Shortcut(keys)) => {
             let galley =
@@ -1480,7 +874,7 @@ fn nav_item(
         egui::FontFamily::Proportional
     };
     let left = icon.right() + 10.;
-    let galley = one_line(
+    let galley = crate::widgets::one_line(
         ui,
         label,
         egui::FontId::new(13., family),
@@ -1498,6 +892,25 @@ fn nav_item(
     } else {
         response
     }
+}
+/// Pílula de contador encostada em `right`; devolve onde o rótulo termina.
+fn count_pill(
+    painter: &egui::Painter,
+    right: f32,
+    row: egui::Rect,
+    count: String,
+    fill: Color32,
+    color: Color32,
+) -> f32 {
+    let galley = painter.layout_no_wrap(count, egui::FontId::new(11., theme::semibold()), color);
+    let size = Vec2::new((galley.size().x + 12.).max(18.), galley.size().y + 2.);
+    let pill = egui::Rect::from_min_size(
+        egui::pos2(right - size.x, row.center().y - size.y / 2.),
+        size,
+    );
+    painter.rect_filled(pill, 9., fill);
+    painter.galley(pill.center() - galley.size() / 2., galley, color);
+    pill.left() - 8.
 }
 /// Ícones de 16 px da lateral, a partir dos paths de 24 unidades do artboard
 /// (Sidebar.dc.html), em traço de 1,8 na mesma escala.
@@ -1532,7 +945,7 @@ fn paint_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: Colo
             line(&[(3., 7.5), (3., 16.5), (12., 21.), (21., 16.5), (21., 7.5)]);
             line(&[(12., 12.), (12., 21.)]);
         }
-        Page::Central => line(&[
+        Page::Health => line(&[
             (2., 13.),
             (6., 13.),
             (8.5, 7.),
@@ -1540,12 +953,22 @@ fn paint_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: Colo
             (15.5, 11.),
             (22., 11.),
         ]),
-        Page::Management => {
+        Page::Explore => {
+            painter.circle_stroke(at((11., 11.)), 7. * scale, stroke);
+            line(&[(20., 20.), (16., 16.)]);
+        }
+        Page::Review => {
+            for y in [6., 12., 18.] {
+                line(&[(10., y), (20., y)]);
+                line(&[(4., y), (5.2, y + 1.2), (7.5, y - 1.)]);
+            }
+        }
+        Page::Maintenance => {
             closed(&[(4., 8.), (20., 8.), (20., 20.), (4., 20.)]);
             closed(&[(3., 4.), (21., 4.), (21., 8.), (3., 8.)]);
             line(&[(10., 12.), (14., 12.)]);
         }
-        Page::Advanced => {
+        Page::Admin => {
             // Escudo: as duas curvas do path amostradas em quartos.
             closed(&[
                 (12., 3.),
@@ -1613,7 +1036,7 @@ fn source(
     ui.painter().circle_filled(dot, 3.5, color);
     if !compact {
         let left = dot.x + 3.5 + 8.;
-        let galley = one_line(ui, label, font, p.text2, rect.right() - left);
+        let galley = crate::widgets::one_line(ui, label, font, p.text2, rect.right() - left);
         ui.painter().galley(
             egui::pos2(left, rect.center().y - galley.size().y / 2.),
             galley,
@@ -1733,52 +1156,12 @@ fn drag_window(response: &egui::Response) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
     }
 }
-fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.08))
-        .inner_margin(10)
-        .corner_radius(6.)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.label(RichText::new(text).small().color(color));
-        });
-    ui.add_space(4.);
-}
-fn empty(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    let p = theme::palette(ui.visuals());
-    panel(ui).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_space(30.);
-        ui.vertical_centered(|ui| {
-            ui.heading(title);
-            ui.label(RichText::new(subtitle).color(p.text2));
-        });
-        ui.add_space(30.);
-    });
-}
-fn metric(ui: &mut egui::Ui, title: &str, value: Option<String>, hint: &str, color: Color32) {
-    let p = theme::palette(ui.visuals());
-    panel(ui).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(title).size(10.5).color(p.text2));
-        ui.add_space(5.);
-        ui.label(
-            RichText::new(value.unwrap_or("—".into()))
-                .size(29.)
-                .color(color),
-        );
-        ui.label(RichText::new(hint).size(11.).color(p.text2));
-    });
-}
-fn number_u64(n: u64) -> String {
-    number(n as usize)
-}
 fn age(at: Option<DateTime<Utc>>) -> String {
     at.map(|a| ago((Utc::now() - a).num_seconds()))
         .unwrap_or("aguardando".into())
 }
 /// Idade de uma coleta em texto; negativa (relógio ajustado) conta como 0.
-fn ago(secs: i64) -> String {
+pub(crate) fn ago(secs: i64) -> String {
     let secs = secs.max(0) as usize;
     if secs < 60 {
         format!("há {} s", number(secs))
@@ -1855,6 +1238,21 @@ fn handoff_badge(api: &ApiSnapshot) -> Option<String> {
     })
 }
 
+/// Contador do item Revisão: propostas pendentes do projeto vigiado, com a
+/// mesma leitura e o mesmo texto da barra de menus e da bandeja; só quando há
+/// alguma.
+fn review_badge(
+    health: &crate::health::Snapshot,
+    config: &Config,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let watch = config.proposal_watch.as_ref()?;
+    health
+        .watched_pending(watch, now)
+        .filter(|&n| n > 0)
+        .map(crate::health::pending_text)
+}
+
 /// Texto à esquerda da barra de status.
 fn host_status(resources: &ResourceSnapshot, api: &ApiSnapshot) -> String {
     let host = format!("Este {}", crate::platform::HOST);
@@ -1877,255 +1275,19 @@ fn host_status(resources: &ResourceSnapshot, api: &ApiSnapshot) -> String {
     }
     text
 }
-fn date(at: &str) -> String {
+pub(crate) fn date(at: &str) -> String {
     DateTime::parse_from_rfc3339(at)
         .map(|d| d.with_timezone(&Local).format("%d/%m %H:%M").to_string())
         .unwrap_or_else(|_| "—".into())
 }
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(18).collect()
 }
-fn short_project(s: &str) -> &str {
+pub(crate) fn short_project(s: &str) -> &str {
     s.split(" / ").last().unwrap_or(s)
 }
 
-fn container_table(
-    ui: &mut egui::Ui,
-    cs: &[&Container],
-    selected: &mut Option<String>,
-    height: f32,
-) {
-    let p = theme::palette(ui.visuals());
-    if cs.is_empty() {
-        empty(
-            ui,
-            "Nenhum contêiner nesta lista",
-            "Os dados aparecem quando o Docker está disponível e há contêineres compatíveis com o filtro.",
-        );
-        return;
-    }
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .max_scroll_height(height)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::remainder().at_least(150.))
-        .column(Column::initial(120.))
-        .column(Column::initial(85.))
-        .column(Column::initial(110.))
-        .column(Column::initial(85.))
-        .header(30., |mut h| {
-            for title in ["CONTÊINER", "ESTADO", "CPU", "MEMÓRIA", "TAREFAS"] {
-                h.col(|ui| {
-                    table_head(ui, title);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(52., cs.len(), |mut row| {
-                let c = cs[row.index()];
-                row.col(|ui| {
-                    ui.vertical(|ui| {
-                        if ui
-                            .selectable_label(
-                                selected.as_ref() == Some(&c.id),
-                                RichText::new(&c.name).strong(),
-                            )
-                            .clicked()
-                        {
-                            *selected = Some(c.id.clone());
-                        }
-                        ui.label(RichText::new(&c.image).size(11.).color(p.text2))
-                            .on_hover_text(&c.image);
-                    });
-                });
-                row.col(|ui| {
-                    badge(
-                        ui,
-                        if c.state == "running" {
-                            "EM EXECUÇÃO"
-                        } else if c.state == "exited" {
-                            "PARADO"
-                        } else {
-                            &c.state
-                        },
-                        if c.state == "running" { p.acc } else { p.text2 },
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(
-                        c.usage
-                            .as_ref()
-                            .map(|u| format!("{}%", decimal(u.cpu, 1)))
-                            .unwrap_or("—".into()),
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(
-                        c.usage
-                            .as_ref()
-                            .map(|u| bytes(u.memory))
-                            .unwrap_or("—".into()),
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(
-                        c.usage
-                            .as_ref()
-                            .and_then(|u| u.tasks.map(number_u64))
-                            .unwrap_or("—".into()),
-                    );
-                });
-            });
-        });
-}
-
-fn chart(
-    ui: &mut egui::Ui,
-    title: &str,
-    history: &VecDeque<Sample>,
-    minutes: i64,
-    memory: bool,
-    resource_seconds: u64,
-) {
-    let p = theme::palette(ui.visuals());
-    panel(ui).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section(ui, title);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Docker").small().color(p.series2));
-                ui.label(RichText::new("ai-memory").small().color(p.acc));
-            });
-        });
-        let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
-        let start = end - chrono::Duration::minutes(minutes);
-        let value = |u: &Usage| {
-            if memory {
-                u.memory as f64 / (1u64 << 20) as f64
-            } else {
-                u.cpu
-            }
-        };
-        let max = history
-            .iter()
-            .filter(|s| s.at >= start)
-            .flat_map(|s| [s.ai.as_ref(), s.docker.as_ref()])
-            .flatten()
-            .map(value)
-            .fold(if memory { 64. } else { 100. }, f64::max)
-            * 1.15;
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 152.), egui::Sense::hover());
-        let plot = rect.shrink2(Vec2::new(0., 12.));
-        let plot = egui::Rect::from_min_max(plot.min + Vec2::new(46., 0.), plot.max);
-        let painter = ui.painter();
-        for i in 0..3 {
-            let frac = i as f32 / 2.;
-            let y = plot.bottom() - plot.height() * frac;
-            painter.line_segment(
-                [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-                Stroke::new(1.0_f32, p.line),
-            );
-            painter.text(
-                egui::pos2(plot.left() - 8., y),
-                egui::Align2::RIGHT_CENTER,
-                format!(
-                    "{}{}",
-                    decimal(max * frac as f64, 0),
-                    if memory { "M" } else { "%" }
-                ),
-                egui::FontId::proportional(10.),
-                p.text2,
-            );
-        }
-        let plot_painter = painter.with_clip_rect(plot.expand(4.));
-        for (ai, color) in [(false, p.series2), (true, p.acc)] {
-            let (lines, dots) =
-                chart_segments(history, minutes, max, memory, ai, resource_seconds, plot);
-            for pts in lines {
-                plot_painter.add(egui::Shape::line(pts, Stroke::new(2.0_f32, color)));
-            }
-            for pt in dots {
-                plot_painter.circle_filled(pt, 3., color);
-            }
-        }
-        if history.is_empty() {
-            painter.text(
-                plot.center(),
-                egui::Align2::CENTER_CENTER,
-                "Aguardando amostras…",
-                egui::FontId::proportional(13.),
-                p.text2,
-            );
-        }
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("−{minutes} min"))
-                    .small()
-                    .color(p.text2),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("agora").small().color(p.text2));
-            });
-        });
-    });
-}
-
-fn chart_segments(
-    history: &VecDeque<Sample>,
-    minutes: i64,
-    max: f64,
-    memory: bool,
-    ai: bool,
-    resource_seconds: u64,
-    plot: egui::Rect,
-) -> (Vec<Vec<egui::Pos2>>, Vec<egui::Pos2>) {
-    let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
-    let start = end - chrono::Duration::minutes(minutes);
-    let value = |u: &Usage| {
-        if memory {
-            u.memory as f64 / (1u64 << 20) as f64
-        } else {
-            u.cpu
-        }
-    };
-    let gap_limit = (resource_seconds.saturating_mul(3).max(65)) as i64;
-    let mut lines = Vec::new();
-    let mut dots = Vec::new();
-    let mut points = Vec::new();
-    let mut previous = None;
-    for s in history.iter().filter(|s| s.at >= start) {
-        let usage = if ai { s.ai.as_ref() } else { s.docker.as_ref() };
-        if previous
-            .is_some_and(|at: DateTime<Utc>| (s.at - at).num_seconds() > gap_limit || s.at < at)
-            || usage.is_none()
-        {
-            if points.len() > 1 {
-                lines.push(std::mem::take(&mut points));
-            } else if let Some(p) = points.pop() {
-                dots.push(p);
-            }
-        }
-        if let Some(u) = usage {
-            let x = (plot.left()
-                + plot.width()
-                    * ((s.at - start).num_milliseconds() as f32 / (minutes * 60 * 1000) as f32))
-                .clamp(plot.left(), plot.right());
-            let y = (plot.bottom() - plot.height() * (value(u) / max) as f32)
-                .clamp(plot.top(), plot.bottom());
-            points.push(egui::pos2(x, y));
-        }
-        previous = Some(s.at);
-    }
-    if points.len() > 1 {
-        lines.push(points);
-    } else if let Some(p) = points.pop() {
-        dots.push(p);
-    }
-    (lines, dots)
-}
-
-fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
+pub(crate) fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
     let summary = if h.redacted {
         ""
     } else {
@@ -2137,7 +1299,7 @@ fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
             .contains(needle)
 }
 
-fn handoff_warning_message(loaded: usize, total: Option<usize>) -> String {
+pub(crate) fn handoff_warning_message(loaded: usize, total: Option<usize>) -> String {
     match total {
         Some(total) => format!(
             "Lista: {} handoffs carregados de {} abertos. Até 200 por projeto.",
@@ -2151,7 +1313,7 @@ fn handoff_warning_message(loaded: usize, total: Option<usize>) -> String {
     }
 }
 
-fn process_matches(p: &HostProcess, needle: &str) -> bool {
+pub(crate) fn process_matches(p: &HostProcess, needle: &str) -> bool {
     format!("{} {} {}", p.pid, p.name, p.group)
         .to_lowercase()
         .contains(needle)
@@ -2160,63 +1322,6 @@ fn process_matches(p: &HostProcess, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chart_preserves_isolated_samples_and_scales_gap_with_resource_interval() {
-        let base = Utc::now();
-        let u = Some(Usage {
-            cpu: 50.0,
-            memory: 128 << 20,
-            ..Default::default()
-        });
-        // 1) An isolated valid sample followed by a failed (None) sample must still render as a dot.
-        let history = VecDeque::from([
-            Sample {
-                at: base - chrono::Duration::seconds(10),
-                ai: u.clone(),
-                docker: None,
-            },
-            Sample {
-                at: base - chrono::Duration::seconds(8),
-                ai: None,
-                docker: None,
-            },
-        ]);
-        let plot = egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(200., 100.));
-        let (lines, dots) = chart_segments(&history, 5, 100.0, false, true, 2, plot);
-        assert!(lines.is_empty());
-        assert_eq!(
-            dots.len(),
-            1,
-            "isolated sample before a None gap must not be erased"
-        );
-
-        // 2) With resource_seconds = 60, samples 66s apart must connect as a line, not blank out.
-        let history_60s = VecDeque::from([
-            Sample {
-                at: base - chrono::Duration::seconds(132),
-                ai: u.clone(),
-                docker: None,
-            },
-            Sample {
-                at: base - chrono::Duration::seconds(66),
-                ai: u.clone(),
-                docker: None,
-            },
-            Sample {
-                at: base,
-                ai: u,
-                docker: None,
-            },
-        ]);
-        let (lines, _) = chart_segments(&history_60s, 5, 100.0, false, true, 60, plot);
-        assert_eq!(
-            lines.len(),
-            1,
-            "60s interval samples separated by 66s must form a connected line"
-        );
-        assert_eq!(lines[0].len(), 3);
-    }
 
     #[test]
     fn redacted_handoff_summary_is_not_searchable_and_short_project_is_neutral() {
@@ -2541,15 +1646,75 @@ mod tests {
         );
     }
 
-    const PAGES: [Page; 7] = [
+    /// As 9 páginas, na ordem da lateral (Ajustes no rodapé).
+    const PAGES: [Page; 9] = [
         Page::Overview,
         Page::Sessions,
         Page::Docker,
-        Page::Central,
-        Page::Management,
-        Page::Advanced,
+        Page::Health,
+        Page::Explore,
+        Page::Review,
+        Page::Maintenance,
+        Page::Admin,
         Page::Settings,
     ];
+    /// Toda página tem de estar em PAGES: um membro novo quebra este match.
+    #[test]
+    fn pages_lists_every_page_once() {
+        for page in PAGES {
+            match page {
+                Page::Overview
+                | Page::Sessions
+                | Page::Docker
+                | Page::Health
+                | Page::Explore
+                | Page::Review
+                | Page::Maintenance
+                | Page::Admin
+                | Page::Settings => {}
+            }
+            assert_eq!(PAGES.iter().filter(|&&p| p == page).count(), 1, "{page:?}");
+        }
+        let labels: Vec<_> = PAGES.iter().map(|p| p.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Visão geral",
+                "Sessões e handoffs",
+                "Docker",
+                "Saúde",
+                "Explorar",
+                "Revisão",
+                "Manutenção e backup",
+                "Administração",
+                "Ajustes",
+            ]
+        );
+        for page in PAGES {
+            let want = if page == Page::Health {
+                "Saúde do ai-memory"
+            } else {
+                page.label()
+            };
+            assert_eq!(page.title(), want, "{page:?}");
+        }
+        assert_eq!(Page::of(Section::Review), Page::Review);
+        assert_eq!(Page::of(Section::Maintenance), Page::Maintenance);
+    }
+    /// Propostas pendentes de "ws / proj", vigiado e lido agora.
+    fn watching(app: &mut MonitorApp, pending: Option<usize>) {
+        let scope = crate::client::Scope {
+            workspace: "ws".into(),
+            project: "proj".into(),
+        };
+        app.config.proposal_watch = Some(scope.clone());
+        app.health = crate::health::Snapshot {
+            at: Some(Utc::now()),
+            pending,
+            pending_scope: Some(scope),
+            ..Default::default()
+        };
+    }
 
     /// Textos pintados na lateral, com a marca de corte.
     fn sidebar_texts(ctx: &egui::Context, out: &egui::FullOutput) -> Vec<(String, bool)> {
@@ -2566,18 +1731,6 @@ mod tests {
 
     #[test]
     fn every_sidebar_label_fits_at_232_selected_or_not() {
-        for page in PAGES {
-            // Uma página nova tem de entrar em PAGES.
-            match page {
-                Page::Overview
-                | Page::Sessions
-                | Page::Docker
-                | Page::Central
-                | Page::Management
-                | Page::Advanced
-                | Page::Settings => {}
-            }
-        }
         let at = Some(Utc::now());
         let open = |total, listed| ApiSnapshot {
             at,
@@ -2588,19 +1741,26 @@ mod tests {
         // "999+" (sem total do servidor) deixa 117,6 px ao rótulo, menos que os
         // 120,9 px (regular) e 124,2 px (semibold) de "Sessões e handoffs":
         // corta, e o nome vai ao tooltip.
-        for (counter, api, sessions_fit) in [
-            (None, ApiSnapshot::default(), true),
-            (Some("999"), open(Some(999), 0), true),
-            (Some("999+"), open(None, 999), false),
+        // Revisão leva o contador de propostas: até "200+" cabe com folga.
+        for (counter, api, sessions_fit, review) in [
+            (None, ApiSnapshot::default(), true, None),
+            (Some("999"), open(Some(999), 0), true, Some(3)),
+            (Some("999+"), open(None, 999), false, Some(200)),
         ] {
             for selected in PAGES {
                 let mut app = app_with_unsaved_draft();
                 app.api = api.clone();
+                if review.is_some() {
+                    watching(&mut app, review);
+                }
                 app.page = selected;
                 let ctx = styled();
                 let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
                 let texts = sidebar_texts(&ctx, &out);
-                if let Some(counter) = counter {
+                for counter in counter
+                    .into_iter()
+                    .chain(review.map(|n| if n >= 200 { "200+" } else { "3" }))
+                {
                     assert!(
                         texts.contains(&(counter.to_owned(), false)),
                         "the {counter} counter must be painted whole"
@@ -2623,6 +1783,525 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn menu_navigation_opens_health_review_and_admin_and_ignores_the_rest() {
+        for code in 0..=u8::MAX {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Docker;
+            app.navigate(code);
+            let want = match code {
+                1 => Page::Health,
+                2 => Page::Review,
+                3 => Page::Admin,
+                _ => Page::Docker,
+            };
+            assert_eq!(app.page, want, "navigation {code}");
+        }
+    }
+
+    #[test]
+    fn every_page_shows_its_title_and_marks_only_its_item_in_both_themes() {
+        use egui::accesskit::{Role, Toggled};
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for page in PAGES {
+                let mut app = app_with_unsaved_draft();
+                app.page = page;
+                let ctx = styled();
+                ctx.set_theme(theme);
+                ctx.enable_accesskit();
+                let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+                let update = out.platform_output.accesskit_update.as_ref().unwrap();
+                // O título da barra superior é o único Label com esse texto
+                // fora da lateral (232 px).
+                let titles = update
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.role() == Role::Label && n.value() == Some(page.title()))
+                    .filter_map(|(_, n)| n.bounds())
+                    .filter(|b| b.x0 > 232. && b.y1 <= 52.)
+                    .count();
+                assert_eq!(titles, 1, "{theme:?} {page:?}: top bar title");
+                for other in PAGES {
+                    let item = widgets(&out, Role::Button, other.label());
+                    assert_eq!(
+                        item.len(),
+                        1,
+                        "{theme:?}: one {other:?} item while on {page:?}"
+                    );
+                    let toggled = update
+                        .nodes
+                        .iter()
+                        .find(|(_, n)| {
+                            n.role() == Role::Button
+                                && n.label() == Some(other.label())
+                                && n.bounds().is_some_and(|b| b.x1 <= 232.)
+                        })
+                        .map(|(_, n)| n.toggled());
+                    let want = if other == page {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    };
+                    assert_eq!(toggled, Some(Some(want)), "{theme:?} {other:?} on {page:?}");
+                }
+            }
+        }
+    }
+
+    /// Lateral na janela mínima: os 8 itens, Ajustes e as duas fontes, todos
+    /// dentro da lateral e da janela, na ordem, sem um sobrepor o outro.
+    #[test]
+    fn sidebar_fits_without_overlap_at_the_minimum_height() {
+        use egui::accesskit::Role;
+        // Compacta (720) e inteira (1000) na altura mínima de 560.
+        for size in [[720., 560.], [1000., 560.]] {
+            let mut app = app_with_unsaved_draft();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let width = sidebar_width(&ctx);
+            let mut rows: Vec<(String, egui::Rect)> = PAGES
+                .iter()
+                .map(|p| {
+                    (
+                        p.label().to_owned(),
+                        widget_rect(&out, Role::Button, p.label()),
+                    )
+                })
+                .collect();
+            for source in [
+                "ai-memory: aguardando primeira coleta",
+                "Docker: aguardando primeira coleta",
+            ] {
+                rows.push((source.to_owned(), widget_rect(&out, Role::Label, source)));
+            }
+            let order = [
+                "Visão geral",
+                "Sessões e handoffs",
+                "Docker",
+                "Saúde",
+                "Explorar",
+                "Revisão",
+                "Manutenção e backup",
+                "Administração",
+                "ai-memory: aguardando primeira coleta",
+                "Docker: aguardando primeira coleta",
+                "Ajustes",
+            ];
+            rows.sort_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+            let sorted: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+            assert_eq!(sorted, order, "{size:?}: top-to-bottom order");
+            for (name, rect) in &rows {
+                assert!(
+                    rect.left() >= 0. && rect.right() <= width && rect.top() >= 52.,
+                    "{size:?}: {name} {rect:?} leaves the sidebar ({width} px)"
+                );
+                assert!(
+                    rect.bottom() <= size[1] - 12.,
+                    "{size:?}: {name} {rect:?} is cut"
+                );
+            }
+            for pair in rows.windows(2) {
+                assert!(
+                    pair[0].1.bottom() <= pair[1].1.top(),
+                    "{size:?}: {} {:?} overlaps {} {:?}",
+                    pair[0].0,
+                    pair[0].1,
+                    pair[1].0,
+                    pair[1].1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_counter_matches_the_menu_bar_and_only_shows_pending_proposals() {
+        use crate::menu_bar::MenuReading;
+        let now = Utc::now();
+        let scope = crate::client::Scope {
+            workspace: "ws".into(),
+            project: "proj".into(),
+        };
+        let other = crate::client::Scope {
+            workspace: "ws".into(),
+            project: "outro".into(),
+        };
+        let reading = |age: i64, of: &crate::client::Scope, pending| crate::health::Snapshot {
+            at: Some(now - chrono::Duration::seconds(age)),
+            pending,
+            pending_scope: Some(of.clone()),
+            ..Default::default()
+        };
+        // (caso, vigiado?, leitura, contador na lateral, número no menu)
+        for (case, watch, health, badge, menu) in [
+            (
+                "nothing watched",
+                false,
+                reading(0, &scope, Some(3)),
+                None,
+                None,
+            ),
+            (
+                "three pending",
+                true,
+                reading(0, &scope, Some(3)),
+                Some("3"),
+                Some("3"),
+            ),
+            (
+                "one pending",
+                true,
+                reading(0, &scope, Some(1)),
+                Some("1"),
+                Some("1"),
+            ),
+            (
+                "199 pending",
+                true,
+                reading(0, &scope, Some(199)),
+                Some("199"),
+                Some("199"),
+            ),
+            (
+                "list limit",
+                true,
+                reading(0, &scope, Some(200)),
+                Some("200+"),
+                Some("200+"),
+            ),
+            (
+                "zero is no counter",
+                true,
+                reading(0, &scope, Some(0)),
+                None,
+                Some("0"),
+            ),
+            (
+                "denied is unknown",
+                true,
+                reading(0, &scope, None),
+                None,
+                Some("—"),
+            ),
+            (
+                "stale is unknown",
+                true,
+                reading(91, &scope, Some(3)),
+                None,
+                Some("—"),
+            ),
+            (
+                "another project",
+                true,
+                reading(0, &other, Some(3)),
+                None,
+                Some("—"),
+            ),
+        ] {
+            let config = Config {
+                proposal_watch: watch.then(|| scope.clone()),
+                ..Default::default()
+            };
+            assert_eq!(
+                review_badge(&health, &config, now).as_deref(),
+                badge,
+                "{case}"
+            );
+            let title = MenuReading::from_snapshot(&Default::default(), "ai-memory", 2, now)
+                .with_context(None, Some(&health), &config, now)
+                .title;
+            match menu {
+                Some(n) => assert!(title.ends_with(&format!(" P{n}")), "{case}: {title}"),
+                None => assert!(!title.contains(" P"), "{case}: {title}"),
+            }
+        }
+    }
+
+    #[test]
+    fn review_counter_is_painted_in_warn_next_to_its_item() {
+        for (theme, p) in [
+            (egui::Theme::Dark, &theme::DARK),
+            (egui::Theme::Light, &theme::LIGHT),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            watching(&mut app, Some(3));
+            let ctx = styled();
+            ctx.set_theme(theme);
+            let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+            let three: Vec<_> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "3" => Some(t.fallback_color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(three, vec![p.warn], "{theme:?}");
+            let pill = crate::widgets::tone(p.warn, 0.16);
+            assert!(
+                out.shapes
+                    .iter()
+                    .any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == pill)),
+                "{theme:?}: warn pill"
+            );
+        }
+    }
+
+    #[test]
+    fn opening_review_from_the_menu_picks_proposals_unless_the_tab_is_already_there() {
+        // (aba atual, ocupado?, aba depois de abrir Revisão pela navegação 2)
+        for (tab, busy, want) in [
+            (0, false, 0),
+            (1, false, 1),
+            (2, false, 0),
+            (3, false, 0),
+            // Ocupado em Manutenção e backup: a aba fica até terminar.
+            (2, true, 2),
+            (3, true, 3),
+            (1, true, 1),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Overview;
+            app.management.set_tab(tab);
+            app.management.busy = busy;
+            app.navigate(2);
+            let ctx = styled();
+            frame(&mut app, &ctx, [1320., 860.], vec![]);
+            assert_eq!(app.page, Page::Review, "tab {tab} busy {busy}");
+            assert_eq!(app.management.tab(), want, "tab {tab} busy {busy}");
+        }
+    }
+
+    /// Clique completo em `pos` (`widgets::tests::click_frames`).
+    fn click_at(app: &mut MonitorApp, ctx: &egui::Context, size: [f32; 2], pos: egui::Pos2) {
+        for events in crate::widgets::tests::click_frames(pos) {
+            frame(app, ctx, size, events);
+        }
+    }
+
+    #[test]
+    fn leaving_review_mid_operation_keeps_its_tab_and_warns_on_the_other_page() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Review;
+        app.management.set_tab(1);
+        app.management.busy = true;
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let maintenance = widget_rect(&out, Role::Button, "Manutenção e backup");
+        click_at(&mut app, &ctx, size, maintenance.center());
+        assert_eq!(app.page, Page::Maintenance, "the click still navigates");
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(app.management.tab(), 1, "the tab of the operation is kept");
+        assert!(app.management.busy);
+        let warning = "Operação em andamento em Revisão · Handoffs. Aguarde a resposta lá; esta página usa o mesmo painel.";
+        assert_eq!(widgets(&out, Role::Label, warning).len(), 1);
+        assert!(
+            widgets(&out, Role::Button, "Manutenção").is_empty(),
+            "the Maintenance tabs stay hidden while Revisão owns the panel"
+        );
+        let back = widget_rect(&out, Role::Button, "Ir para Revisão");
+        click_at(&mut app, &ctx, size, back.center());
+        assert_eq!(app.page, Page::Review);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(
+            widgets(&out, Role::Button, "Handoffs").len(),
+            1,
+            "Revisão shows its tabs"
+        );
+        assert!(widgets(&out, Role::Label, warning).is_empty());
+    }
+
+    #[test]
+    fn cross_locks_keep_review_maintenance_and_admin_apart() {
+        use egui::accesskit::Role;
+        // (página, quem está ocupado, um botão da página, desabilitado?)
+        for (page, busy, button, disabled) in [
+            (Page::Review, "", "Propostas", false),
+            (Page::Review, "auth", "Propostas", true),
+            (Page::Review, "operations", "Propostas", true),
+            (Page::Maintenance, "", "Manutenção", false),
+            (Page::Maintenance, "auth", "Manutenção", true),
+            (Page::Maintenance, "operations", "Manutenção", true),
+            (Page::Admin, "", "Servidor · administração", false),
+            (Page::Admin, "auth", "Servidor · administração", true),
+            (Page::Admin, "management", "Servidor · administração", true),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            app.page = page;
+            match busy {
+                "auth" => app.authentication.busy = true,
+                "operations" => app.operations.busy = true,
+                "management" => {
+                    // Ocupada em Admin não troca de aba: fica onde está.
+                    app.management.busy = true;
+                }
+                _ => {}
+            }
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+            let update = out.platform_output.accesskit_update.as_ref().unwrap();
+            let node = update
+                .nodes
+                .iter()
+                .find(|(_, n)| {
+                    n.role() == Role::Button
+                        && n.label() == Some(button)
+                        && n.bounds().is_some_and(|b| b.x0 > 232.)
+                })
+                .map(|(_, n)| n.is_disabled());
+            assert_eq!(
+                node,
+                Some(disabled),
+                "{page:?} with {busy:?} busy: {button}"
+            );
+        }
+    }
+
+    /// Retângulos dos seis cartões da página Saúde.
+    fn health_cards(out: &egui::FullOutput) -> Vec<egui::Rect> {
+        crate::health_ui::CARDS
+            .iter()
+            .map(|title| widget_rect(out, egui::accesskit::Role::Pane, title))
+            .collect()
+    }
+    fn columns(cards: &[egui::Rect]) -> usize {
+        let mut lefts: Vec<i32> = cards.iter().map(|r| r.left().round() as i32).collect();
+        lefts.sort();
+        lefts.dedup();
+        lefts.len()
+    }
+
+    #[test]
+    fn health_grid_takes_its_columns_from_the_width_of_every_frame() {
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Health;
+        let ctx = styled();
+        ctx.enable_accesskit();
+        // (janela, colunas, borda direita do conteúdo = janela − 24)
+        for (size, want) in [
+            ([720., 560.], 2),
+            ([1320., 860.], 3),
+            ([720., 560.], 2),
+            ([1000., 700.], 2),
+            ([1320., 860.], 3),
+        ] {
+            let mut out = frame(&mut app, &ctx, size, vec![]);
+            // A grade só lê a largura do frame; um segundo frame não muda nada.
+            for _ in 0..2 {
+                let cards = health_cards(&out);
+                assert_eq!(columns(&cards), want, "{size:?}: {cards:?}");
+                let right = cards.iter().map(|r| r.right()).fold(0., f32::max);
+                assert!(
+                    (right - (size[0] - 24.)).abs() <= 1.,
+                    "{size:?}: the grid must span the content width, ends at {right}"
+                );
+                // Na mesma linha, os cartões têm a mesma altura.
+                for row in cards.chunks(want) {
+                    assert!(
+                        row.iter()
+                            .all(|r| (r.height() - row[0].height()).abs() < 0.5),
+                        "{size:?}: {row:?}"
+                    );
+                }
+                // A linha da página: o texto e o botão lado a lado, dentro do conteúdo.
+                let line = widget_rect(
+                    &out,
+                    egui::accesskit::Role::Label,
+                    "Aguardando a primeira coleta · a cada 30 s, mesmo com a janela fechada",
+                );
+                let button = widget_rect(&out, egui::accesskit::Role::Button, "Atualizar agora");
+                assert!(
+                    !line.intersects(button)
+                        && button.right() <= size[0] - 24. + 0.5
+                        && (button.center().y - line.center().y).abs() < 2.,
+                    "{size:?}: {line:?} / {button:?}"
+                );
+                out = frame(&mut app, &ctx, size, vec![]);
+            }
+        }
+    }
+
+    /// Linux: a janela fecha com um "Atualizar agora" em aberto; o coletor,
+    /// que vive no Shared, atende sem janela, e a janela seguinte (outro
+    /// contexto egui, o mesmo app) mostra a coleta nova e o botão livre.
+    #[test]
+    fn refresh_requested_before_the_window_closes_is_served_without_it() {
+        use crate::monitor::tests::HealthProbe;
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let config = Config {
+            endpoint: "http://synthetic.example".into(),
+            ..Default::default()
+        };
+        let probe = HealthProbe::start(Shared::unstarted(config.clone()));
+        assert_eq!(probe.next(), "http://synthetic.example");
+        probe.release();
+        probe.served(0);
+        let mut app = MonitorApp::build(config, probe.shared.clone());
+        app.page = Page::Health;
+        let sync = |app: &mut MonitorApp| {
+            app.last_sync = Instant::now() - Duration::from_secs(1);
+            app.sync();
+        };
+        let until = Instant::now() + Duration::from_secs(3);
+        while app.health.at.is_none() {
+            assert!(
+                Instant::now() < until,
+                "the startup collection never reached the app"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+            sync(&mut app);
+        }
+        let first = app.health.at;
+        let window = styled();
+        window.enable_accesskit();
+        let out = frame(&mut app, &window, size, vec![]);
+        let button = widget_rect(&out, Role::Button, "Atualizar agora");
+        click_at(&mut app, &window, size, button.center());
+        let out = frame(&mut app, &window, size, vec![]);
+        let pending = update_node(&out, Role::Button, "Atualizando…");
+        assert!(pending.is_disabled(), "the button waits for the collection");
+        drop(window);
+        assert_eq!(
+            probe.next(),
+            "http://synthetic.example",
+            "collected with no window"
+        );
+        probe.release();
+        probe.served(1);
+        sync(&mut app);
+        assert!(app.health.at > first, "the new collection reached the app");
+        let reopened = styled();
+        reopened.enable_accesskit();
+        let out = frame(&mut app, &reopened, size, vec![]);
+        assert!(!update_node(&out, Role::Button, "Atualizar agora").is_disabled());
+        assert!(widgets(&out, Role::Button, "Atualizando…").is_empty());
+        assert!(probe.quiet(), "one click, one extra collection");
+    }
+    fn update_node(
+        out: &egui::FullOutput,
+        role: egui::accesskit::Role,
+        text: &str,
+    ) -> egui::accesskit::Node {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        let found: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == role && (n.label() == Some(text) || n.value() == Some(text))
+            })
+            .map(|(_, n)| n.clone())
+            .collect();
+        match &found[..] {
+            [n] => n.clone(),
+            _ => panic!("expected one {role:?} {text:?}, found {}", found.len()),
         }
     }
 
@@ -3078,57 +2757,1163 @@ mod tests {
         );
     }
 
-    #[test]
-    fn main_area_scrolls_sideways_when_a_page_is_wider_than_720() {
-        // A linha de filtros da aba Sessões (busca, projeto, "Só abertas")
-        // passa da área de conteúdo em 720 pontos, com ou sem dados.
-        let label = |out: &egui::FullOutput| {
-            out.shapes
-                .iter()
-                .find_map(|clipped| match &clipped.shape {
-                    egui::Shape::Text(t) if t.galley.text() == "Só abertas" => {
-                        Some(t.visual_bounding_rect())
-                    }
-                    _ => None,
+    /// Sessões com dados longos: nomes de projeto, títulos e contagens
+    /// grandes, em três projetos, mais sessões e projetos.
+    fn sessions_data() -> ApiSnapshot {
+        let now = Utc::now();
+        let at = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+        let projects = [
+            "api-pagamentos-com-um-nome-de-projeto-bem-longo",
+            "portal-web",
+            "notas",
+        ];
+        ApiSnapshot {
+            at: Some(now),
+            handoff_total: Some(1234),
+            handoffs: (0..30)
+                .map(|i| Handoff {
+                    id: format!("01a19ebd-3267-4c1e-9a7e-0f31b6b467{i:02}"),
+                    agent: if i % 3 == 0 { "codex" } else { "claude-code" }.into(),
+                    at: at(i * 7),
+                    state: "open".into(),
+                    summary: Some(if i == 0 {
+                        "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum".into()
+                    } else {
+                        format!("## Handoff {i}\n\nCorpo do handoff {i}.")
+                    }),
+                    next_steps: Some(vec!["Primeiro passo".into(), "Segundo passo".into()]),
+                    scope: format!("acme / {}", projects[i as usize % 3]),
+                    ..Default::default()
                 })
-                .expect("the Sessões tab shows the filter row")
-        };
+                .collect(),
+            sessions: (0..12)
+                .map(|i| Session {
+                    session_id: format!("sessao-{i:04}-0000-4000-8000-000000000000"),
+                    agent_kind: "claude-code".into(),
+                    started_at: at(i * 30),
+                    ended_at: (i % 4 == 0).then(|| at(i)),
+                    cwd: Some("/tmp/projeto".into()),
+                    observation_count: 1_234_567,
+                    scope: format!("acme / {}-{i}", projects[0]),
+                    ..Default::default()
+                })
+                .collect(),
+            projects: (0..5)
+                .map(|i| Project {
+                    workspace_name: "acme".into(),
+                    project_name: format!("{}-{i}", projects[0]),
+                    page_count: 1234,
+                    open_session_count: Some(12),
+                    observation_count: Some(9_876_543),
+                    last_activity: Some(at(5)),
+                    ..Default::default()
+                })
+                .collect(),
+            warnings: vec!["acme / notas: lista limitada aos 200 handoffs mais recentes.".into()],
+            ..Default::default()
+        }
+    }
+    /// Retângulos dos nós da página (fora da lateral e das barras).
+    fn page_widgets(out: &egui::FullOutput, side: f32, height: f32) -> Vec<(String, egui::Rect)> {
+        use egui::accesskit::Role;
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                matches!(
+                    n.role(),
+                    Role::Label
+                        | Role::Button
+                        | Role::CheckBox
+                        | Role::ComboBox
+                        | Role::TextInput
+                        | Role::Link
+                        | Role::Pane
+                )
+            })
+            .filter_map(|(_, n)| {
+                let b = n.bounds()?;
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                );
+                let name = n.label().or(n.value()).unwrap_or_default().to_owned();
+                (rect.left() >= side && rect.top() >= 52. && rect.bottom() <= height - 28.)
+                    .then_some((name, rect))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sessions_page_fits_720_without_sideways_scrolling() {
+        use crate::sessions_ui::Tab;
+        use egui::accesskit::Role;
+        let size = [720., 560.];
+        for (tab, mounted) in [
+            (Tab::Handoffs, (Role::Pane, "Lista de handoffs")),
+            (Tab::Sessions, (Role::CheckBox, "Só abertas")),
+            (Tab::Projects, (Role::Label, "Atividade")),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Sessions;
+            app.api = sessions_data();
+            app.sessions.set_tab(tab);
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let side = sidebar_width(&ctx);
+            let (left, right) = (side + 24., size[0] - 24.);
+            let check = |out: &egui::FullOutput| {
+                let found = page_widgets(out, side, size[1]);
+                assert!(found.len() > 10, "{tab:?}: the page mounted: {found:?}");
+                for (name, rect) in &found {
+                    assert!(
+                        rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                        "{tab:?}: {name:?} {rect:?} leaves the content ({left}..{right})"
+                    );
+                }
+                widget_rect(out, mounted.0, mounted.1)
+            };
+            let before = check(&out);
+            // A roda para o lado não move nada: não há o que rolar.
+            let pointer = egui::Event::PointerMoved(before.center());
+            frame(&mut app, &ctx, size, vec![pointer.clone()]);
+            frame(
+                &mut app,
+                &ctx,
+                size,
+                vec![
+                    pointer.clone(),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(-300., 0.),
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            let mut out = frame(&mut app, &ctx, size, vec![pointer.clone()]);
+            for _ in 0..30 {
+                out = frame(&mut app, &ctx, size, vec![pointer.clone()]);
+            }
+            assert_eq!(check(&out), before, "{tab:?}: nothing scrolled sideways");
+            // A nota de somente leitura cabe numa linha (ao lado ou abaixo).
+            let note = widget_rect(
+                &out,
+                Role::Label,
+                "Somente leitura · nenhum handoff é aceito por esta tela",
+            );
+            assert!(note.height() < 20., "{tab:?}: one line, {note:?}");
+            // A legenda é a última coisa e fica acima da barra de status.
+            let legend = match tab {
+                Tab::Handoffs => "Lista limitada a 200 por projeto",
+                Tab::Sessions => {
+                    "Últimas 100 sessões por projeto. Aberta = sem encerramento registrado; não comprova atividade atual. Vínculos entre projetos podem se repetir."
+                }
+                Tab::Projects => {
+                    "Atividade = último evento ou atualização informado pela API. Contagens por projeto podem compartilhar sessões."
+                }
+            };
+            let legend = widget_rect(&out, Role::Label, legend);
+            assert!(
+                legend.bottom() <= size[1] - 28. - 20. + 0.5,
+                "{tab:?}: legend {legend:?} must sit above the status bar"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_list_and_detail_follow_the_width_of_every_frame() {
+        use egui::accesskit::Role;
         let mut app = app_with_unsaved_draft();
         app.page = Page::Sessions;
-        app.session_tab = 1;
+        app.api = sessions_data();
         let ctx = styled();
-        let size = [720., 560.];
-        let before = label(&frame(&mut app, &ctx, size, vec![]));
+        ctx.enable_accesskit();
+        let panes = |out: &egui::FullOutput| {
+            (
+                widgets(out, Role::Pane, "Lista de handoffs"),
+                widgets(out, Role::Pane, "Detalhe do handoff"),
+            )
+        };
+        let content =
+            |ctx: &egui::Context, size: [f32; 2]| (sidebar_width(ctx) + 24., size[0] - 24.);
+        let narrow = [720., 560.];
+        let wide = [1320., 860.];
+        // Aberta em 720: só a lista, na largura toda do conteúdo.
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (left, right) = content(&ctx, narrow);
+        let (list, detail) = panes(&out);
+        assert!(detail.is_empty(), "720 opens on the list");
         assert!(
-            before.right() > 720. - 24.,
-            "precondition: the filter row overflows the content area ({})",
-            before.right()
+            (list[0].left() - left).abs() < 0.5 && (list[0].right() - right).abs() < 0.5,
+            "the list spans the content at 720: {:?}",
+            list[0]
         );
-        // Ponteiro sobre a linha de filtros, dentro da área visível.
-        let pointer = egui::Event::PointerMoved(egui::pos2(400., before.center().y));
-        frame(&mut app, &ctx, size, vec![pointer.clone()]);
+        // Alargada no mesmo contexto: lado a lado, nada guardado de 720; a
+        // lista fica em 360–420 até numa tela larga.
+        for wide in [wide, wide, [1920., 1080.]] {
+            let out = frame(&mut app, &ctx, wide, vec![]);
+            let (left, right) = content(&ctx, wide);
+            let (list, detail) = panes(&out);
+            let (list, detail) = (list[0], detail[0]);
+            assert!(
+                (360. ..=420.).contains(&list.width()),
+                "list width {}",
+                list.width()
+            );
+            assert!((list.left() - left).abs() < 0.5, "{list:?}");
+            assert!(list.right() <= detail.left(), "{list:?} / {detail:?}");
+            assert!((detail.right() - right).abs() < 0.5, "{detail:?}");
+            // O detalhe é o do primeiro da lista, com o pé fixo dentro dele.
+            widget_rect(
+                &out,
+                Role::Label,
+                "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum",
+            );
+            let review = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+            assert!(
+                detail.contains_rect(review),
+                "{review:?} pinned in {detail:?}"
+            );
+        }
+        // De volta a 720: a lista outra vez.
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (list, detail) = panes(&out);
+        assert!(detail.is_empty() && list.len() == 1);
+        // Um clique numa linha abre o detalhe no lugar da lista, com "← Voltar".
+        let row = widget_rect(&out, Role::Button, "Handoff 3 · codex · 21 min");
+        click_at(&mut app, &ctx, narrow, row.center());
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (list, detail) = panes(&out);
+        let (left, right) = content(&ctx, narrow);
+        assert!(list.is_empty(), "the detail replaces the list");
+        assert!(
+            (detail[0].left() - left).abs() < 0.5 && (detail[0].right() - right).abs() < 0.5,
+            "{:?}",
+            detail[0]
+        );
+        widget_rect(&out, Role::Label, "Handoff 3");
+        for (name, rect) in page_widgets(&out, sidebar_width(&ctx), narrow[1]) {
+            assert!(
+                rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                "{name:?} {rect:?} leaves the detail at 720"
+            );
+        }
+        // Em 720 × 560 o pé vai ao fim do texto: rolando o detalhe, ele
+        // aparece dentro do painel.
+        let review = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+        assert!(
+            review.top() > detail[0].bottom(),
+            "precondition: the footer is below the fold at 560: {review:?}"
+        );
+        let pointer = egui::Event::PointerMoved(detail[0].center());
+        frame(&mut app, &ctx, narrow, vec![pointer.clone()]);
         frame(
             &mut app,
             &ctx,
+            narrow,
+            vec![
+                pointer.clone(),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0., -2000.),
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        let mut out = frame(&mut app, &ctx, narrow, vec![pointer.clone()]);
+        for _ in 0..30 {
+            out = frame(&mut app, &ctx, narrow, vec![pointer.clone()]);
+        }
+        let review = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+        assert!(
+            detail[0].contains_rect(review),
+            "{review:?} in {:?}",
+            detail[0]
+        );
+        // Alargada com o detalhe aberto: os dois, com o mesmo handoff.
+        let out = frame(&mut app, &ctx, wide, vec![]);
+        let (list, detail) = panes(&out);
+        assert_eq!((list.len(), detail.len()), (1, 1));
+        widget_rect(&out, Role::Label, "Handoff 3");
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let back = widget_rect(&out, Role::Button, "← Voltar");
+        click_at(&mut app, &ctx, narrow, back.center());
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (list, detail) = panes(&out);
+        assert!(detail.is_empty() && list.len() == 1, "back to the list");
+        assert_eq!(
+            update_node(&out, Role::Button, "Handoff 3 · codex · 21 min").toggled(),
+            Some(egui::accesskit::Toggled::True),
+            "the selection is kept"
+        );
+    }
+
+    #[test]
+    fn manage_in_review_opens_the_handoffs_tab_unless_the_panel_is_held() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let held = "Operação em andamento em Manutenção e backup · Manutenção. Aguarde a resposta lá; esta página usa o mesmo painel.";
+        // (aba antes, ocupado?, aba depois, aviso na Revisão?)
+        for (tab, busy, want, warned) in [
+            (0, false, 1, false),
+            (1, false, 1, false),
+            (2, false, 1, false),
+            (3, false, 1, false),
+            (0, true, 0, false),
+            (2, true, 2, true),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Sessions;
+            app.api = sessions_data();
+            app.management.set_tab(tab);
+            app.management.busy = busy;
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let link = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+            click_at(&mut app, &ctx, size, link.center());
+            assert_eq!(app.page, Page::Review, "tab {tab} busy {busy}");
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.management.tab(), want, "tab {tab} busy {busy}");
+            assert_eq!(
+                widgets(&out, Role::Label, held).len(),
+                usize::from(warned),
+                "tab {tab} busy {busy}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_clears_the_sessions_filters_and_selection() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Sessions;
+        app.api = sessions_data();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let row = widget_rect(&out, Role::Button, "Handoff 3 · codex · 21 min");
+        click_at(&mut app, &ctx, size, row.center());
+        let scope = "acme / api-pagamentos-com-um-nome-de-projeto-bem-longo";
+        app.sessions.set_filters(scope, "codex");
+        let out = frame(&mut app, &ctx, size, vec![]);
+        update_node(&out, Role::ComboBox, "Agente: codex");
+        update_node(&out, Role::ComboBox, scope);
+        assert_eq!(
+            app.sessions.selected(),
+            Some(&(
+                scope.to_owned(),
+                "01a19ebd-3267-4c1e-9a7e-0f31b6b46703".to_owned()
+            )),
+            "precondition: filtered, with a chosen handoff"
+        );
+        app.reconnect(app.config.clone());
+        assert_eq!(app.sessions.selected(), None);
+        app.api = sessions_data();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        update_node(&out, Role::ComboBox, "Todos os projetos");
+        update_node(&out, Role::ComboBox, "Agente: todos");
+        assert_eq!(
+            update_node(&out, Role::Button, "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum · codex · agora").toggled(),
+            Some(egui::accesskit::Toggled::True),
+            "a new connection opens on the first again"
+        );
+    }
+
+    /// Docker com dados longos: oito contêineres (três em execução), um nome
+    /// e uma imagem compridos, imagens, processos e o contexto.
+    fn docker_data() -> ResourceSnapshot {
+        let now = Utc::now();
+        let container = |name: &str, state: &str, cpu: Option<f64>, ports: &str| Container {
+            id: format!("{name}-{}", "8f3c21a9d0e4".repeat(5)),
+            name: name.into(),
+            image: format!("ghcr.io/organizacao/{name}:2026.11.03"),
+            state: state.into(),
+            status: "Up 3 days".into(),
+            ports: ports.into(),
+            usage: cpu.map(|cpu| Usage {
+                cpu,
+                memory: 1_234_567_890,
+                limit: 8 << 30,
+                tasks: Some(1234),
+            }),
+            net_io: "1.2GB / 840MB".into(),
+            block_io: "3.4GB / 9.1GB".into(),
+            ..Default::default()
+        };
+        ResourceSnapshot {
+            at: Some(now),
+            containers: vec![
+                container(
+                    "ai-memory",
+                    "running",
+                    Some(123.4),
+                    "0.0.0.0:49374->49374/tcp, [::]:49374->49374/tcp",
+                ),
+                container(
+                    "postgres-dev",
+                    "running",
+                    Some(2.7),
+                    "0.0.0.0:5432->5432/tcp",
+                ),
+                container("redis-cache", "running", Some(0.4), "6379/tcp"),
+                container(
+                    "um-conteiner-com-um-nome-comprido-demais-para-a-coluna",
+                    "exited",
+                    None,
+                    "",
+                ),
+                container("minio", "exited", None, ""),
+                container("grafana", "paused", None, "3000/tcp"),
+                container("loki", "created", None, ""),
+                container("tempo", "dead", None, ""),
+            ],
+            images: (0..40)
+                .map(|i| DockerImage {
+                    id: format!("sha256:{i:064x}"),
+                    tags: vec![format!("ghcr.io/organizacao/imagem-{i}:latest")],
+                    size: 1_234_567_890,
+                    containers: vec!["ai-memory".into()],
+                    running: 1,
+                })
+                .collect(),
+            images_at: Some(now - chrono::Duration::seconds(9)),
+            processes: (0..30)
+                .map(|i| HostProcess {
+                    pid: 10_000 + i,
+                    name: format!("com.docker.virtualization-processo-{i}"),
+                    group: "Docker Desktop".into(),
+                    usage: Usage {
+                        cpu: 123.4,
+                        memory: 1_234_567_890,
+                        tasks: Some(1234),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            ai_processes: vec![("1".into(), "ai-memory".into(), 41)],
+            docker_context: Some("desktop-linux".into()),
+            ..Default::default()
+        }
+    }
+    /// Roda a roda sobre `pos` e espera a animação; devolve o último frame.
+    fn wheel(
+        app: &mut MonitorApp,
+        ctx: &egui::Context,
+        size: [f32; 2],
+        pos: egui::Pos2,
+        dy: f32,
+    ) -> egui::FullOutput {
+        let pointer = egui::Event::PointerMoved(pos);
+        frame(app, ctx, size, vec![pointer.clone()]);
+        frame(
+            app,
+            ctx,
             size,
             vec![
                 pointer.clone(),
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
-                    delta: Vec2::new(-300., 0.),
+                    delta: Vec2::new(0., dy),
                     modifiers: Default::default(),
                 },
             ],
         );
-        let mut after = before;
+        let mut out = frame(app, ctx, size, vec![pointer.clone()]);
         for _ in 0..30 {
-            after = label(&frame(&mut app, &ctx, size, vec![pointer.clone()]));
+            out = frame(app, ctx, size, vec![pointer.clone()]);
         }
+        out
+    }
+    /// Linhas da tabela de contêineres, de cima para baixo.
+    fn container_rows(out: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        let mut rows: Vec<(String, egui::Rect)> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == egui::accesskit::Role::Button
+                    && n.label().is_some_and(|l| l.contains(" · CPU "))
+            })
+            .map(|(_, n)| {
+                let b = n.bounds().unwrap();
+                (
+                    n.label().unwrap().split(" · ").next().unwrap().to_owned(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(b.x0 as f32, b.y0 as f32),
+                        egui::pos2(b.x1 as f32, b.y1 as f32),
+                    ),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+        rows
+    }
+
+    #[test]
+    fn docker_page_fits_720_and_1320_in_both_themes_without_overlap() {
+        use crate::docker_ui::Tab;
+        use egui::accesskit::Role;
+        let host = format!("Processos do {}", crate::platform::HOST);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for size in [[720., 560.], [1320., 860.]] {
+                for tab in [Tab::Containers, Tab::Images, Tab::Processes] {
+                    let mut app = app_with_unsaved_draft();
+                    app.page = Page::Docker;
+                    app.config.container = "ai-memory".into();
+                    app.resources = docker_data();
+                    app.docker.set_tab(tab);
+                    let ctx = styled();
+                    ctx.set_theme(theme);
+                    ctx.enable_accesskit();
+                    let out = frame(&mut app, &ctx, size, vec![]);
+                    let side = sidebar_width(&ctx);
+                    let (left, right) = (side + 24., size[0] - 24.);
+                    let case = format!("{theme:?} {size:?} {tab:?}");
+                    let found = page_widgets(&out, side, size[1]);
+                    assert!(found.len() > 10, "{case}: the page mounted: {found:?}");
+                    for (name, rect) in &found {
+                        assert!(
+                            rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                            "{case}: {name:?} {rect:?} leaves the content ({left}..{right})"
+                        );
+                    }
+                    // Linha de ferramentas: abas e busca lado a lado, sem se tocar.
+                    let tabs = widget_rect(&out, Role::Button, &host);
+                    let search = update_node(&out, Role::TextInput, "")
+                        .bounds()
+                        .map(|b| {
+                            egui::Rect::from_min_max(
+                                egui::pos2(b.x0 as f32, b.y0 as f32),
+                                egui::pos2(b.x1 as f32, b.y1 as f32),
+                            )
+                        })
+                        .unwrap();
+                    assert!(
+                        tabs.right() < search.left() && search.right() <= right + 0.5,
+                        "{case}: {tabs:?} / {search:?}"
+                    );
+                    // A legenda é a última coisa e fica acima da barra de status.
+                    let legend = widget_rect(&out, Role::Label, "Imagens: inventário há 9 s");
+                    assert!(
+                        legend.bottom() <= size[1] - 28. - 20. + 0.5,
+                        "{case}: legend {legend:?} must sit above the status bar"
+                    );
+                    if tab != Tab::Containers {
+                        continue;
+                    }
+                    let switch = widget_rect(&out, Role::CheckBox, "Só em execução");
+                    let summary = widget_rect(&out, Role::Label, "Tarefas 3.702");
+                    assert!(
+                        summary.right() < switch.left()
+                            && (summary.center().y - switch.center().y).abs() < 4.,
+                        "{case}: one summary line: {summary:?} / {switch:?}"
+                    );
+                    let table = widget_rect(&out, Role::Pane, "Contêineres");
+                    assert!(table.top() > switch.bottom(), "{case}: {table:?}");
+                    let rows = container_rows(&out);
+                    assert_eq!(rows[0].0, "ai-memory", "{case}");
+                    assert!(rows.windows(2).all(|w| w[0].1.bottom() <= w[1].1.top()));
+                    let inspector = widgets(&out, Role::Pane, "Inspetor do contêiner")
+                        .first()
+                        .copied();
+                    if size[0] == 1320. {
+                        let inspector = inspector.expect("beside at 1320");
+                        assert_eq!(inspector.width(), 320., "{case}");
+                        assert!((inspector.right() - right).abs() < 0.5, "{case}");
+                        assert_eq!(table.right() + 1., inspector.left(), "{case}");
+                        widget_rect(&out, Role::Label, "Portas");
+                    } else {
+                        // Só a tabela; um clique abre o inspetor no lugar dela.
+                        assert!(inspector.is_none(), "{case}: no inspector below");
+                        assert!(widgets(&out, Role::Label, "Portas").is_empty(), "{case}");
+                        click_at(&mut app, &ctx, size, rows[0].1.center());
+                        let out = frame(&mut app, &ctx, size, vec![]);
+                        assert!(
+                            widgets(&out, Role::Pane, "Contêineres").is_empty(),
+                            "{case}"
+                        );
+                        let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+                        assert_eq!(inspector, table, "{case}: the table's place");
+                        widget_rect(&out, Role::Button, "← Voltar");
+                        // Em 720 × 560 os botões ficam abaixo da dobra: rolando
+                        // o inspetor, aparecem inteiros dentro dele.
+                        let out = wheel(&mut app, &ctx, size, inspector.center(), -3000.);
+                        let copy = widget_rect(&out, Role::Button, "Copiar nome");
+                        assert!(
+                            inspector.contains_rect(copy),
+                            "{case}: scrolled into view: {copy:?} in {inspector:?}"
+                        );
+                        for (name, rect) in page_widgets(&out, side, size[1]) {
+                            assert!(
+                                rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                                "{case}: {name:?} {rect:?} leaves the inspector"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn docker_table_follows_the_width_of_every_frame() {
+        use egui::accesskit::Role;
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        app.resources = docker_data();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let content =
+            |ctx: &egui::Context, size: [f32; 2]| (sidebar_width(ctx) + 24., size[0] - 24.);
+        let narrow = [720., 560.];
+        // (tamanho, inspetor ao lado?) — no mesmo contexto, nada guardado.
+        for (size, beside) in [
+            (narrow, false),
+            ([1320., 860.], true),
+            ([1920., 1080.], true),
+            (narrow, false),
+            ([1320., 860.], true),
+        ] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let (left, right) = content(&ctx, size);
+            let table = widget_rect(&out, Role::Pane, "Contêineres");
+            let want = if beside { right - 321. } else { right };
+            assert!(
+                (table.left() - left).abs() < 0.5 && (table.right() - want).abs() < 0.5,
+                "{size:?}: table {table:?} must span {left}..{want}"
+            );
+            let rows = container_rows(&out);
+            assert!(
+                rows.iter()
+                    .all(|(_, r)| (r.left() - left).abs() < 0.5 && (r.right() - want).abs() < 0.5),
+                "{size:?}: rows follow the table: {rows:?}"
+            );
+            let inspector = widgets(&out, Role::Pane, "Inspetor do contêiner");
+            assert_eq!(inspector.len(), usize::from(beside), "{size:?}");
+            assert!(
+                inspector.iter().all(|i| i.left() > table.left()),
+                "{size:?}"
+            );
+        }
+        // Aberto em 720 (um clique), segue aberto ao alargar e ao voltar:
+        // ao lado em 1320, no lugar da tabela em 720; "← Voltar" volta.
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let row = container_rows(&out)
+            .into_iter()
+            .find(|(n, _)| n == "postgres-dev")
+            .unwrap()
+            .1;
+        click_at(&mut app, &ctx, narrow, row.center());
+        for (size, beside) in [(narrow, false), ([1320., 860.], true), (narrow, false)] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let (left, right) = content(&ctx, size);
+            let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+            let name = widget_rect(&out, Role::Label, "postgres-dev");
+            assert!(inspector.contains_rect(name), "{size:?}: {name:?}");
+            assert_eq!(
+                widgets(&out, Role::Pane, "Contêineres").len(),
+                usize::from(beside),
+                "{size:?}"
+            );
+            let want_left = if beside { right - 320. } else { left };
+            assert!(
+                (inspector.left() - want_left).abs() < 0.5
+                    && (inspector.right() - right).abs() < 0.5,
+                "{size:?}: {inspector:?}"
+            );
+            assert_eq!(
+                widgets(&out, Role::Button, "← Voltar").len(),
+                usize::from(!beside),
+                "{size:?}"
+            );
+        }
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        click_at(
+            &mut app,
+            &ctx,
+            narrow,
+            widget_rect(&out, Role::Button, "← Voltar").center(),
+        );
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        assert!(widgets(&out, Role::Pane, "Inspetor do contêiner").is_empty());
+        widget_rect(&out, Role::Pane, "Contêineres");
+    }
+
+    #[test]
+    fn global_notices_are_strips_on_every_page_in_both_themes() {
+        use egui::accesskit::Role;
+        let docker = "Docker indisponível. Docker CLI não encontrado.";
+        let api = "Sem conexão com o ai-memory. Falha ao conectar.";
+        let partial = "Dados parciais: 2 aviso(s). Consulte Ajustes.";
+        // (caso, erro do Docker, erro da API, avisos parciais, faixas na ordem)
+        let cases: [(&str, bool, bool, usize, &[&str]); 5] = [
+            ("none", false, false, 0, &[]),
+            ("docker", true, false, 0, &[docker]),
+            ("api", false, true, 0, &[api]),
+            ("partial", false, false, 2, &[partial]),
+            ("all", true, true, 2, &[docker, api, partial]),
+        ];
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let p = if theme == egui::Theme::Dark {
+                &theme::DARK
+            } else {
+                &theme::LIGHT
+            };
+            for (case, docker_down, api_down, warnings, want) in cases {
+                for page in PAGES {
+                    let mut app = app_with_unsaved_draft();
+                    app.page = page;
+                    app.resources.docker_error =
+                        docker_down.then(|| "Docker CLI não encontrado.".into());
+                    app.api.error = api_down.then(|| "Falha ao conectar.".into());
+                    app.api.errors = vec!["aviso".into(); warnings];
+                    let ctx = styled();
+                    ctx.set_theme(theme);
+                    ctx.enable_accesskit();
+                    let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+                    let strips: Vec<egui::Rect> = want
+                        .iter()
+                        .map(|text| widget_rect(&out, Role::Label, text))
+                        .collect();
+                    assert!(
+                        strips.windows(2).all(|w| w[0].bottom() < w[1].top()),
+                        "{theme:?} {case} {page:?}: in order, apart"
+                    );
+                    let fills = |color: Color32| {
+                        out.shapes
+                            .iter()
+                            .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color))
+                            .count()
+                    };
+                    assert_eq!(
+                        (
+                            fills(p.bad.gamma_multiply(0.08)),
+                            fills(p.warn.gamma_multiply(0.10))
+                        ),
+                        (
+                            usize::from(docker_down) + usize::from(api_down),
+                            usize::from(warnings > 0)
+                        ),
+                        "{theme:?} {case} {page:?}: Bad and Warn strips"
+                    );
+                    let open = widgets(&out, Role::Button, "Abrir Ajustes");
+                    assert_eq!(open.len(), usize::from(api_down), "{case} {page:?}");
+                    // Nada da página sobre as faixas.
+                    let side = sidebar_width(&ctx);
+                    for (name, rect) in page_widgets(&out, side, 860.) {
+                        if want.contains(&name.as_str()) || name == "Abrir Ajustes" {
+                            continue;
+                        }
+                        for strip in &strips {
+                            assert!(
+                                !rect.intersects(strip.shrink(0.5)),
+                                "{theme:?} {case} {page:?}: {name:?} {rect:?} on a strip {strip:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // "Abrir Ajustes" leva a Ajustes.
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        app.api.error = Some("Falha ao conectar.".into());
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+        let open = widget_rect(&out, Role::Button, "Abrir Ajustes");
+        click_at(&mut app, &ctx, [1320., 860.], open.center());
+        assert_eq!(app.page, Page::Settings);
+    }
+
+    #[test]
+    fn navigating_away_keeps_the_docker_search() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for away in ["Visão geral", "Ajustes"] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Docker;
+            app.resources = docker_data();
+            *app.docker.search_mut() = "redis".into();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(
+                container_rows(&out)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect::<Vec<_>>(),
+                ["redis-cache"]
+            );
+            click_at(
+                &mut app,
+                &ctx,
+                size,
+                widget_rect(&out, Role::Button, away).center(),
+            );
+            assert_ne!(app.page, Page::Docker, "{away}");
+            let out = frame(&mut app, &ctx, size, vec![]);
+            click_at(
+                &mut app,
+                &ctx,
+                size,
+                widget_rect(&out, Role::Button, "Docker").center(),
+            );
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.page, Page::Docker);
+            assert_eq!(app.docker.search_mut(), "redis", "{away}");
+            update_node(&out, Role::TextInput, "redis");
+            assert_eq!(container_rows(&out).len(), 1, "{away}");
+        }
+    }
+
+    /// A linha `name` da tabela da Visão geral ("nome · CPU …").
+    fn overview_row(out: &egui::FullOutput, name: &str) -> egui::Rect {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        let found: Vec<egui::Rect> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == egui::accesskit::Role::Button
+                    && n.label()
+                        .is_some_and(|l| l.starts_with(&format!("{name} · CPU ")))
+            })
+            .filter_map(|(_, n)| n.bounds())
+            .map(|b| {
+                egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                )
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "overview row {name}");
+        found[0]
+    }
+
+    #[test]
+    fn a_container_clicked_in_the_overview_opens_in_the_docker_inspector() {
+        use egui::accesskit::Role;
+        // 1320: a tabela aparece sem rolar; 720: só depois de rolar a página.
+        for (size, scroll) in [([1320., 860.], false), ([720., 560.], true)] {
+            let mut app = app_with_unsaved_draft();
+            app.resources = docker_data();
+            app.docker.set_tab(crate::docker_ui::Tab::Images);
+            *app.docker.search_mut() = "redis".into();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let mut out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.page, Page::Overview);
+            let bottom = size[1] - 28. - 20.;
+            let row = overview_row(&out, "postgres-dev");
+            assert_eq!(row.bottom() > bottom, scroll, "{size:?}: precondition");
+            if scroll {
+                let strip = widget_rect(&out, Role::Pane, "Saúde");
+                out = wheel(&mut app, &ctx, size, strip.center(), -2000.);
+            }
+            let row = overview_row(&out, "postgres-dev");
+            assert!(
+                row.top() >= 52. && row.bottom() <= bottom + 0.5,
+                "{size:?}: on screen, {row:?}"
+            );
+            click_at(&mut app, &ctx, size, row.center());
+            assert_eq!(app.page, Page::Docker, "{size:?}");
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.docker.search_mut(), "", "the search would hide it");
+            assert_eq!(
+                app.docker.selected(),
+                Some(&*format!("postgres-dev-{}", "8f3c21a9d0e4".repeat(5)))
+            );
+            update_node(&out, Role::Button, "Contêineres 8");
+            // Em 1320 ao lado da tabela; em 720 no lugar dela, com "← Voltar".
+            let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+            assert!(inspector.contains_rect(widget_rect(&out, Role::Label, "postgres-dev")));
+            assert_eq!(
+                widgets(&out, Role::Pane, "Contêineres").is_empty(),
+                scroll,
+                "{size:?}"
+            );
+            assert_eq!(
+                widgets(&out, Role::Button, "← Voltar").len(),
+                usize::from(scroll),
+                "{size:?}"
+            );
+        }
+    }
+
+    /// Visão geral com Docker, API e saúde: os dados longos das outras
+    /// páginas, o ai-memory monitorado e um projeto vigiado.
+    fn overview_app() -> MonitorApp {
+        let mut app = app_with_unsaved_draft();
+        app.config.container = "ai-memory".into();
+        app.resources = docker_data();
+        app.api = sessions_data();
+        watching(&mut app, Some(3));
+        app
+    }
+    /// Os títulos dos quatro indicadores.
+    const KPIS: [&str; 4] = [
+        "ai-memory · CPU",
+        "ai-memory · Memória",
+        "Contêineres",
+        "Continuidade",
+    ];
+
+    #[test]
+    fn overview_card_values_stay_on_one_line_at_720_in_both_themes() {
+        use egui::accesskit::Role;
+        // (cartão, valor falado, texto pintado do valor e da unidade)
+        let want = [
+            ("ai-memory · CPU", "123,4 %", "123,4%"),
+            ("ai-memory · Memória", "1,1 GiB", "1,1GiB"),
+            ("Contêineres", "3 de 8 ativos", "3de 8 ativos"),
+            (
+                "Continuidade",
+                "1.234 handoffs abertos",
+                "1.234handoffs abertos",
+            ),
+        ];
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for size in [[720., 560.], [1320., 860.]] {
+                let mut app = overview_app();
+                let ctx = styled();
+                ctx.set_theme(theme);
+                ctx.enable_accesskit();
+                let out = frame(&mut app, &ctx, size, vec![]);
+                let case = format!("{theme:?} {size:?}");
+                for (card, spoken, painted) in want {
+                    let pane = widget_rect(&out, Role::Pane, card);
+                    let value = widget_rect(&out, Role::Label, spoken);
+                    assert!(pane.contains_rect(value), "{case}: {spoken} in {card}");
+                    let galleys: Vec<_> = out
+                        .shapes
+                        .iter()
+                        .filter_map(|c| match &c.shape {
+                            egui::Shape::Text(t)
+                                if t.galley.text() == painted && pane.contains(t.pos) =>
+                            {
+                                Some(t.galley.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(galleys.len(), 1, "{case}: {painted:?} painted in {card}");
+                    assert_eq!(
+                        (galleys[0].rows.len(), galleys[0].elided),
+                        (1, false),
+                        "{case}: {painted:?} is one whole line"
+                    );
+                    assert!(
+                        value.height() < 40.,
+                        "{case}: {spoken} one row tall, {value:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_overview_has_no_host_panel_and_no_project_count() {
+        use egui::accesskit::Role;
+        for size in [[720., 560.], [1320., 860.]] {
+            let mut app = overview_app();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let side = sidebar_width(&ctx);
+            let page = page_widgets(&out, side, size[1]);
+            // O cenário tem projetos: a barra de status os conta.
+            let status = widget_rect(&out, Role::Label, &host_status(&app.resources, &app.api));
+            assert!(status.top() >= size[1] - 28., "{size:?}: {status:?}");
+            assert!(host_status(&app.resources, &app.api).ends_with(" · 5 projetos"));
+            assert!(
+                page.iter().any(|(name, _)| name == "Recursos"),
+                "{size:?}: the page mounted"
+            );
+            let content =
+                egui::Rect::from_min_max(egui::pos2(side, 52.), egui::pos2(size[0], size[1] - 28.));
+            let painted: Vec<String> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if content.contains(t.pos) => {
+                        Some(t.galley.text().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(painted.iter().any(|t| t == "Recursos"), "{size:?}");
+            for text in page.iter().map(|(n, _)| n).chain(&painted) {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("este mac")
+                        && !lower.contains("este computador")
+                        && !lower.contains("projetos"),
+                    "{size:?}: {text:?} on the page"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_overview_follows_the_width_of_every_frame() {
+        use egui::accesskit::Role;
+        let mut app = overview_app();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        // (janela, indicadores por linha, linha de baixo lado a lado?) — no
+        // mesmo contexto, nada guardado.
+        for (size, per_line, beside) in [
+            ([720., 560.], 2, false),
+            ([1320., 860.], 4, true),
+            ([1920., 1080.], 4, true),
+            ([720., 560.], 2, false),
+            // 1000 − 232 − 48 = 720 de conteúdo: cabem três, vão 2 + 2.
+            ([1000., 700.], 2, false),
+            ([1320., 860.], 4, true),
+        ] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let side = sidebar_width(&ctx);
+            let (left, right) = (side + 24., size[0] - 24.);
+            let spans =
+                |r: egui::Rect| (r.left() - left).abs() < 0.5 && (r.right() - right).abs() < 0.5;
+            for pane in ["Saúde", "Recursos"] {
+                let rect = widget_rect(&out, Role::Pane, pane);
+                assert!(
+                    spans(rect),
+                    "{size:?}: {pane} {rect:?} spans {left}..{right}"
+                );
+            }
+            let kpis: Vec<egui::Rect> = KPIS
+                .iter()
+                .map(|t| widget_rect(&out, Role::Pane, t))
+                .collect();
+            let lines = crate::overview_ui::kpi_lines(right - left);
+            assert_eq!(lines[0].len(), per_line, "{size:?}");
+            for line in &lines {
+                let row: Vec<egui::Rect> = line.iter().map(|&(i, _)| kpis[i]).collect();
+                assert!((row[0].left() - left).abs() < 0.5, "{size:?}: {row:?}");
+                assert!(
+                    (row.last().unwrap().right() - right).abs() < 0.5,
+                    "{size:?}: {row:?}"
+                );
+                assert!(
+                    row.windows(2)
+                        .all(|w| (w[1].left() - w[0].right() - 12.).abs() < 0.5
+                            && (w[0].top() - w[1].top()).abs() < 0.5
+                            && (w[0].height() - w[1].height()).abs() < 0.5),
+                    "{size:?}: {row:?}"
+                );
+            }
+            let table = widget_rect(&out, Role::Pane, "Contêineres em execução");
+            let recent = widget_rect(&out, Role::Pane, "Handoffs recentes");
+            assert_eq!(recent.top() > table.bottom(), !beside, "{size:?}");
+            if beside {
+                assert!((table.left() - left).abs() < 0.5 && (recent.right() - right).abs() < 0.5);
+                assert!(
+                    (recent.left() - table.right() - 12.).abs() < 0.5,
+                    "{size:?}"
+                );
+                // flex 3 1 420 e 2 1 300: a sobra na proporção 3 : 2.
+                let free = right - left - 12. - 720.;
+                assert!(
+                    (table.width() - (420. + free * 0.6)).abs() < 0.5,
+                    "{size:?}"
+                );
+                assert_eq!(
+                    table.height(),
+                    recent.height(),
+                    "{size:?}: same line, same height"
+                );
+            } else {
+                assert!(
+                    spans(table) && spans(recent),
+                    "{size:?}: {table:?} {recent:?}"
+                );
+            }
+            // As linhas da tabela ocupam a largura do cartão (sem a borda).
+            for name in ["ai-memory", "postgres-dev", "redis-cache"] {
+                let row = overview_row(&out, name);
+                assert!(
+                    (row.left() - (table.left() + 1.)).abs() < 0.5
+                        && (row.right() - (table.right() - 1.)).abs() < 0.5,
+                    "{size:?}: {name} {row:?} spans {table:?}"
+                );
+            }
+            for (name, rect) in page_widgets(&out, side, size[1]) {
+                assert!(
+                    rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                    "{size:?}: {name:?} {rect:?} leaves the content ({left}..{right})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overview_links_open_health_docker_and_sessions() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for (link, page) in [
+            ("Ver saúde →", Page::Health),
+            ("Ver todos →", Page::Docker),
+            ("Abrir →", Page::Sessions),
+        ] {
+            let mut app = overview_app();
+            *app.docker.search_mut() = "redis".into();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            click_at(
+                &mut app,
+                &ctx,
+                size,
+                widget_rect(&out, Role::Link, link).center(),
+            );
+            assert_eq!(app.page, page, "{link}");
+            // "Ver todos" não escolhe contêiner nem limpa a busca.
+            assert_eq!(app.docker.search_mut(), "redis", "{link}");
+            assert_eq!(app.docker.selected(), None, "{link}");
+        }
+    }
+
+    #[test]
+    fn reconnect_clears_the_docker_selection_but_keeps_the_search() {
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        // O monitorado não é o primeiro da lista (ai-memory tem mais CPU).
+        app.config.container = "redis-cache".into();
+        app.resources = docker_data();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let row = container_rows(&out)
+            .into_iter()
+            .find(|(n, _)| n == "minio")
+            .unwrap()
+            .1;
+        click_at(&mut app, &ctx, size, row.center());
+        *app.docker.search_mut() = "i".into();
+        frame(&mut app, &ctx, size, vec![]);
         assert!(
-            after.left() < before.left() - 50.,
-            "content cut at 720 must be reachable by scrolling sideways: x {} -> {}",
-            before.left(),
-            after.left()
+            app.docker
+                .selected()
+                .is_some_and(|id| id.starts_with("minio-")),
+            "precondition: minio chosen"
+        );
+        app.reconnect(app.config.clone());
+        assert_eq!(app.docker.selected(), None);
+        assert_eq!(app.docker.search_mut(), "i");
+        app.resources = docker_data();
+        frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            app.docker
+                .selected()
+                .is_some_and(|id| id.starts_with("redis-cache-")),
+            "a new connection opens on the monitored container, not on the first"
         );
     }
 }

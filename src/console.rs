@@ -1,8 +1,7 @@
 //! Native read-only inspector. Text from memory is displayed as data, never executed.
 use crate::{
     client::Scope,
-    health,
-    model::{Project, bytes},
+    model::Project,
     monitor::Shared,
     queries::{Query, Worker},
     theme,
@@ -15,7 +14,6 @@ use std::sync::{Arc, atomic::Ordering};
 #[derive(Default, Clone, Copy, PartialEq)]
 enum Tab {
     #[default]
-    Health,
     Sessions,
     Knowledge,
 }
@@ -108,17 +106,10 @@ impl Console {
             }
         }
     }
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        shared: &Arc<Shared>,
-        projects: &[Project],
-        snapshot: &health::Snapshot,
-    ) {
+    pub fn show(&mut self, ui: &mut egui::Ui, shared: &Arc<Shared>, projects: &[Project]) {
         self.poll(shared);
         let previous = self.tab;
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Health, "Saúde");
             ui.selectable_value(&mut self.tab, Tab::Sessions, "Sessões detalhadas");
             ui.selectable_value(&mut self.tab, Tab::Knowledge, "Conhecimento");
         });
@@ -126,10 +117,6 @@ impl Console {
             self.clear_result();
         }
         ui.separator();
-        if self.tab == Tab::Health {
-            show_health(ui, snapshot);
-            return;
-        }
         let old = self.scope.clone();
         egui::ComboBox::from_id_salt("central-scope")
             .width(440.)
@@ -176,7 +163,6 @@ impl Console {
         ui.add_enabled_ui(!self.busy, |ui| match self.tab {
             Tab::Sessions => self.session_controls(ui, shared, &scope),
             Tab::Knowledge => self.knowledge_controls(ui, shared, &scope),
-            Tab::Health => {}
         });
         ui.separator();
         if let Some((query, data)) = self.result.clone() {
@@ -755,10 +741,10 @@ fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
     ui.data_mut(|d| d.insert_temp(id, offset));
     offset..(offset + 100).min(total)
 }
-fn array(v: &Value) -> &[Value] {
+pub(crate) fn array(v: &Value) -> &[Value] {
     v.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
-fn text<'a>(v: &'a Value, key: &str) -> &'a str {
+pub(crate) fn text<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("—")
 }
 pub(crate) fn row_key(
@@ -771,7 +757,7 @@ pub(crate) fn row_key(
         _ => (id.unwrap_or("").to_owned(), Some(idx)),
     }
 }
-fn number(v: &Value) -> String {
+pub(crate) fn number(v: &Value) -> String {
     v.as_u64()
         .map(|n| crate::model::number(n as usize))
         .unwrap_or("—".into())
@@ -791,7 +777,7 @@ fn show_usage(ui: &mut egui::Ui, usage: &Value) {
     ));
     ui.small("Totais reportados da sessão; não são valores de faturamento nem rateio por projeto/modelo.");
 }
-fn count_grid(ui: &mut egui::Ui, id: &str, data: &Value, fields: &[(&str, &str)]) {
+pub(crate) fn count_grid(ui: &mut egui::Ui, id: &str, data: &Value, fields: &[(&str, &str)]) {
     egui::Grid::new(id).num_columns(2).show(ui, |ui| {
         for (key, label) in fields {
             ui.label(*label);
@@ -799,140 +785,6 @@ fn count_grid(ui: &mut egui::Ui, id: &str, data: &Value, fields: &[(&str, &str)]
             ui.end_row();
         }
     });
-}
-fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
-    ui.heading("Saúde interna do ai-memory");
-    ui.label(s.menu_summary(Utc::now()));
-    ui.small("Coleta a cada 30 s após a resposta, mesmo com a janela fechada. Alertas também aparecem como ! na barra.");
-    if let Some(at) = s.at {
-        ui.small(format!(
-            "Última tentativa: {}",
-            at.with_timezone(&Local).format("%H:%M:%S")
-        ));
-    }
-    if let Some(i) = &s.identity {
-        ui.label(identity_line(i));
-    }
-    if let Some(v) = &s.status {
-        for alert in s.alerts() {
-            ui.colored_label(theme::palette(ui.visuals()).warn, alert);
-        }
-        ui.separator();
-        ui.strong("Captura e consolidação");
-        count_grid(
-            ui,
-            "health-counts",
-            &v["counts"],
-            &[
-                ("pages_latest", "Páginas atuais"),
-                ("sessions", "Sessões"),
-                ("observations", "Eventos"),
-            ],
-        );
-        count_grid(
-            ui,
-            "health-consolidation",
-            &v["consolidation"],
-            &[
-                ("pending", "Consolidações pendentes"),
-                ("running", "Em execução"),
-                ("completed", "Concluídas"),
-                ("failed", "Com falha"),
-            ],
-        );
-        ui.label(format!(
-            "Fila de escrita: {} / {}",
-            number(&v["write_queue"][0]),
-            number(&v["write_queue"][1])
-        ));
-        ui.separator();
-        ui.strong("Providers");
-        for role in ["llm", "embedding"] {
-            let p = &v["providers"][role];
-            ui.label(format!(
-                "{role}: {} · {} · {}",
-                text(p, "provider"),
-                text(p, "model"),
-                text(p, "status")
-            ));
-        }
-        egui::CollapsingHeader::new("Uso dos providers por atividade").show(ui, |ui| {
-            ui.small("Contadores passivos desde o início do servidor. Estimativas e tokens reportados são medidas distintas.");
-            let mut seen = std::collections::HashSet::new();
-            for (idx, row) in array(&v["providers"]["llm_workloads"])
-                .iter()
-                .take(100)
-                .enumerate()
-            {
-                ui.push_id(row_key(&mut seen, row["workload"].as_str(), idx), |ui| {
-                    ui.strong(text(row, "workload"));
-                    count_grid(ui, "workload", row, &[("calls", "Chamadas"), ("errors", "Falhas"), ("reported_input_tokens", "Entrada reportada"), ("reported_output_tokens", "Saída reportada"), ("estimated_input_tokens", "Entrada estimada"), ("estimated_output_tokens", "Saída estimada")]);
-                });
-            }
-        });
-        ui.separator();
-        ui.strong("Armazenamento e índices");
-        for (key, label) in [
-            ("database_bytes", "Banco"),
-            ("reclaimable_bytes", "Potencial recuperável"),
-            ("data_dir_free_bytes", "Disco livre no servidor"),
-        ] {
-            ui.label(format!(
-                "{label}: {}",
-                v["storage"][key].as_u64().map(bytes).unwrap_or("—".into())
-            ));
-        }
-        count_grid(
-            ui,
-            "health-derived",
-            &v["derived"],
-            &[
-                (
-                    "latest_pages_missing_embeddings",
-                    "Páginas sem embedding compatível",
-                ),
-                ("embed_failures_unresolved", "Embeddings com falha"),
-                ("unresolved_links_from_latest_pages", "Links não resolvidos"),
-                ("pages_rows", "Versões de página"),
-                ("pages_fts_rows", "Versões no índice textual"),
-            ],
-        );
-        ui.small("Campo ausente = desconhecido. Ausência de embeddings pode ser normal quando o recurso não está configurado.");
-    }
-    for e in &s.auxiliary_errors {
-        ui.colored_label(theme::palette(ui.visuals()).warn, e);
-    }
-    egui::CollapsingHeader::new("Métricas acumuladas desde o início do servidor").show(ui, |ui| {
-        for m in &s.metrics {
-            ui.horizontal_wrapped(|ui| {
-                ui.monospace(&m.series);
-                ui.label(crate::model::metric_value(m.value));
-            });
-        }
-        if s.metrics.is_empty() {
-            ui.label("Nenhuma métrica disponível.");
-        }
-    });
-    if let Some(features) = &s.features {
-        egui::CollapsingHeader::new("Recursos informados pelo servidor").show(ui, |ui| {
-            show_values(ui, features, 0);
-        });
-    }
-}
-fn identity_line(i: &health::Identity) -> String {
-    format!(
-        "Versão {} · acesso {} · distingue operadores: {}",
-        i.version,
-        match i.level.as_str() {
-            "anonymous" => "anônimo",
-            level => level,
-        },
-        if i.distinguishes_operators {
-            "sim"
-        } else {
-            "não"
-        }
-    )
 }
 pub(crate) fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
     if depth > 10 {
@@ -1115,36 +967,36 @@ mod tests {
     }
 
     #[test]
-    fn counts_group_thousands_and_identity_is_in_pt_br() {
+    fn explore_has_detailed_sessions_and_knowledge_and_opens_on_sessions() {
+        use crate::widgets::tests::{context, node, nodes, run};
+        use egui::accesskit::Role;
+        let shared = Shared::unstarted(crate::model::Config::default());
+        let mut console = Console::new(shared.clone());
+        console.scope = Some(Scope {
+            workspace: "fixture".into(),
+            project: "demo".into(),
+        });
+        let ctx = context(egui::Theme::Dark);
+        let out = run(&ctx, vec![], |ui| console.show(ui, &shared, &[]));
+        for tab in ["Sessões detalhadas", "Conhecimento"] {
+            node(&out, Role::Button, tab);
+        }
+        // Abre em Sessões detalhadas: os controles dela, não os de Conhecimento.
+        node(&out, Role::Button, "Carregar sessões");
+        assert!(nodes(&out, Role::Button, "Páginas").is_empty());
+        assert!(
+            nodes(&out, Role::Button, "Saúde").is_empty(),
+            "Saúde is its own page now"
+        );
+    }
+
+    #[test]
+    fn counts_group_thousands() {
         assert_eq!(number(&json!(1234567)), "1.234.567");
         assert_eq!(number(&json!(999)), "999");
         assert_eq!(number(&json!(0)), "0");
         for missing in [json!(null), json!(-1), json!(1.5), json!("12")] {
             assert_eq!(number(&missing), "—", "{missing}");
-        }
-        for (level, distinguishes, want) in [
-            (
-                "anonymous",
-                false,
-                "Versão 3.3.1 · acesso anônimo · distingue operadores: não",
-            ),
-            (
-                "user",
-                true,
-                "Versão 3.3.1 · acesso user · distingue operadores: sim",
-            ),
-            (
-                "human:admin",
-                false,
-                "Versão 3.3.1 · acesso human:admin · distingue operadores: não",
-            ),
-        ] {
-            let identity = health::Identity {
-                version: "3.3.1".into(),
-                level: level.into(),
-                distinguishes_operators: distinguishes,
-            };
-            assert_eq!(identity_line(&identity), want);
         }
     }
 

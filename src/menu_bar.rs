@@ -71,20 +71,10 @@ impl MenuReading {
             .unwrap_or("—".into());
         let p = if let Some(health) = health {
             if let Some(scope) = &config.proposal_watch {
-                let n = if health.fresh(now) && health.pending_scope.as_ref() == Some(scope) {
-                    health
-                        .pending
-                        .map(|n| {
-                            if n >= 200 {
-                                "200+".into()
-                            } else {
-                                n.to_string()
-                            }
-                        })
-                        .unwrap_or("—".into())
-                } else {
-                    "—".into()
-                };
+                let n = health
+                    .watched_pending(scope, now)
+                    .map(crate::health::pending_text)
+                    .unwrap_or("—".into());
                 self.title.push_str(&format!(" P{n}"));
                 format!("Propostas {n} · {}", scope.label())
             } else {
@@ -362,9 +352,9 @@ mod native {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             for (title, selector) in [
                 ("Abrir painel", sel!(openPanel:)),
-                ("Saúde e sessões", sel!(openHealth:)),
-                ("Revisar propostas e handoffs", sel!(openReview:)),
-                ("Administração avançada", sel!(openAdmin:)),
+                ("Saúde", sel!(openHealth:)),
+                ("Revisão", sel!(openReview:)),
+                ("Administração", sel!(openAdmin:)),
                 ("Ocultar painel", sel!(hidePanel:)),
                 ("Sair do AI Monitor", sel!(quitMonitor:)),
             ] {
