@@ -247,23 +247,46 @@ impl Panel {
         self.info = None;
         self.error = None;
     }
+    /// A aba Conta de Ajustes: o estado da conexão e o login humano, na
+    /// grade de rótulos da janela.
     pub fn show(&mut self, ui: &mut eframe::egui::Ui, shared: &Arc<Shared>, enabled: bool) {
-        use eframe::egui;
-        ui.heading("Autenticação humana");
+        use crate::{
+            app::{name, setting_row},
+            widgets::{Button, caption, disclosure_link, text_field},
+        };
+        use eframe::egui::RichText;
         let human = shared.config.read().unwrap().human.is_some();
-        ui.label(if human{"Conexão ativa: sessão humana. Cookies e CSRF somente em memória."}else{"Conexão ativa: Bearer configurado ou acesso anônimo. Login usa credenciais humanas separadas."});
-        ui.small(format!("Não há fallback de sessão humana para Bearer. MCP e workstreams exigem conexão Bearer. Senhas humanas não são guardadas no {}.",crate::platform::SECRET_STORE));
+        setting_row(ui, "Conexão ativa:", |ui| {
+            ui.label(
+                RichText::new(if human {
+                    "Sessão humana. Cookies e CSRF somente em memória."
+                } else {
+                    "Bearer configurado ou acesso anônimo. Login usa credenciais humanas separadas."
+                })
+                .size(13.),
+            );
+            caption(
+                ui,
+                &format!(
+                    "Não há fallback de sessão humana para Bearer. MCP e workstreams exigem conexão Bearer. Senhas humanas não são guardadas no {}.",
+                    crate::platform::SECRET_STORE
+                ),
+            );
+        });
         ui.add_enabled_ui(enabled && !self.busy, |ui| {
             if !human {
-                ui.label("Usuário");
-                ui.add(egui::TextEdit::singleline(&mut self.username).char_limit(256));
-                ui.label("Senha");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.password)
-                        .password(true)
-                        .char_limit(4096),
-                );
-                if ui.button("Entrar com sessão humana").clicked() {
+                setting_row(ui, "Usuário:", |ui| {
+                    let field = text_field(ui, &mut self.username, 220., "", false, 256);
+                    name(ui, &field, "Usuário");
+                });
+                setting_row(ui, "Senha:", |ui| {
+                    let field = text_field(ui, &mut self.password, 220., "", true, 4096);
+                    name(ui, &field, "Senha");
+                });
+                let login = setting_row(ui, "", |ui| {
+                    ui.add(Button::secondary("Entrar com sessão humana").on_surf())
+                });
+                if login.clicked() {
                     let password = std::mem::take(&mut self.password);
                     self.submit(
                         shared,
@@ -274,31 +297,44 @@ impl Panel {
                     );
                 }
             } else {
-                ui.horizontal(|ui| {
-                    if ui.button("Consultar identidade e capacidades").clicked() {
-                        self.submit(shared, Command::Me);
-                    }
-                    if ui
-                        .button("Sair da sessão humana e voltar ao Bearer")
-                        .clicked()
-                    {
-                        self.submit(shared, Command::Logout);
-                    }
+                let (me, logout) = setting_row(ui, "", |ui| {
+                    ui.horizontal(|ui| {
+                        (
+                            ui.add(
+                                Button::secondary("Consultar identidade e capacidades").on_surf(),
+                            ),
+                            ui.add(
+                                Button::secondary("Sair da sessão humana e voltar ao Bearer")
+                                    .on_surf(),
+                            ),
+                        )
+                    })
+                    .inner
                 });
-                egui::CollapsingHeader::new("Alterar minha senha").show(ui, |ui| {
+                if me.clicked() {
+                    self.submit(shared, Command::Me);
+                }
+                if logout.clicked() {
+                    self.submit(shared, Command::Logout);
+                }
+                let open = setting_row(ui, "", |ui| {
+                    disclosure_link(ui, "change-password", "Alterar minha senha", |_| ()).is_some()
+                });
+                if open {
                     for (label, value) in [
-                        ("Senha atual", &mut self.current),
-                        ("Nova senha", &mut self.new),
-                        ("Confirmar nova senha", &mut self.confirmation),
+                        ("Senha atual:", &mut self.current),
+                        ("Nova senha:", &mut self.new),
+                        ("Confirmar nova senha:", &mut self.confirmation),
                     ] {
-                        ui.label(label);
-                        ui.add(
-                            egui::TextEdit::singleline(value)
-                                .password(true)
-                                .char_limit(4096),
-                        );
+                        setting_row(ui, label, |ui| {
+                            let field = text_field(ui, value, 220., "", true, 4096);
+                            name(ui, &field, label.trim_end_matches(':'));
+                        });
                     }
-                    if ui.button("Alterar senha e renovar sessão").clicked() {
+                    let change = setting_row(ui, "", |ui| {
+                        ui.add(Button::secondary("Alterar senha e renovar sessão").on_surf())
+                    });
+                    if change.clicked() {
                         let current = std::mem::take(&mut self.current);
                         let new = std::mem::take(&mut self.new);
                         let confirmation = std::mem::take(&mut self.confirmation);
@@ -311,14 +347,16 @@ impl Panel {
                             },
                         );
                     }
-                });
+                }
             }
         });
         if self.busy {
-            ui.spinner();
+            setting_row(ui, "", |ui| ui.spinner());
         }
         if let Some(e) = &self.error {
-            ui.colored_label(crate::theme::palette(ui.visuals()).bad, e);
+            setting_row(ui, "", |ui| {
+                ui.colored_label(crate::theme::palette(ui.visuals()).bad, e)
+            });
         }
         if let Some(v) = &self.info {
             crate::console::show_values(ui, v, 0);
