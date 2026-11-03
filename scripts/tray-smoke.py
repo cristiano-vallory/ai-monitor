@@ -47,9 +47,9 @@ EXPECTED_TAIL = [
     "Docker = contêineres ativos, incluindo ai-memory",
     "---",
     "Abrir painel",
-    "Saúde e sessões",
-    "Revisar propostas e handoffs",
-    "Administração avançada",
+    "Saúde",
+    "Revisão",
+    "Administração",
     "Ocultar painel",
     "Sair do AI Monitor",
 ]
@@ -345,7 +345,7 @@ def scenario_with_watcher(binary):
                 rss.append(("hide", rss_kb(proc.pid)))
 
         open_and_hide("Abrir painel", "Ocultar painel", cycles=3)
-        open_and_hide("Saúde e sessões", "Ocultar painel")
+        open_and_hide("Saúde", "Ocultar painel")
 
         # Compositor close (title bar / WM_DELETE) → window gone, app stays.
         click(menu, by_label["Abrir painel"])
