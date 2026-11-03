@@ -61,6 +61,9 @@ pub struct Management {
     receipt: Option<Receipt>,
     error: Option<String>,
     notice: String,
+    /// A prévia venceu e `poll` a descartou; só resta o aviso em `notice`.
+    /// Prende o painel como um resultado na tela: sai com um clique.
+    expired: bool,
     confirm: String,
     status: String,
     identifier: String,
@@ -89,6 +92,7 @@ impl Management {
             receipt: None,
             error: None,
             notice: String::new(),
+            expired: false,
             confirm: String::new(),
             status: "pending".into(),
             identifier: String::new(),
@@ -123,6 +127,7 @@ impl Management {
         self.error = None;
         self.confirm.clear();
         self.notice.clear();
+        self.expired = false;
     }
     /// Troca de aba ou de projeto: descarta prévia, resultado e os campos.
     fn discard(&mut self) {
@@ -134,10 +139,11 @@ impl Management {
         self.session.clear();
     }
     /// O que a troca de aba descartaria e o usuário ainda não viu ou
-    /// decidiu: operação em andamento, resultado ou erro na tela. Uma prévia
-    /// aguardando confirmação sempre vem com o seu resultado.
+    /// decidiu: operação em andamento, resultado ou erro na tela, ou o aviso
+    /// de que a prévia expirou. Uma prévia aguardando confirmação sempre vem
+    /// com o seu resultado.
     fn holds(&self) -> bool {
-        self.busy || self.result.is_some() || self.error.is_some()
+        self.busy || self.result.is_some() || self.error.is_some() || self.expired
     }
     /// `section` aberta com o painel preso à outra página: avisa, oferece ir
     /// até lá e, sem operação em voo, descartar. Nada muda sem um clique.
@@ -159,6 +165,11 @@ impl Management {
             (
                 format!("Prévia aguardando confirmação em {place}."),
                 "Confirme-a lá ou descarte-a para usar esta página.",
+            )
+        } else if self.expired {
+            (
+                format!("Prévia expirada em {place}."),
+                "Veja o aviso lá ou descarte-o para usar esta página.",
             )
         } else {
             (
@@ -236,6 +247,7 @@ impl Management {
         {
             self.clear();
             self.notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.".into();
+            self.expired = true;
         }
     }
     /// A página `section`. Se o painel está em aba da outra página, troca
@@ -665,6 +677,13 @@ mod tests {
             at: std::time::Instant::now(),
         }
     }
+    /// O recibo de uma prévia pedida há `secs` segundos.
+    fn aged(secs: u64) -> Receipt {
+        Receipt {
+            at: Instant::now() - Duration::from_secs(secs),
+            ..receipt()
+        }
+    }
     /// Espera a resposta do trabalhador (até 3 s).
     fn settle(m: &mut Management, shared: &Shared) {
         let until = Instant::now() + Duration::from_secs(3);
@@ -778,6 +797,11 @@ mod tests {
                 "Resultado ainda na tela em Revisão · Propostas. Confira-o lá ou descarte-o para usar esta página.",
                 true,
             ),
+            (
+                "expired",
+                "Prévia expirada em Revisão · Propostas. Veja o aviso lá ou descarte-o para usar esta página.",
+                true,
+            ),
         ] {
             let shared = Shared::unstarted(crate::model::Config::default());
             let mut m = Management::new(shared.clone());
@@ -789,6 +813,13 @@ mod tests {
                     m.result = Some(serde_json::json!({"preview": true}));
                 }
                 "result" => m.result = Some(serde_json::json!([])),
+                "expired" => {
+                    m.receipt = Some(aged(301));
+                    m.result = Some(serde_json::json!({"preview": true}));
+                    // O app chama `poll` a cada frame, em qualquer página.
+                    m.poll(&shared);
+                    assert!(m.receipt.is_none() && m.result.is_none(), "poll expired it");
+                }
                 _ => m.error = Some("Recusado.".into()),
             }
             let ctx = context(egui::Theme::Light);
@@ -838,6 +869,96 @@ mod tests {
                 assert_eq!(m.tab, 2, "{case}: discarding opens Maintenance");
                 assert!(!m.holds(), "{case}");
                 node(&out, Role::Button, "Manutenção");
+            }
+        }
+    }
+
+    #[test]
+    fn a_preview_that_expires_on_the_other_page_waits_for_a_click() {
+        let shared = Shared::unstarted(crate::model::Config::default());
+        let waiting = "Prévia aguardando confirmação em Revisão · Propostas. Confirme-a lá ou descarte-a para usar esta página.";
+        let expired = "Prévia expirada em Revisão · Propostas. Veja o aviso lá ou descarte-o para usar esta página.";
+        let notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.";
+        for go in [true, false] {
+            let mut m = Management::new(shared.clone());
+            m.scope = Some(scope());
+            m.identifier = "draft-id".into();
+            m.reason = "draft reason".into();
+            m.receipt = Some(receipt());
+            m.result = Some(serde_json::json!({"preview": true}));
+            let ctx = context(egui::Theme::Dark);
+            // Em Manutenção e backup, a prévia de Revisão ainda vale.
+            let out = run(&ctx, vec![], |ui| {
+                m.show(ui, &shared, &[], Section::Maintenance);
+            });
+            node(&out, Role::Label, waiting);
+            // Passam 5 minutos; o app chama `poll` a cada frame.
+            m.receipt.as_mut().unwrap().at = Instant::now() - Duration::from_secs(301);
+            m.poll(&shared);
+            assert!(m.receipt.is_none(), "go {go}: poll expired the preview");
+            assert_eq!(m.notice, notice, "go {go}");
+            // O frame seguinte da outra página: a faixa, sem trocar de aba.
+            let out = run(&ctx, vec![], |ui| {
+                m.show(ui, &shared, &[], Section::Maintenance);
+            });
+            node(&out, Role::Label, expired);
+            assert!(
+                nodes(&out, Role::Label, waiting).is_empty(),
+                "go {go}: not the strip of a live preview"
+            );
+            assert!(
+                nodes(&out, Role::Button, "Manutenção").is_empty(),
+                "go {go}: the Maintenance form stays closed"
+            );
+            assert_eq!(m.tab, 0, "go {go}: the tab is kept");
+            assert_eq!(
+                (m.identifier.as_str(), m.reason.as_str(), m.notice.as_str()),
+                ("draft-id", "draft reason", notice),
+                "go {go}: nothing was discarded"
+            );
+            if go {
+                let at = rect_of(&node(&out, Role::Button, "Ir para Revisão")).center();
+                let mut went = None;
+                click(&ctx, at, |ui| {
+                    if let Some(section) = m.show(ui, &shared, &[], Section::Maintenance) {
+                        went = Some(section);
+                    }
+                });
+                assert_eq!(went, Some(Section::Review));
+                // Em Revisão, o aviso e os campos digitados estão lá.
+                let out = run(&ctx, vec![], |ui| {
+                    assert_eq!(m.show(ui, &shared, &[], Section::Review), None);
+                });
+                assert_eq!(m.tab, 0);
+                node(&out, Role::Label, notice);
+                assert_eq!(nodes(&out, Role::TextInput, "draft-id").len(), 1);
+                assert_eq!(nodes(&out, Role::TextInput, "draft reason").len(), 1);
+                assert!(
+                    nodes(&out, Role::Label, expired).is_empty(),
+                    "on its own page the notice is the usual one"
+                );
+            } else {
+                let at = rect_of(&node(
+                    &out,
+                    Role::Button,
+                    "Descartar e abrir Manutenção e backup",
+                ))
+                .center();
+                click(&ctx, at, |ui| {
+                    m.show(ui, &shared, &[], Section::Maintenance);
+                });
+                let out = run(&ctx, vec![], |ui| {
+                    m.show(ui, &shared, &[], Section::Maintenance);
+                });
+                assert_eq!(m.tab, 2, "discarding opens Maintenance");
+                assert_eq!(
+                    (m.identifier.as_str(), m.reason.as_str(), m.notice.as_str()),
+                    ("", "", ""),
+                    "the click discarded it"
+                );
+                assert!(!m.holds());
+                node(&out, Role::Button, "Manutenção");
+                assert!(nodes(&out, Role::Label, expired).is_empty());
             }
         }
     }

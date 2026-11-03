@@ -312,10 +312,14 @@ fn exited(rest: &str) -> Option<(String, &str)> {
 }
 /// Há quanto tempo o contêiner está no estado atual, do `Status` do `docker
 /// ps` ("Up 3 days", "Exited (0) 2 hours ago" → "há 3 dias", "há 2 horas");
-/// `None` fora desses formatos.
+/// `None` fora desses formatos e em pausa: o `Up` conta desde o start e o
+/// Docker não diz quando a pausa começou.
 fn since(status: &str) -> Option<String> {
     let status = status.trim();
     let time = if let Some(up) = status.strip_prefix("Up ") {
+        if up.ends_with("(Paused)") {
+            return None;
+        }
         duration(up.rsplit_once(" (").map_or(up, |(up, _)| up))?
     } else {
         let rest = status
@@ -327,11 +331,12 @@ fn since(status: &str) -> Option<String> {
 }
 /// A 2ª linha do Nome depois da imagem: em execução, só a duração ("há 3
 /// dias", como o artboard); noutro estado com duração, o estado em pt-BR na
-/// frente ("parado há 2 horas"); sem duração, só o estado.
+/// frente ("parado há 2 horas"); sem duração, e em pausa, só o estado.
 fn state_since(state: &str, status: &str) -> String {
     let label = state_label(state);
     match since(status) {
         Some(when) if state == "running" => when,
+        Some(_) if state == "paused" => label.to_owned(),
         Some(when) => format!("{label} {when}"),
         None => label.to_owned(),
     }
@@ -419,11 +424,13 @@ impl Docker {
     }
     /// A Visão geral abre um contêiner: a aba Contêineres com ele no
     /// inspetor (na tela estreita, no lugar da tabela). A busca sai, para ele
-    /// não ficar fora da lista; limpá-la aqui não conta como troca de filtro.
+    /// não ficar fora da lista. Nem isso nem um "Só em execução" mudado depois
+    /// do último frame (o "mostrar") contam como troca de filtro: `shown`
+    /// fica igual ao que `show` vai comparar.
     pub(crate) fn open(&mut self, id: &str) {
         self.tab = Tab::Containers;
         self.search.clear();
-        self.shown.0.clear();
+        self.shown = (String::new(), self.running_only);
         self.selected = Some(id.to_owned());
         self.open = true;
     }
@@ -2164,7 +2171,9 @@ mod tests {
         for (status, want) in [
             ("Up 3 days", Some("há 3 dias")),
             ("Up 5 hours (healthy)", Some("há 5 horas")),
-            ("Up 3 weeks (Paused)", Some("há 3 semanas")),
+            // O Docker conta desde o start, não desde a pausa: sem duração.
+            ("Up 3 weeks (Paused)", None),
+            ("Up 3 weeks", Some("há 3 semanas")),
             ("Up 3 days (sleepy)", Some("há 3 dias")),
             ("Up About an hour", Some("há cerca de uma hora")),
             ("Up Less than a second", Some("há menos de um segundo")),
@@ -2191,7 +2200,7 @@ mod tests {
         }
         // (estado, Status com duração, Status sem duração, com, sem): em
         // execução só a duração; os outros com o estado na frente; sem
-        // duração, só o estado.
+        // duração, só o estado; em pausa, sempre só o estado.
         for (state, timed, untimed, with, without) in [
             ("running", "Up 3 days", "Up", "há 3 dias", "em execução"),
             (
@@ -2201,13 +2210,9 @@ mod tests {
                 "parado há 2 horas",
                 "parado",
             ),
-            (
-                "paused",
-                "Up 5 minutes (Paused)",
-                "",
-                "pausado há 5 minutos",
-                "pausado",
-            ),
+            // Em pausa, só o estado: a duração do `Up` não é a da pausa.
+            ("paused", "Up 5 minutes (Paused)", "", "pausado", "pausado"),
+            ("paused", "Up 5 minutes", "", "pausado", "pausado"),
             (
                 "restarting",
                 "Restarting (1) 5 seconds ago",
@@ -2247,7 +2252,7 @@ mod tests {
         for want in [
             "web:latest · há 3 dias",
             "db:latest · parado há 2 horas",
-            "minio:latest · pausado há 3 semanas",
+            "minio:latest · pausado",
             "loki:latest · criado",
             "tempo:latest · parado",
         ] {
@@ -3440,5 +3445,29 @@ mod tests {
         );
         node(&out, Role::Button, "← Voltar");
         assert_eq!(page.docker.search, "");
+    }
+
+    #[test]
+    fn opening_from_the_overview_right_after_mostrar_keeps_the_narrow_inspector() {
+        let mut page = Page::new(egui::Theme::Dark, NARROW, collected(eight()));
+        page.click_on(Role::CheckBox, ONLY_RUNNING);
+        let out = page.show();
+        assert!(page.docker.running_only);
+        assert_eq!(names(&out), ["ai-memory", "postgres-dev", "redis-cache"]);
+        // O clique em "mostrar" desliga o filtro no fim do frame, depois de
+        // `shown` gravado; a página troca antes do próximo frame do Docker.
+        page.click_on(Role::Link, "mostrar");
+        assert!(!page.docker.running_only, "the link turned the filter off");
+        // "minio" estava oculto pelo filtro; a Visão geral o abre.
+        page.docker.open(&format!("minio-{LONG_ID}"));
+        let out = page.show();
+        assert!(
+            has(&out, Role::Pane, "Inspetor do contêiner"),
+            "the inspector, not the table"
+        );
+        assert!(!has(&out, Role::Pane, "Contêineres"));
+        node(&out, Role::Button, "← Voltar");
+        node(&out, Role::Label, "minio");
+        assert_eq!(page.docker.selected(), Some(&*format!("minio-{LONG_ID}")));
     }
 }
