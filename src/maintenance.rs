@@ -86,12 +86,157 @@ pub enum Intent {
         okf: bool,
     },
 }
+/// Validade de uma prévia: depois disso o recibo não executa e a folha fecha.
+pub const PREVIEW_TTL: Duration = Duration::from_secs(300);
+/// O que uma escrita pede antes de executar (Review.dc.html). Leitura não
+/// pede nada: os `confirmation()` devolvem `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Confirmation {
+    /// Um clique no botão final basta.
+    Click,
+    /// O botão final só habilita com este texto digitado, exato.
+    Type(String),
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Action {
     pub scope: Scope,
     pub intent: Intent,
 }
 impl Action {
+    /// Nível de confirmação; o avançado e o serviço local decidem o seu. Sem
+    /// curinga: uma variante nova não compila sem ser classificada.
+    pub fn confirmation(&self) -> Option<Confirmation> {
+        let typed = match &self.intent {
+            Intent::Advanced(op) => return op.confirmation(),
+            Intent::Local(op) => return op.confirmation(),
+            Intent::Maintain {
+                task: Task::Sweep, ..
+            }
+            | Intent::CancelHandoff { .. }
+            | Intent::ExpireHandoffs { .. } => true,
+            Intent::Approve { .. }
+            | Intent::Reject { .. }
+            | Intent::Feedback { .. }
+            | Intent::Maintain {
+                task: Task::Lint | Task::Curator | Task::Embeddings,
+                ..
+            }
+            | Intent::Consolidate { .. }
+            | Intent::Checkpoint { .. }
+            | Intent::Download { .. }
+            | Intent::Restore { .. } => false,
+        };
+        Some(if typed {
+            Confirmation::Type(self.target())
+        } else {
+            Confirmation::Click
+        })
+    }
+    /// O alvo (o fato "Alvo" da folha e o texto a digitar): o projeto, ou o
+    /// que a operação abrange de fato quando não é ele.
+    pub fn target(&self) -> String {
+        match &self.intent {
+            Intent::Advanced(op) => op.target().into(),
+            Intent::Local(op) => op.target().into(),
+            Intent::Consolidate { session } => format!("Sessão {session}"),
+            Intent::Checkpoint { .. } => "Toda a wiki".into(),
+            Intent::Download { okf: false, .. } => "Toda a instalação".into(),
+            Intent::Approve { .. }
+            | Intent::Reject { .. }
+            | Intent::CancelHandoff { .. }
+            | Intent::ExpireHandoffs { .. }
+            | Intent::Maintain { .. }
+            | Intent::Feedback { .. }
+            | Intent::Restore { .. }
+            | Intent::Download { okf: true, .. } => self.scope.label(),
+        }
+    }
+    /// O título da folha e o verbo do botão final, escritos à mão; `None` =
+    /// leitura. Sem curinga: uma variante nova não compila sem eles. Nas de
+    /// digitação, o título traz o que se digita.
+    pub fn question(&self) -> Option<(String, &'static str)> {
+        let scope = self.scope.label();
+        Some(match &self.intent {
+            Intent::Advanced(op) => return op.question(),
+            Intent::Local(op) => return op.question(),
+            Intent::Approve { .. } => ("Aprovar proposta?".into(), "Aprovar"),
+            Intent::Reject { .. } => ("Rejeitar proposta?".into(), "Rejeitar"),
+            Intent::CancelHandoff { id } => (
+                format!("Cancelar o handoff “{id}” em “{scope}”?"),
+                "Cancelar handoff",
+            ),
+            Intent::ExpireHandoffs { days: 0 } => (
+                format!("Expirar todos os handoffs abertos em “{scope}”?"),
+                "Expirar",
+            ),
+            Intent::ExpireHandoffs { days: 1 } => (
+                format!("Expirar os handoffs abertos há 1 dia ou mais em “{scope}”?"),
+                "Expirar",
+            ),
+            Intent::ExpireHandoffs { days } => (
+                format!("Expirar os handoffs abertos há {days} dias ou mais em “{scope}”?"),
+                "Expirar",
+            ),
+            Intent::Maintain {
+                task: Task::Lint, ..
+            } => ("Auditar a memória do projeto?".into(), "Auditar"),
+            Intent::Maintain {
+                task: Task::Curator,
+                ..
+            } => ("Gerar uma proposta de curadoria?".into(), "Gerar proposta"),
+            Intent::Maintain {
+                task: Task::Sweep, ..
+            } => (
+                format!("Aplicar a retenção em “{scope}”?"),
+                "Aplicar retenção",
+            ),
+            Intent::Maintain {
+                task: Task::Embeddings,
+                reembed: false,
+            } => ("Gerar os embeddings do projeto?".into(), "Gerar embeddings"),
+            Intent::Maintain {
+                task: Task::Embeddings,
+                reembed: true,
+            } => (
+                "Gerar os embeddings do projeto, regenerando os existentes?".into(),
+                "Gerar embeddings",
+            ),
+            Intent::Consolidate { session } => (
+                format!("Reconsolidar a sessão “{session}”?"),
+                "Reconsolidar",
+            ),
+            Intent::Feedback { path, .. } => {
+                (format!("Registrar feedback sobre “{path}”?"), "Registrar")
+            }
+            Intent::Checkpoint { .. } => (
+                "Criar um checkpoint da wiki inteira?".into(),
+                "Criar checkpoint",
+            ),
+            Intent::Restore {
+                path,
+                version,
+                git: false,
+            } => (
+                format!("Restaurar “{path}” para a versão “{version}”?"),
+                "Restaurar",
+            ),
+            Intent::Restore {
+                path,
+                version,
+                git: true,
+            } => (
+                format!("Restaurar “{path}” do checkpoint “{version}”?"),
+                "Restaurar",
+            ),
+            Intent::Download { okf: false, .. } => (
+                "Salvar o backup de toda a instalação?".into(),
+                "Salvar backup",
+            ),
+            Intent::Download { okf: true, .. } => {
+                (format!("Exportar “{scope}” em OKF?"), "Exportar")
+            }
+        })
+    }
     pub fn label(&self) -> String {
         match &self.intent {
             Intent::Advanced(op) => op.kind.label().into(),
@@ -550,11 +695,15 @@ pub struct Receipt {
     pub at: Instant,
 }
 impl Receipt {
+    /// Quanto falta para a prévia vencer (`PREVIEW_TTL` desde `at`).
+    pub fn left(&self) -> Duration {
+        PREVIEW_TTL.saturating_sub(self.at.elapsed())
+    }
     fn validate(&self, shared: &Shared) -> Result<(), Error> {
         if shared.generation.load(Ordering::Acquire) != self.generation {
             return Err(Error::Cancelled);
         }
-        if self.at.elapsed() > Duration::from_secs(300) {
+        if self.at.elapsed() > PREVIEW_TTL {
             return Err(Error::Invalid(
                 "A prévia expirou. Prepare a operação novamente.".into(),
             ));
@@ -907,5 +1056,567 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[1].path.contains("from=current-v2&to=old-v1"));
         assert!(requests.iter().all(|r| r.method == "GET"));
+    }
+
+    /// O nome de cada variante; sem curinga, uma `Intent` nova não compila
+    /// até entrar aqui (e na matriz abaixo).
+    fn variant(intent: &Intent) -> &'static str {
+        match intent {
+            Intent::Advanced(_) => "Advanced",
+            Intent::Local(_) => "Local",
+            Intent::Approve { .. } => "Approve",
+            Intent::Reject { .. } => "Reject",
+            Intent::CancelHandoff { .. } => "CancelHandoff",
+            Intent::ExpireHandoffs { .. } => "ExpireHandoffs",
+            Intent::Maintain { .. } => "Maintain",
+            Intent::Consolidate { .. } => "Consolidate",
+            Intent::Feedback { .. } => "Feedback",
+            Intent::Checkpoint { .. } => "Checkpoint",
+            Intent::Restore { .. } => "Restore",
+            Intent::Download { .. } => "Download",
+        }
+    }
+
+    /// O verbo nunca é o rótulo do botão ao lado, e só a escrita tem título.
+    fn check_question(a: &Action, case: &str) {
+        let question = a.question();
+        assert_eq!(
+            question.is_some(),
+            a.confirmation().is_some(),
+            "{case}: title iff confirmation"
+        );
+        if let Some((title, verb)) = question {
+            assert!(title.ends_with('?'), "{case}: {title}");
+            assert!(!verb.is_empty() && verb != "Cancelar", "{case}: {verb:?}");
+        }
+    }
+
+    #[test]
+    fn every_management_intent_has_its_confirmation_level_target_and_title() {
+        use Confirmation::{Click, Type};
+        let label = scope().label();
+        assert_eq!(label, "synthetic team / demo", "precondition");
+        let typed = || Some(Type(label.clone()));
+        let maintain = |task, reembed| Intent::Maintain { task, reembed };
+        // (intenção, nível, alvo, título, verbo)
+        let cases = [
+            (
+                Intent::Approve { id: "p-1".into() },
+                Some(Click),
+                label.as_str(),
+                "Aprovar proposta?",
+                "Aprovar",
+            ),
+            (
+                Intent::Reject {
+                    id: "p-1".into(),
+                    reason: "duplicada".into(),
+                },
+                Some(Click),
+                &label,
+                "Rejeitar proposta?",
+                "Rejeitar",
+            ),
+            (
+                Intent::Feedback {
+                    path: "notes/a.md".into(),
+                    signal: "helpful".into(),
+                    reason: String::new(),
+                },
+                Some(Click),
+                &label,
+                "Registrar feedback sobre “notes/a.md”?",
+                "Registrar",
+            ),
+            (
+                maintain(Task::Lint, false),
+                Some(Click),
+                &label,
+                "Auditar a memória do projeto?",
+                "Auditar",
+            ),
+            (
+                maintain(Task::Curator, false),
+                Some(Click),
+                &label,
+                "Gerar uma proposta de curadoria?",
+                "Gerar proposta",
+            ),
+            (
+                maintain(Task::Embeddings, false),
+                Some(Click),
+                &label,
+                "Gerar os embeddings do projeto?",
+                "Gerar embeddings",
+            ),
+            (
+                maintain(Task::Embeddings, true),
+                Some(Click),
+                &label,
+                "Gerar os embeddings do projeto, regenerando os existentes?",
+                "Gerar embeddings",
+            ),
+            (
+                maintain(Task::Sweep, false),
+                typed(),
+                &label,
+                "Aplicar a retenção em “synthetic team / demo”?",
+                "Aplicar retenção",
+            ),
+            (
+                Intent::Consolidate {
+                    session: "s-1".into(),
+                },
+                Some(Click),
+                "Sessão s-1",
+                "Reconsolidar a sessão “s-1”?",
+                "Reconsolidar",
+            ),
+            (
+                Intent::Checkpoint {
+                    message: "m".into(),
+                },
+                Some(Click),
+                "Toda a wiki",
+                "Criar um checkpoint da wiki inteira?",
+                "Criar checkpoint",
+            ),
+            (
+                Intent::Download {
+                    destination: "/tmp/b.tar.gz".into(),
+                    okf: false,
+                },
+                Some(Click),
+                "Toda a instalação",
+                "Salvar o backup de toda a instalação?",
+                "Salvar backup",
+            ),
+            (
+                Intent::Download {
+                    destination: "/tmp/b.tar.gz".into(),
+                    okf: true,
+                },
+                Some(Click),
+                &label,
+                "Exportar “synthetic team / demo” em OKF?",
+                "Exportar",
+            ),
+            (
+                Intent::Restore {
+                    path: "notes/a.md".into(),
+                    version: "v1".into(),
+                    git: false,
+                },
+                Some(Click),
+                &label,
+                "Restaurar “notes/a.md” para a versão “v1”?",
+                "Restaurar",
+            ),
+            (
+                Intent::Restore {
+                    path: "notes/a.md".into(),
+                    version: "abc".into(),
+                    git: true,
+                },
+                Some(Click),
+                &label,
+                "Restaurar “notes/a.md” do checkpoint “abc”?",
+                "Restaurar",
+            ),
+            (
+                Intent::CancelHandoff { id: "h-1".into() },
+                typed(),
+                &label,
+                "Cancelar o handoff “h-1” em “synthetic team / demo”?",
+                "Cancelar handoff",
+            ),
+            (
+                Intent::ExpireHandoffs { days: 0 },
+                typed(),
+                &label,
+                "Expirar todos os handoffs abertos em “synthetic team / demo”?",
+                "Expirar",
+            ),
+            (
+                Intent::ExpireHandoffs { days: 1 },
+                typed(),
+                &label,
+                "Expirar os handoffs abertos há 1 dia ou mais em “synthetic team / demo”?",
+                "Expirar",
+            ),
+            (
+                Intent::ExpireHandoffs { days: 7 },
+                typed(),
+                &label,
+                "Expirar os handoffs abertos há 7 dias ou mais em “synthetic team / demo”?",
+                "Expirar",
+            ),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        let mut tasks = Vec::new();
+        for (intent, level, target, title, verb) in cases {
+            seen.insert(variant(&intent));
+            if let Intent::Maintain { task, .. } = intent {
+                tasks.push(task);
+            }
+            let a = action(intent);
+            let case = a.label();
+            assert_eq!(a.confirmation(), level, "{case}");
+            assert_eq!(a.target(), target, "{case}");
+            assert_eq!(a.question(), Some((title.to_owned(), verb)), "{case}");
+            check_question(&a, &case);
+        }
+        let all: std::collections::BTreeSet<_> = [
+            "Approve",
+            "Reject",
+            "CancelHandoff",
+            "ExpireHandoffs",
+            "Maintain",
+            "Consolidate",
+            "Feedback",
+            "Checkpoint",
+            "Restore",
+            "Download",
+        ]
+        .into();
+        assert_eq!(seen, all, "every management intent is in the matrix");
+        for task in [Task::Lint, Task::Curator, Task::Sweep, Task::Embeddings] {
+            match task {
+                Task::Lint | Task::Curator | Task::Sweep | Task::Embeddings => {}
+            }
+            assert!(tasks.contains(&task), "{task:?} is in the matrix");
+        }
+    }
+
+    #[test]
+    fn every_advanced_operation_has_its_confirmation_level_target_and_title() {
+        use crate::advanced::{ALL, Kind::*, Operation};
+        use Confirmation::{Click, Type};
+        let typed = |t: &str| Some(Type(t.to_owned()));
+        let asks = |title: &str, verb: &'static str| Some((title.to_owned(), verb));
+        // (operação, nível e título com cada campo preenchido com " <campo> ")
+        let cases = [
+            (Projects, None, None),
+            (
+                RenameProject,
+                Some(Click),
+                asks("Renomear o projeto “<project>” para “<to>”?", "Renomear"),
+            ),
+            (
+                MoveProject,
+                typed("<project>"),
+                asks(
+                    "Mover o projeto “<project>” para o workspace “<to_workspace>”?",
+                    "Mover",
+                ),
+            ),
+            (
+                MergeProject,
+                typed("<project>"),
+                asks("Mesclar o projeto “<project>” em “<to>”?", "Mesclar"),
+            ),
+            (
+                PurgeProject,
+                typed("<project>"),
+                asks("Excluir o projeto “<project>”?", "Excluir"),
+            ),
+            (
+                RenameWorkspace,
+                Some(Click),
+                asks(
+                    "Renomear o workspace “<workspace>” para “<to>”?",
+                    "Renomear",
+                ),
+            ),
+            (
+                MergeWorkspace,
+                typed("<workspace>"),
+                asks("Mesclar o workspace “<workspace>” em “<to>”?", "Mesclar"),
+            ),
+            (
+                DeleteWorkspace,
+                typed("<workspace>"),
+                asks(
+                    "Excluir o workspace “<workspace>” e todo o seu conteúdo?",
+                    "Excluir",
+                ),
+            ),
+            (
+                MoveSession,
+                typed("<session_id>"),
+                asks(
+                    "Mover a sessão “<session_id>” para “<workspace> / <project>”?",
+                    "Mover",
+                ),
+            ),
+            (ProfileStatus, None, None),
+            (ProfileList, None, None),
+            (ProfileReview, None, None),
+            (ProfileApply, None, None),
+            (
+                ProfileRebuild,
+                typed("GLOBAL"),
+                asks("Reconstruir o perfil?", "Reconstruir"),
+            ),
+            (Users, None, None),
+            (
+                CreateUser,
+                Some(Click),
+                asks("Criar o usuário “<username>”?", "Criar"),
+            ),
+            (
+                EditUser,
+                Some(Click),
+                asks("Salvar as alterações do usuário “<username>”?", "Salvar"),
+            ),
+            (
+                DisableUser,
+                typed("<username>"),
+                asks("Desabilitar o login de “<username>”?", "Desabilitar"),
+            ),
+            (
+                EnableUser,
+                Some(Click),
+                asks("Habilitar o login de “<username>”?", "Habilitar"),
+            ),
+            (
+                ResetPassword,
+                typed("<username>"),
+                asks("Redefinir a senha de “<username>”?", "Redefinir"),
+            ),
+            (Grants, None, None),
+            (
+                Grant,
+                Some(Click),
+                asks(
+                    "Conceder a “<username>” acesso de <level> a “<workspace> / <project>”?",
+                    "Conceder",
+                ),
+            ),
+            (
+                RevokeGrant,
+                typed("<username>"),
+                asks(
+                    "Revogar o acesso de “<username>” a “<workspace> / <project>”?",
+                    "Revogar",
+                ),
+            ),
+            (ProjectGrants, None, None),
+            (
+                ProjectAccess,
+                typed("<project>"),
+                asks(
+                    "Alterar o acesso ao projeto “<project>” para <mode>?",
+                    "Alterar",
+                ),
+            ),
+            (Keys, None, None),
+            (
+                CreateKey,
+                Some(Click),
+                asks("Emitir uma chave para “<username>”?", "Emitir"),
+            ),
+            (
+                RotateKey,
+                typed("<id>"),
+                asks("Rotacionar a chave “<id>”?", "Rotacionar"),
+            ),
+            (
+                RevokeKey,
+                typed("<id>"),
+                asks("Revogar a chave “<id>”?", "Revogar"),
+            ),
+            (Inbox, None, None),
+            (Outbox, None, None),
+            (
+                SendMessage,
+                Some(Click),
+                asks(
+                    "Enviar a mensagem para “<to_workspace> / <to_project>”?",
+                    "Enviar",
+                ),
+            ),
+            (
+                CancelMessage,
+                typed("<message_id>"),
+                asks("Cancelar a mensagem “<message_id>”?", "Cancelar mensagem"),
+            ),
+            (Workstreams, None, None),
+            (Run, None, None),
+            (Events, None, None),
+        ];
+        assert_eq!(
+            cases.iter().map(|c| c.0).collect::<Vec<_>>(),
+            ALL,
+            "the matrix lists the whole catalog, in order"
+        );
+        for (kind, level, question) in cases {
+            let mut op = Operation::new(kind);
+            for field in kind.fields() {
+                op.values
+                    .insert(field.key.into(), format!(" <{}> ", field.key));
+            }
+            assert_eq!(op.confirmation(), level, "{kind:?}");
+            assert_eq!(kind.read(), level.is_none(), "{kind:?}: read() agrees");
+            let a = action(Intent::Advanced(op.clone()));
+            assert_eq!(a.confirmation(), level, "{kind:?}: Action delegates");
+            assert_eq!(a.question(), question, "{kind:?}");
+            check_question(&a, &format!("{kind:?}"));
+            // O alvo mostrado é o mesmo texto a digitar.
+            if let Some(Type(text)) = &level {
+                assert_eq!(&a.target(), text, "{kind:?}");
+            }
+        }
+        // Campos vazios ou só de espaço não são alvo: cai no seguinte, ou
+        // em GLOBAL.
+        for (kind, values, want) in [
+            (DeleteWorkspace, vec![("workspace", "   ")], "GLOBAL"),
+            (
+                PurgeProject,
+                vec![("workspace", "ws"), ("project", "")],
+                "ws",
+            ),
+            (
+                PurgeProject,
+                vec![("workspace", "ws"), ("project", "\t")],
+                "ws",
+            ),
+            (
+                RevokeGrant,
+                vec![("username", ""), ("project", "demo")],
+                "demo",
+            ),
+            (CancelMessage, vec![("message_id", " m-9 ")], "m-9"),
+        ] {
+            let mut op = Operation::new(kind);
+            for (key, value) in values {
+                op.values.insert(key.into(), value.into());
+            }
+            assert_eq!(op.confirmation(), typed(want), "{kind:?}");
+        }
+        // As escolhas viram palavras no título.
+        for (kind, key, value, title) in [
+            (
+                Grant,
+                "level",
+                "read",
+                "Conceder a “ana” acesso de leitura a “ws / demo”?",
+            ),
+            (
+                Grant,
+                "level",
+                "write",
+                "Conceder a “ana” acesso de escrita a “ws / demo”?",
+            ),
+            (
+                ProjectAccess,
+                "mode",
+                "restricted",
+                "Alterar o acesso ao projeto “demo” para restrito?",
+            ),
+            (
+                ProjectAccess,
+                "mode",
+                "open",
+                "Alterar o acesso ao projeto “demo” para aberto?",
+            ),
+        ] {
+            let mut op = Operation::new(kind);
+            for (k, v) in [
+                ("username", "ana"),
+                ("workspace", "ws"),
+                ("project", "demo"),
+            ] {
+                op.values.insert(k.into(), v.into());
+            }
+            op.values.insert(key.into(), value.into());
+            assert_eq!(
+                op.question().map(|(t, _)| t).as_deref(),
+                Some(title),
+                "{kind:?} {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_local_operation_has_its_confirmation_level_target_and_title() {
+        use crate::local_service::{Backend, Kind, Operation};
+        use Confirmation::{Click, Type};
+        for backend in [Backend::Docker, Backend::LaunchAgent, Backend::Systemd] {
+            match backend {
+                Backend::Docker | Backend::LaunchAgent | Backend::Systemd => {}
+            }
+            let target = if backend == Backend::Docker {
+                "ai-memory-dev"
+            } else {
+                "ai-memory"
+            };
+            let asks = |verb: &str, done: &'static str| {
+                Some((format!("{verb} o serviço “{target}”?"), done))
+            };
+            for (kind, level, question) in [
+                (Kind::Status, None, None),
+                (Kind::Logs, None, None),
+                (Kind::Start, Some(Click), asks("Iniciar", "Iniciar")),
+                (
+                    Kind::Stop,
+                    Some(Type(target.into())),
+                    asks("Parar", "Parar"),
+                ),
+                (Kind::Restart, Some(Click), asks("Reiniciar", "Reiniciar")),
+                (
+                    Kind::Update,
+                    Some(Type(target.into())),
+                    asks("Atualizar", "Atualizar"),
+                ),
+                (Kind::Recovery, None, None),
+            ] {
+                // Uma operação nova tem de entrar nesta tabela.
+                match kind {
+                    Kind::Status
+                    | Kind::Logs
+                    | Kind::Start
+                    | Kind::Stop
+                    | Kind::Restart
+                    | Kind::Update
+                    | Kind::Recovery => {}
+                }
+                let mut op = Operation::new(backend, kind);
+                op.values
+                    .insert("container".into(), " ai-memory-dev ".into());
+                assert_eq!(op.confirmation(), level, "{backend:?} {kind:?}");
+                assert_eq!(op.read(), level.is_none(), "{backend:?} {kind:?}");
+                let a = action(Intent::Local(op.clone()));
+                assert_eq!(a.confirmation(), level, "{backend:?} {kind:?}");
+                assert_eq!(a.target(), target, "{backend:?} {kind:?}");
+                assert_eq!(a.question(), question, "{backend:?} {kind:?}");
+                check_question(&a, &format!("{backend:?} {kind:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_receipt_is_left_five_minutes_from_its_preview() {
+        for (age, want) in [
+            (0, 300),
+            (1, 299),
+            (299, 1),
+            (300, 0),
+            (301, 0),
+            (10_000, 0),
+        ] {
+            let receipt = Receipt {
+                action: action(Intent::ExpireHandoffs { days: 7 }),
+                generation: 0,
+                at: Instant::now() - Duration::from_secs(age),
+            };
+            let left = receipt.left();
+            // `at` foi lido antes: o que falta é um pouco menos que o exato.
+            assert!(
+                left <= Duration::from_secs(want)
+                    && Duration::from_secs(want).saturating_sub(left) < Duration::from_secs(1),
+                "{age} s: {left:?}"
+            );
+        }
     }
 }

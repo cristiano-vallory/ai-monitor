@@ -1,5 +1,5 @@
 //! Host operations are explicit, loopback-only, bounded and never shell-expanded.
-use crate::{client::Error, docker::local_command, model::Config};
+use crate::{client::Error, docker::local_command, maintenance::Confirmation, model::Config};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -147,22 +147,34 @@ impl Operation {
         }
         Ok(())
     }
-    pub fn confirmation(&self) -> String {
-        format!(
-            "{} {}",
-            match self.kind {
-                Kind::Start => "INICIAR",
-                Kind::Stop => "PARAR",
-                Kind::Restart => "REINICIAR",
-                Kind::Update => "ATUALIZAR",
-                _ => "CONSULTAR",
-            },
-            if self.backend == Backend::Docker {
-                self.s("container")
-            } else {
-                "ai-memory"
-            }
-        )
+    /// O alvo: o contêiner (Docker) ou "ai-memory" (LaunchAgent, systemd).
+    pub fn target(&self) -> &str {
+        if self.backend == Backend::Docker {
+            self.s("container")
+        } else {
+            "ai-memory"
+        }
+    }
+    /// Nível de confirmação (`None` = leitura). Sem curinga: uma operação
+    /// nova não compila sem ser classificada.
+    pub fn confirmation(&self) -> Option<Confirmation> {
+        match self.kind {
+            Kind::Status | Kind::Logs | Kind::Recovery => None,
+            Kind::Start | Kind::Restart => Some(Confirmation::Click),
+            Kind::Stop | Kind::Update => Some(Confirmation::Type(self.target().into())),
+        }
+    }
+    /// O título da folha e o verbo do botão final, escritos à mão; `None` =
+    /// leitura. Sem curinga: uma operação nova não compila sem eles.
+    pub fn question(&self) -> Option<(String, &'static str)> {
+        let target = self.target();
+        Some(match self.kind {
+            Kind::Status | Kind::Logs | Kind::Recovery => return None,
+            Kind::Start => (format!("Iniciar o serviço “{target}”?"), "Iniciar"),
+            Kind::Stop => (format!("Parar o serviço “{target}”?"), "Parar"),
+            Kind::Restart => (format!("Reiniciar o serviço “{target}”?"), "Reiniciar"),
+            Kind::Update => (format!("Atualizar o serviço “{target}”?"), "Atualizar"),
+        })
     }
     pub fn bind(&mut self, result: &Value) -> Result<(), Error> {
         self.binding = Some(result.get("binding").cloned().ok_or(Error::Format)?);

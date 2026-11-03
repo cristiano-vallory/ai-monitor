@@ -26,6 +26,14 @@ pub struct Palette {
     pub info: Color32,
     /// Sombra leve dos cartões e das folhas (preto translúcido).
     pub shadow: Color32,
+    /// Fundo dos campos de texto (Settings.dc.html).
+    pub field: Color32,
+    /// `acc` translúcido das linhas acrescentadas numa prévia (Review.dc.html).
+    #[allow(dead_code, reason = "Fase 4: prévia em diff")]
+    pub add_bg: Color32,
+    /// `bad` translúcido das linhas removidas numa prévia (Review.dc.html).
+    #[allow(dead_code, reason = "Fase 4: prévia em diff")]
+    pub bad_bg: Color32,
 }
 
 pub const DARK: Palette = Palette {
@@ -46,6 +54,10 @@ pub const DARK: Palette = Palette {
     info: Color32::from_rgb(0x8B, 0x93, 0xFF),
     // 115/255 ≈ 45% de alfa.
     shadow: Color32::from_black_alpha(115),
+    field: Color32::from_rgb(0x14, 0x15, 0x18),
+    // 26/255 ≈ 10% de alfa.
+    add_bg: Color32::from_rgba_unmultiplied_const(0x4F, 0xD1, 0xA5, 26),
+    bad_bg: Color32::from_rgba_unmultiplied_const(0xFF, 0x7A, 0x7A, 26),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -66,6 +78,10 @@ pub const LIGHT: Palette = Palette {
     info: Color32::from_rgb(0x4F, 0x55, 0xD9),
     // 15/255 ≈ 6% de alfa.
     shadow: Color32::from_black_alpha(15),
+    field: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    // 20/255 ≈ 8% de alfa.
+    add_bg: Color32::from_rgba_unmultiplied_const(0x0B, 0x7A, 0x5E, 20),
+    bad_bg: Color32::from_rgba_unmultiplied_const(0xC4, 0x2B, 0x2B, 20),
 };
 
 /// Paleta do tema em uso, a partir dos `Visuals` ativos.
@@ -357,6 +373,21 @@ pub(crate) mod tests {
                 Color32::from_rgba_unmultiplied(p.acc.r(), p.acc.g(), p.acc.b(), alpha)
             );
         }
+    }
+
+    #[test]
+    fn diff_backgrounds_are_translucent_accent_and_bad() {
+        // rgba(…, 0.10) no escuro e rgba(…, 0.08) no claro (Review.dc.html).
+        for (p, alpha) in [(&DARK, 26), (&LIGHT, 20)] {
+            for (token, base) in [(p.add_bg, p.acc), (p.bad_bg, p.bad)] {
+                assert_eq!(
+                    token,
+                    Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha)
+                );
+            }
+        }
+        // O campo: bg no escuro, surf (branco) no claro (Settings.dc.html).
+        assert_eq!((DARK.field, LIGHT.field), (DARK.bg, LIGHT.surf));
     }
 
     #[test]

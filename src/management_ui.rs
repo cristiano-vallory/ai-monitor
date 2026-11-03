@@ -1,10 +1,10 @@
 use crate::{
     client::Scope,
     console,
-    maintenance::{Action, Intent, Read, Receipt, Task, Work, Worker},
+    maintenance::{Action, Confirmation, Intent, PREVIEW_TTL, Read, Receipt, Task, Work, Worker},
     model::Project,
     monitor::Shared,
-    widgets::{self, Tone},
+    widgets::{self, Answer, Tone},
 };
 use eframe::egui;
 use serde_json::Value;
@@ -230,7 +230,15 @@ impl Management {
                 Ok(v) => {
                     self.result = Some(v);
                     self.receipt = reply.receipt;
-                    self.notice=if reply.applying {"Resposta recebida. Confira os detalhes abaixo e atualize a listagem para verificar o estado final."}else{"Consulta concluída; revise os dados abaixo."}.into();
+                    self.notice = if reply.applying {
+                        "Resposta recebida. Confira os detalhes abaixo e atualize a listagem para verificar o estado final."
+                    } else if self.receipt.is_some() {
+                        // A prévia abre na folha, que já é o aviso.
+                        ""
+                    } else {
+                        "Consulta concluída; revise os dados abaixo."
+                    }
+                    .into();
                 }
                 Err(e) => {
                     self.error = Some(e.to_string());
@@ -243,7 +251,7 @@ impl Management {
         if self
             .receipt
             .as_ref()
-            .is_some_and(|r| r.at.elapsed() > std::time::Duration::from_secs(300))
+            .is_some_and(|r| r.at.elapsed() > PREVIEW_TTL)
         {
             self.clear();
             self.notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.".into();
@@ -328,55 +336,59 @@ impl Management {
         }
         // The receipt is immutable: changing tabs/scope cancels it; fields are locked until cancel.
         if let Some(receipt) = self.receipt.clone() {
-            ui.separator();
-            ui.heading("Revisar e confirmar");
-            ui.strong(receipt.action.label());
-            ui.label(format!("Projeto: {}", receipt.action.scope.label()));
-            ui.colored_label(
-                crate::theme::palette(ui.visuals()).warn,
-                receipt.action.warning(),
-            );
-            if let Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } =
-                &receipt.action.intent
+            let action = &receipt.action;
+            let mut facts = vec![
+                widgets::Fact::new("Operação", action.label()),
+                widgets::Fact::new("Alvo", action.target()),
+            ];
+            if let Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } = &action.intent
             {
-                ui.label(format!("Motivo: {reason}"));
+                facts.push(widgets::Fact::new("Motivo", reason.as_str()));
             }
-            let global = matches!(
-                receipt.action.intent,
-                Intent::Checkpoint { .. } | Intent::Download { okf: false, .. }
-            );
-            let expected = if let Intent::Consolidate { session } = &receipt.action.intent {
-                ui.strong("O projeto selecionado é apenas contexto: esta operação é identificada pela sessão global.");
-                format!("SESSAO {session}")
-            } else if global {
-                "GLOBAL".into()
-            } else {
-                receipt.action.scope.label()
+            let mut subtitle = format!("Projeto: {}", action.scope.label());
+            if let Intent::Consolidate { .. } = &action.intent {
+                subtitle.push_str(". O projeto selecionado é apenas contexto: esta operação é identificada pela sessão global.");
+            }
+            let typed = match action.confirmation() {
+                Some(Confirmation::Type(target)) => Some(target),
+                // Leitura não gera recibo.
+                Some(Confirmation::Click) | None => None,
             };
-            ui.label(format!("Leia a prévia abaixo e digite {expected} para confirmar. Prévia válida por 5 minutos."));
-            ui.add(egui::TextEdit::singleline(&mut self.confirm).char_limit(512));
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        !self.busy && self.confirm == expected,
-                        egui::Button::new("Confirmar execução"),
-                    )
-                    .clicked()
-                {
-                    self.begin(shared, Work::Apply(receipt));
-                }
-                if ui.button("Cancelar e editar").clicked() {
-                    self.clear();
-                }
-            });
+            // Leitura não gera recibo.
+            let (title, verb) = action.question().unwrap_or_default();
+            let result = &self.result;
+            let answer = widgets::confirm_sheet(
+                ui,
+                &widgets::Confirm {
+                    title: &title,
+                    subtitle: &subtitle,
+                    facts: &facts,
+                    preview: "Prévia da alteração",
+                    warning: action.warning(),
+                    typed: typed.as_deref(),
+                    verb,
+                    left: receipt.left(),
+                    ready: !self.busy,
+                },
+                &mut self.confirm,
+                |ui| {
+                    if let Some(result) = result {
+                        console::show_values(ui, result, 0);
+                    }
+                },
+            );
+            match answer {
+                Some(Answer::Confirm) => self.begin(shared, Work::Apply(receipt)),
+                Some(Answer::Cancel) => self.clear(),
+                None => {}
+            }
         }
-        if let Some(result) = self.result.clone() {
+        // Com recibo, a prévia está na folha.
+        if self.receipt.is_none()
+            && let Some(result) = self.result.clone()
+        {
             ui.separator();
-            ui.heading(if self.receipt.is_some() {
-                "Prévia / evidências"
-            } else {
-                "Resultado"
-            });
+            ui.heading("Resultado");
             if self.tab == 0 && result.is_array() {
                 ui.small("Até 200 propostas; filtre pelo estado. Use o ID exato para revisar uma proposta fora da lista.");
                 let mut seen = std::collections::HashSet::new();
@@ -427,6 +439,17 @@ impl Management {
     #[cfg(test)]
     pub(crate) fn set_tab(&mut self, tab: u8) {
         self.tab = tab;
+    }
+    /// Uma prévia aguardando confirmação, como `poll` a deixaria.
+    #[cfg(test)]
+    pub(crate) fn hold_preview(&mut self, receipt: Receipt, result: Value) {
+        self.scope = Some(receipt.action.scope.clone());
+        self.receipt = Some(receipt);
+        self.result = Some(result);
+    }
+    #[cfg(test)]
+    pub(crate) fn has_receipt(&self) -> bool {
+        self.receipt.is_some()
     }
     fn proposals(&mut self, ui: &mut egui::Ui, shared: &Shared, s: &Scope) {
         ui.horizontal_wrapped(|ui| {
@@ -651,7 +674,7 @@ mod tests {
     use super::*;
     use crate::{
         test_support::{Mock, Response},
-        widgets::tests::{click, context, node, nodes, rect_of, run},
+        widgets::tests::{click, click_sized, context, node, nodes, rect_of, run, run_sized},
     };
     use egui::accesskit::Role;
     use std::{
@@ -1097,5 +1120,298 @@ mod tests {
             ui.receipt.is_some() && ui.result.is_some(),
             "fresh preview must be kept"
         );
+    }
+
+    /// Um painel com a prévia de `intent` (pedida há `secs` segundos) na
+    /// tela de Revisão · Propostas, num servidor sintético.
+    fn previewing(intent: Intent, secs: u64) -> (Mock, Arc<Shared>, Management) {
+        let mock = Mock::new(|_| Response::json(200, serde_json::json!({"ok": true})));
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        m.receipt = Some(Receipt {
+            action: Action {
+                scope: scope(),
+                intent,
+            },
+            generation: 0,
+            at: Instant::now() - Duration::from_secs(secs),
+        });
+        m.result = Some(serde_json::json!({"evidencia": "linha sintética da prévia"}));
+        m.notice = "Consulta concluída; revise os dados abaixo.".into();
+        (mock, shared, m)
+    }
+    const WINDOW: [f32; 2] = [1320., 860.];
+    /// Dois frames: o primeiro da folha só mede (sizing pass).
+    fn frames(ctx: &egui::Context, add: &mut impl FnMut(&mut egui::Ui)) -> egui::FullOutput {
+        run_sized(ctx, WINDOW, vec![], &mut *add);
+        run_sized(ctx, WINDOW, vec![], &mut *add)
+    }
+
+    #[test]
+    fn a_click_preview_opens_in_the_sheet_and_confirms_with_one_click() {
+        let (mock, shared, mut m) = previewing(
+            Intent::Checkpoint {
+                message: "test".into(),
+            },
+            0,
+        );
+        let ctx = context(egui::Theme::Dark);
+        let mut add = |ui: &mut egui::Ui| {
+            m.show(ui, &shared, &[], Section::Review);
+        };
+        let out = frames(&ctx, &mut add);
+        for text in [
+            "Criar um checkpoint da wiki inteira?",
+            "Projeto: fixture / demo",
+            "Operação: Criar checkpoint global da wiki",
+            "Alvo: Toda a wiki",
+            "Prévia da alteração",
+            "Prévia válida por 5:00",
+        ] {
+            node(&out, Role::Label, text);
+        }
+        // A prévia aparece uma vez, dentro da folha; o bloco antigo saiu.
+        let preview = rect_of(&node(
+            &out,
+            Role::Label,
+            "evidencia: linha sintética da prévia",
+        ));
+        let sheet = rect_of(&node(&out, Role::Label, "Prévia da alteração"));
+        assert!(preview.top() > sheet.top(), "the preview is in the sheet");
+        for gone in ["Resultado", "Revisar e confirmar", "Prévia / evidências"] {
+            assert!(nodes(&out, Role::Label, gone).is_empty(), "{gone}");
+        }
+        let typing = out
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == Role::Label
+                    && [n.value(), n.label()]
+                        .into_iter()
+                        .flatten()
+                        .any(|t| t.starts_with("Digite "))
+            })
+            .count();
+        assert_eq!(typing, 0, "click level: nothing to type");
+        let confirm = node(&out, Role::Button, "Criar checkpoint");
+        assert!(!confirm.is_disabled());
+        click_sized(&ctx, WINDOW, rect_of(&confirm).center(), &mut add);
+        drop(add);
+        assert!(m.busy, "the apply was submitted");
+        assert!(m.receipt.is_none() && m.result.is_none());
+        settle(&mut m, &shared);
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 1, "sent once");
+        assert_eq!(
+            (requests[0].method.as_str(), requests[0].path.as_str()),
+            ("POST", "/admin/commit")
+        );
+    }
+
+    #[test]
+    fn a_typed_preview_waits_for_the_exact_project_label() {
+        for (typed, enabled) in [
+            ("", false),
+            ("fixture", false),
+            ("fixture / dem", false),
+            ("fixture / demo ", false),
+            ("CONFIRMAR fixture / demo", false),
+            ("SESSAO fixture / demo", false),
+            ("GLOBAL", false),
+            ("fixture / demo", true),
+        ] {
+            let (mock, shared, mut m) = previewing(Intent::CancelHandoff { id: "h-1".into() }, 0);
+            m.confirm = typed.into();
+            let ctx = context(egui::Theme::Light);
+            let mut add = |ui: &mut egui::Ui| {
+                m.show(ui, &shared, &[], Section::Review);
+            };
+            let out = frames(&ctx, &mut add);
+            node(&out, Role::Label, "Digite fixture / demo para confirmar");
+            node(
+                &out,
+                Role::Label,
+                "Cancelar o handoff “h-1” em “fixture / demo”?",
+            );
+            let confirm = node(&out, Role::Button, "Cancelar handoff");
+            assert_eq!(confirm.is_disabled(), !enabled, "{typed:?}");
+            click_sized(&ctx, WINDOW, rect_of(&confirm).center(), &mut add);
+            drop(add);
+            assert_eq!(m.busy, enabled, "{typed:?}");
+            assert_eq!(m.receipt.is_some(), !enabled, "{typed:?}");
+            settle(&mut m, &shared);
+            assert_eq!(mock.requests().len(), usize::from(enabled), "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn cancel_and_escape_close_the_sheet_and_clear_the_receipt_and_the_text() {
+        for way in ["button", "escape"] {
+            let (mock, shared, mut m) = previewing(Intent::ExpireHandoffs { days: 7 }, 0);
+            m.confirm = "fixture / de".into();
+            m.identifier = "draft-id".into();
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut egui::Ui| {
+                m.show(ui, &shared, &[], Section::Review);
+            };
+            let out = frames(&ctx, &mut add);
+            match way {
+                "button" => {
+                    let at = rect_of(&node(&out, Role::Button, "Cancelar")).center();
+                    click_sized(&ctx, WINDOW, at, &mut add);
+                }
+                _ => {
+                    let key = |pressed| egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    };
+                    run_sized(&ctx, WINDOW, vec![key(true), key(false)], &mut add);
+                }
+            }
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            drop(add);
+            assert!(m.receipt.is_none() && m.result.is_none(), "{way}");
+            assert_eq!((m.confirm.as_str(), m.notice.as_str()), ("", ""), "{way}");
+            assert_eq!(m.identifier, "draft-id", "{way}: the form keeps its fields");
+            assert!(!m.holds(), "{way}");
+            assert!(nodes(&out, Role::Button, "Expirar").is_empty(), "{way}");
+            assert!(mock.requests().is_empty(), "{way}: nothing was sent");
+        }
+    }
+
+    #[test]
+    fn the_veil_keeps_the_tabs_under_the_sheet_from_discarding_the_preview() {
+        for open in [true, false] {
+            let (_mock, shared, mut m) = previewing(Intent::Approve { id: "p-1".into() }, 0);
+            if !open {
+                m.receipt = None;
+            }
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut egui::Ui| {
+                m.show(ui, &shared, &[], Section::Review);
+            };
+            let out = frames(&ctx, &mut add);
+            let tab = rect_of(&node(&out, Role::Button, "Handoffs"));
+            if open {
+                let title = rect_of(&node(&out, Role::Label, "Aprovar proposta?"));
+                assert!(
+                    tab.right() < title.left(),
+                    "precondition: the tab is outside the sheet"
+                );
+            }
+            click_sized(&ctx, WINDOW, tab.center(), &mut add);
+            drop(add);
+            assert_eq!(m.tab, if open { 0 } else { 1 }, "sheet open: {open}");
+            assert_eq!(m.receipt.is_some(), open, "sheet open: {open}");
+        }
+    }
+
+    #[test]
+    fn a_preview_opens_the_sheet_without_a_notice_and_a_read_still_points_below() {
+        let below = "Consulta concluída; revise os dados abaixo.";
+        for preview in [true, false] {
+            let mock = Mock::new(|_| Response::json(200, serde_json::json!([])));
+            let shared = Shared::unstarted(mock.config());
+            let mut m = Management::new(shared.clone());
+            m.scope = Some(scope());
+            m.tab = 3;
+            // Um aviso anterior qualquer, para o novo ter de substituí-lo.
+            m.notice = "aviso anterior".into();
+            let work = if preview {
+                Work::Preview(Action {
+                    scope: scope(),
+                    intent: Intent::Checkpoint {
+                        message: "test".into(),
+                    },
+                })
+            } else {
+                Work::Read(Read::Checkpoints)
+            };
+            m.begin(&shared, work);
+            m.notice = "aviso anterior".into();
+            settle(&mut m, &shared);
+            assert_eq!(m.receipt.is_some(), preview, "preview {preview}");
+            assert!(m.result.is_some(), "preview {preview}");
+            let want = if preview { "" } else { below };
+            assert_eq!(m.notice, want, "preview {preview}");
+            let ctx = context(egui::Theme::Dark);
+            let out = frames(&ctx, &mut |ui: &mut egui::Ui| {
+                m.show(ui, &shared, &[], Section::Maintenance);
+            });
+            assert_eq!(
+                nodes(&out, Role::Label, below).len(),
+                usize::from(!preview),
+                "preview {preview}"
+            );
+            assert_eq!(
+                nodes(&out, Role::Button, "Criar checkpoint").len(),
+                usize::from(preview),
+                "preview {preview}: the sheet"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_confirmation_in_review_stops_at_512_characters() {
+        let (_mock, shared, mut m) = previewing(Intent::ExpireHandoffs { days: 7 }, 0);
+        let ctx = context(egui::Theme::Light);
+        let mut add = |ui: &mut egui::Ui| {
+            m.show(ui, &shared, &[], Section::Review);
+        };
+        frames(&ctx, &mut add);
+        run_sized(
+            &ctx,
+            WINDOW,
+            vec![egui::Event::Paste("x".repeat(600))],
+            &mut add,
+        );
+        drop(add);
+        assert_eq!(m.confirm, "x".repeat(512));
+    }
+
+    #[test]
+    fn the_countdown_follows_the_receipt_and_an_expired_one_closes_the_sheet() {
+        let expired = "A prévia expirou após 5 minutos. Prepare a operação novamente.";
+        for (age, countdown) in [(0, Some("5:00")), (299, Some("0:01")), (301, None)] {
+            let (_mock, shared, mut m) = previewing(
+                Intent::Maintain {
+                    task: Task::Sweep,
+                    reembed: false,
+                },
+                age,
+            );
+            let ctx = context(egui::Theme::Light);
+            let out = frames(&ctx, &mut |ui: &mut egui::Ui| {
+                m.show(ui, &shared, &[], Section::Review);
+            });
+            let shown = countdown.map(|c| format!("Prévia válida por {c}"));
+            for text in ["Prévia válida por 5:00", "Prévia válida por 0:01"] {
+                assert_eq!(
+                    nodes(&out, Role::Label, text).len(),
+                    usize::from(shown.as_deref() == Some(text)),
+                    "{age} s: {text}"
+                );
+            }
+            assert_eq!(
+                nodes(&out, Role::Button, "Aplicar retenção").len(),
+                usize::from(countdown.is_some()),
+                "{age} s"
+            );
+            assert_eq!(
+                nodes(&out, Role::Label, expired).len(),
+                usize::from(countdown.is_none()),
+                "{age} s"
+            );
+            assert_eq!(m.receipt.is_some(), countdown.is_some(), "{age} s");
+            assert_eq!(m.expired, countdown.is_none(), "{age} s");
+        }
     }
 }

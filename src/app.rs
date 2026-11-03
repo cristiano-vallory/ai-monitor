@@ -2118,6 +2118,72 @@ mod tests {
     }
 
     #[test]
+    fn with_a_sheet_open_the_sidebar_and_top_bar_still_work_and_the_receipt_holds() {
+        use crate::maintenance::{Action, Intent, Receipt};
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Review;
+        app.management.hold_preview(
+            Receipt {
+                action: Action {
+                    scope: crate::client::Scope {
+                        workspace: "fixture".into(),
+                        project: "demo".into(),
+                    },
+                    intent: Intent::Approve { id: "p-1".into() },
+                },
+                generation: 0,
+                at: Instant::now(),
+            },
+            serde_json::json!({"preview": true}),
+        );
+        let ctx = styled();
+        ctx.enable_accesskit();
+        // O primeiro frame da folha só mede (sizing pass).
+        frame(&mut app, &ctx, size, vec![]);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let title = widget_rect(&out, Role::Label, "Aprovar proposta?");
+        // O véu cobre a área de conteúdo: da lateral (232) à direita, da
+        // barra superior (52) à barra de status (860 − 28).
+        let veil = egui::Color32::from_black_alpha(115);
+        let veils: Vec<egui::Rect> = crate::widgets::tests::rects(&out)
+            .into_iter()
+            .filter(|r| r.fill == veil && r.blur_width == 0.)
+            .map(|r| r.rect)
+            .collect();
+        let content = egui::Rect::from_min_max(egui::pos2(232., 52.), egui::pos2(1320., 832.));
+        assert_eq!(veils, vec![content]);
+        assert!(content.contains_rect(title), "{title:?}");
+        assert!(title.top() < 52. + 30., "the sheet hangs from the top bar");
+        // A barra superior continua clicável.
+        let pause = widget_rect(&out, Role::Button, "Pausar atualização da tela");
+        click_at(&mut app, &ctx, size, pause.center());
+        assert!(app.paused, "the top bar still clicks");
+        // A lateral também; a prévia prende o painel na outra página.
+        let maintenance = widget_rect(&out, Role::Button, "Manutenção e backup");
+        click_at(&mut app, &ctx, size, maintenance.center());
+        assert_eq!(app.page, Page::Maintenance, "the sidebar still clicks");
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let waiting = "Prévia aguardando confirmação em Revisão · Propostas. Confirme-a lá ou descarte-a para usar esta página.";
+        assert_eq!(widgets(&out, Role::Label, waiting).len(), 1);
+        assert!(
+            widgets(&out, Role::Button, "Cancelar").is_empty(),
+            "the sheet stays with its page"
+        );
+        assert!(app.management.has_receipt());
+        let back = widget_rect(&out, Role::Button, "Ir para Revisão");
+        click_at(&mut app, &ctx, size, back.center());
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(app.page, Page::Review);
+        assert_eq!(
+            widgets(&out, Role::Label, "Aprovar proposta?").len(),
+            1,
+            "back on its page, the sheet is open again"
+        );
+    }
+
+    #[test]
     fn cross_locks_keep_review_maintenance_and_admin_apart() {
         use egui::accesskit::Role;
         // (página, quem está ocupado, um botão da página, desabilitado?)

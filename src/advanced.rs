@@ -1,6 +1,9 @@
 //! Fixed administrative catalog, verified against ai-memory v3.3.1.
 //! No arbitrary route, command or JSON editor is exposed by the UI.
-use crate::client::{Connection, Error};
+use crate::{
+    client::{Connection, Error},
+    maintenance::Confirmation,
+};
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -382,8 +385,10 @@ impl Operation {
         }
         Ok(())
     }
-    pub fn confirmation(&self) -> String {
-        let target = [
+    /// O alvo: o primeiro campo preenchido entre mensagem, sessão, ID,
+    /// usuário, projeto e workspace; "GLOBAL" sem nenhum.
+    pub fn target(&self) -> &str {
+        [
             "message_id",
             "session_id",
             "id",
@@ -394,8 +399,121 @@ impl Operation {
         .iter()
         .map(|k| self.s(k))
         .find(|v| !v.is_empty())
-        .unwrap_or("GLOBAL");
-        format!("CONFIRMAR {target}")
+        .unwrap_or("GLOBAL")
+    }
+    /// Nível de confirmação (`None` = leitura). Sem curinga: uma operação
+    /// nova não compila sem ser classificada.
+    pub fn confirmation(&self) -> Option<Confirmation> {
+        match self.kind {
+            Projects | ProfileStatus | ProfileList | ProfileReview | ProfileApply | Users
+            | Grants | ProjectGrants | Keys | Inbox | Outbox | Workstreams | Run | Events => None,
+            RenameProject | RenameWorkspace | CreateUser | EditUser | EnableUser | Grant
+            | CreateKey | SendMessage => Some(Confirmation::Click),
+            MoveProject | MergeProject | PurgeProject | MergeWorkspace | DeleteWorkspace
+            | MoveSession | ProfileRebuild | DisableUser | ResetPassword | RevokeGrant
+            | ProjectAccess | RotateKey | RevokeKey | CancelMessage => {
+                Some(Confirmation::Type(self.target().into()))
+            }
+        }
+    }
+    /// O título da folha e o verbo do botão final, escritos à mão; `None` =
+    /// leitura. Sem curinga: uma operação nova não compila sem eles.
+    pub fn question(&self) -> Option<(String, &'static str)> {
+        let (ws, project, user) = (self.s("workspace"), self.s("project"), self.s("username"));
+        Some(match self.kind {
+            Projects | ProfileStatus | ProfileList | ProfileReview | ProfileApply | Users
+            | Grants | ProjectGrants | Keys | Inbox | Outbox | Workstreams | Run | Events => {
+                return None;
+            }
+            RenameProject => (
+                format!("Renomear o projeto “{project}” para “{}”?", self.s("to")),
+                "Renomear",
+            ),
+            MoveProject => (
+                format!(
+                    "Mover o projeto “{project}” para o workspace “{}”?",
+                    self.s("to_workspace")
+                ),
+                "Mover",
+            ),
+            MergeProject => (
+                format!("Mesclar o projeto “{project}” em “{}”?", self.s("to")),
+                "Mesclar",
+            ),
+            PurgeProject => (format!("Excluir o projeto “{project}”?"), "Excluir"),
+            RenameWorkspace => (
+                format!("Renomear o workspace “{ws}” para “{}”?", self.s("to")),
+                "Renomear",
+            ),
+            MergeWorkspace => (
+                format!("Mesclar o workspace “{ws}” em “{}”?", self.s("to")),
+                "Mesclar",
+            ),
+            DeleteWorkspace => (
+                format!("Excluir o workspace “{ws}” e todo o seu conteúdo?"),
+                "Excluir",
+            ),
+            MoveSession => (
+                format!(
+                    "Mover a sessão “{}” para “{ws} / {project}”?",
+                    self.s("session_id")
+                ),
+                "Mover",
+            ),
+            ProfileRebuild => ("Reconstruir o perfil?".into(), "Reconstruir"),
+            CreateUser => (format!("Criar o usuário “{user}”?"), "Criar"),
+            EditUser => (
+                format!("Salvar as alterações do usuário “{user}”?"),
+                "Salvar",
+            ),
+            DisableUser => (format!("Desabilitar o login de “{user}”?"), "Desabilitar"),
+            EnableUser => (format!("Habilitar o login de “{user}”?"), "Habilitar"),
+            ResetPassword => (format!("Redefinir a senha de “{user}”?"), "Redefinir"),
+            Grant => (
+                format!(
+                    "Conceder a “{user}” acesso de {} a “{ws} / {project}”?",
+                    match self.s("level") {
+                        "read" => "leitura",
+                        "write" => "escrita",
+                        other => other,
+                    }
+                ),
+                "Conceder",
+            ),
+            RevokeGrant => (
+                format!("Revogar o acesso de “{user}” a “{ws} / {project}”?"),
+                "Revogar",
+            ),
+            ProjectAccess => (
+                format!(
+                    "Alterar o acesso ao projeto “{project}” para {}?",
+                    match self.s("mode") {
+                        "restricted" => "restrito",
+                        "open" => "aberto",
+                        other => other,
+                    }
+                ),
+                "Alterar",
+            ),
+            CreateKey => (format!("Emitir uma chave para “{user}”?"), "Emitir"),
+            RotateKey => (
+                format!("Rotacionar a chave “{}”?", self.s("id")),
+                "Rotacionar",
+            ),
+            RevokeKey => (format!("Revogar a chave “{}”?", self.s("id")), "Revogar"),
+            SendMessage => (
+                format!(
+                    "Enviar a mensagem para “{} / {}”?",
+                    self.s("to_workspace"),
+                    self.s("to_project")
+                ),
+                "Enviar",
+            ),
+            CancelMessage => (
+                format!("Cancelar a mensagem “{}”?", self.s("message_id")),
+                "Cancelar mensagem",
+            ),
+        })
     }
     fn scope(&self) -> Value {
         json!({"workspace":self.s("workspace"),"project":self.s("project")})
