@@ -105,11 +105,8 @@ pub struct MonitorApp {
     api: ApiSnapshot,
     page: Page,
     docker_tab: usize,
-    session_tab: usize,
-    handoff_page: usize,
+    sessions: crate::sessions_ui::Sessions,
     filter: String,
-    scope: String,
-    only_open: bool,
     running_only: bool,
     history: VecDeque<Sample>,
     minutes: i64,
@@ -194,11 +191,8 @@ impl MonitorApp {
             api: Default::default(),
             page: Page::Overview,
             docker_tab: 0,
-            session_tab: 0,
-            handoff_page: 0,
+            sessions: Default::default(),
             filter: String::new(),
-            scope: String::new(),
-            only_open: true,
             running_only: false,
             history: VecDeque::new(),
             minutes: 5,
@@ -693,287 +687,6 @@ impl MonitorApp {
         });
     }
 
-    fn sessions(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        let previous_filter = (self.filter.clone(), self.scope.clone());
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut self.session_tab,
-                0,
-                format!(
-                    "Handoffs abertos ({})",
-                    self.api.handoff_total.map(number).unwrap_or_else(
-                        || if self.api.at.is_some() {
-                            format!("{}+", number(self.api.handoffs.len()))
-                        } else {
-                            "—".into()
-                        }
-                    )
-                ),
-            );
-            ui.selectable_value(&mut self.session_tab, 1, "Sessões");
-            ui.selectable_value(&mut self.session_tab, 2, "Projetos");
-        });
-        ui.add_space(8.);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Buscar projeto, agente ou ID…")
-                    .desired_width(280.),
-            );
-            egui::ComboBox::from_id_salt("scope")
-                .selected_text(if self.scope.is_empty() {
-                    "Todos os projetos"
-                } else {
-                    &self.scope
-                })
-                .width(240.)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.scope, String::new(), "Todos os projetos");
-                    for p in &self.api.projects {
-                        let scope = format!("{} / {}", p.workspace_name, p.project_name);
-                        ui.selectable_value(&mut self.scope, scope.clone(), scope);
-                    }
-                });
-            if self.session_tab == 1 {
-                ui.checkbox(&mut self.only_open, "Só abertas");
-            }
-        });
-        ui.add_space(8.);
-        if previous_filter != (self.filter.clone(), self.scope.clone()) {
-            self.handoff_page = 0;
-        }
-        let needle = self.filter.to_lowercase();
-        if self.session_tab == 0 {
-            ui.label(
-                RichText::new(
-                    "Handoffs permanecem abertos até serem aceitos. Esta tela apenas consulta.",
-                )
-                .small()
-                .color(p.text2),
-            );
-            if !self.api.warnings.is_empty() {
-                ui.label(
-                    RichText::new(handoff_warning_message(
-                        self.api.handoffs.len(),
-                        self.api.handoff_total,
-                    ))
-                    .color(p.warn),
-                );
-            }
-            let hs: Vec<_> = self
-                .api
-                .handoffs
-                .iter()
-                .filter(|h| handoff_matches(h, &self.scope, &needle))
-                .collect();
-            if hs.is_empty() {
-                empty(
-                    ui,
-                    "Nenhum handoff aberto",
-                    if self.api.at.is_some() {
-                        "Nenhum resultado visível para os filtros e as permissões atuais."
-                    } else {
-                        "Aguardando a consulta ao ai-memory."
-                    },
-                );
-            }
-            let pages = hs.len().div_ceil(20).max(1);
-            self.handoff_page = self.handoff_page.min(pages - 1);
-            if !hs.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} encontrados · página {} de {}",
-                            number(hs.len()),
-                            self.handoff_page + 1,
-                            pages
-                        ))
-                        .small()
-                        .color(p.text2),
-                    );
-                    if ui
-                        .add_enabled(self.handoff_page > 0, egui::Button::new("Anterior"))
-                        .clicked()
-                    {
-                        self.handoff_page -= 1;
-                    }
-                    if ui
-                        .add_enabled(self.handoff_page + 1 < pages, egui::Button::new("Próxima"))
-                        .clicked()
-                    {
-                        self.handoff_page += 1;
-                    }
-                });
-            }
-            for h in hs.into_iter().skip(self.handoff_page * 20).take(20) {
-                panel(ui).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        badge(ui, "ABERTO", p.warn);
-                        ui.label(RichText::new(&h.scope).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(date(&h.at)).small().color(p.text2));
-                        });
-                    });
-                    ui.label(
-                        RichText::new(format!("{} · {}", h.agent, h.id))
-                            .small()
-                            .color(p.text2),
-                    );
-                    if h.redacted {
-                        ui.label("Resumo restrito pelas permissões do servidor.");
-                    } else {
-                        ui.label(h.summary.as_deref().unwrap_or("Sem resumo."));
-                    }
-                    if let Some(steps) = &h.next_steps
-                        && !steps.is_empty()
-                    {
-                        egui::CollapsingHeader::new("Próximos passos")
-                            .id_salt(&h.id)
-                            .show(ui, |ui| {
-                                for step in steps {
-                                    ui.label(format!("• {step}"));
-                                }
-                            });
-                    }
-                    if ui.small_button("Copiar ID").clicked() {
-                        ui.ctx().copy_text(h.id.clone());
-                    }
-                });
-                ui.add_space(4.);
-            }
-        } else if self.session_tab == 1 {
-            ui.label(RichText::new("Últimas 100 sessões por projeto. Aberta = sem encerramento registrado; não comprova atividade atual. Vínculos entre projetos podem se repetir.").small().color(p.text2));
-            let ss: Vec<_> = self
-                .api
-                .sessions
-                .iter()
-                .filter(|s| {
-                    (!self.only_open || s.ended_at.is_none())
-                        && (self.scope.is_empty() || s.scope == self.scope)
-                        && format!("{} {} {}", s.scope, s.agent_kind, s.session_id)
-                            .to_lowercase()
-                            .contains(&needle)
-                })
-                .collect();
-            ui.label(
-                RichText::new(format!("{} registros", number(ss.len())))
-                    .small()
-                    .color(p.text2),
-            );
-            TableBuilder::new(ui)
-                .striped(true)
-                .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::initial(100.))
-                .column(Column::remainder().at_least(180.))
-                .column(Column::initial(90.))
-                .column(Column::initial(90.))
-                .column(Column::initial(140.))
-                .column(Column::initial(75.))
-                .header(30., |mut h| {
-                    for title in [
-                        "ESTADO",
-                        "PROJETO / SESSÃO",
-                        "AGENTE",
-                        "EVENTOS",
-                        "INÍCIO",
-                        "ID",
-                    ] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(54., ss.len(), |mut row| {
-                        let s = ss[row.index()];
-                        row.col(|ui| {
-                            badge(
-                                ui,
-                                if s.ended_at.is_none() {
-                                    "ABERTA"
-                                } else {
-                                    "ENCERRADA"
-                                },
-                                if s.ended_at.is_none() { p.acc } else { p.text2 },
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(short_project(&s.scope)).on_hover_text(&s.scope);
-                                ui.label(
-                                    RichText::new(short_id(&s.session_id))
-                                        .small()
-                                        .color(p.text2),
-                                )
-                                .on_hover_text(s.cwd.as_deref().unwrap_or(""));
-                            });
-                        });
-                        row.col(|ui| {
-                            ui.label(&s.agent_kind);
-                        });
-                        row.col(|ui| {
-                            ui.label(number_u64(s.observation_count));
-                        });
-                        row.col(|ui| {
-                            ui.label(date(&s.started_at));
-                        });
-                        row.col(|ui| {
-                            if ui.small_button("Copiar").clicked() {
-                                ui.ctx().copy_text(s.session_id.clone());
-                            }
-                        });
-                    });
-                });
-        } else {
-            ui.label(RichText::new("Atividade = último evento ou atualização informado pela API. Contagens por projeto podem compartilhar sessões.").small().color(p.text2));
-            TableBuilder::new(ui)
-                .striped(true)
-                .column(Column::remainder().at_least(200.))
-                .column(Column::initial(70.))
-                .column(Column::initial(80.))
-                .column(Column::initial(100.))
-                .column(Column::initial(150.))
-                .header(30., |mut h| {
-                    for title in ["PROJETO", "PÁGINAS", "ABERTAS", "EVENTOS", "ATIVIDADE"] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|mut body| {
-                    for p in self.api.projects.iter().filter(|p| {
-                        let scope = format!("{} / {}", p.workspace_name, p.project_name);
-                        (self.scope.is_empty() || self.scope == scope)
-                            && scope.to_lowercase().contains(&needle)
-                    }) {
-                        body.row(36., |mut row| {
-                            row.col(|ui| {
-                                ui.label(&p.project_name).on_hover_text(&p.workspace_name);
-                            });
-                            row.col(|ui| {
-                                ui.label(number_u64(p.page_count));
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    p.open_session_count.map(number_u64).unwrap_or("—".into()),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.label(p.observation_count.map(number_u64).unwrap_or("—".into()));
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    p.last_activity.as_deref().map(date).unwrap_or("—".into()),
-                                );
-                            });
-                        });
-                    }
-                });
-        }
-    }
-
     fn docker(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(ui.visuals());
         let total = self.resources.docker_total();
@@ -1221,9 +934,8 @@ impl MonitorApp {
         self.history.clear();
         self.resources = Default::default();
         self.api = Default::default();
-        self.scope.clear();
+        self.sessions.reset();
         self.selected_container = None;
-        self.handoff_page = 0;
         self.paused = false;
         self.last_sync = Instant::now() - Duration::from_secs(1);
     }
@@ -1336,8 +1048,17 @@ impl MonitorApp {
             )
             .show(ctx, |ui| {
                 self.notices(ui);
-                // Na largura mínima, tabelas e linhas de Sessões e Docker
-                // passam da área: rolam na horizontal em vez de cortar.
+                // Sessões controla a própria rolagem (lista e detalhe) e cabe
+                // na largura.
+                if self.page == Page::Sessions {
+                    if self.sessions.show(ui, &self.api, Utc::now()) {
+                        self.management.open_handoffs();
+                        self.page = Page::Review;
+                    }
+                    return;
+                }
+                // Na largura mínima, tabelas e linhas do Docker passam da
+                // área: rolam na horizontal em vez de cortar.
                 egui::ScrollArea::both()
                     .id_salt("main-scroll")
                     .show(ui, |ui| {
@@ -1387,7 +1108,8 @@ impl MonitorApp {
                             Page::Explore => {
                                 self.central.show(ui, &self.shared, &self.api.projects)
                             }
-                            Page::Sessions => self.sessions(ui),
+                            // Mostrada acima, fora desta rolagem.
+                            Page::Sessions => {}
                             Page::Docker => self.docker(ui),
                             Page::Settings => self.settings(ui),
                         }
@@ -1990,15 +1712,15 @@ fn host_status(resources: &ResourceSnapshot, api: &ApiSnapshot) -> String {
     }
     text
 }
-fn date(at: &str) -> String {
+pub(crate) fn date(at: &str) -> String {
     DateTime::parse_from_rfc3339(at)
         .map(|d| d.with_timezone(&Local).format("%d/%m %H:%M").to_string())
         .unwrap_or_else(|_| "—".into())
 }
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(18).collect()
 }
-fn short_project(s: &str) -> &str {
+pub(crate) fn short_project(s: &str) -> &str {
     s.split(" / ").last().unwrap_or(s)
 }
 
@@ -2238,7 +1960,7 @@ fn chart_segments(
     (lines, dots)
 }
 
-fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
+pub(crate) fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
     let summary = if h.redacted {
         ""
     } else {
@@ -2250,7 +1972,7 @@ fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
             .contains(needle)
 }
 
-fn handoff_warning_message(loaded: usize, total: Option<usize>) -> String {
+pub(crate) fn handoff_warning_message(loaded: usize, total: Option<usize>) -> String {
     match total {
         Some(total) => format!(
             "Lista: {} handoffs carregados de {} abertos. Até 200 por projeto.",
@@ -3775,57 +3497,369 @@ mod tests {
         );
     }
 
-    #[test]
-    fn main_area_scrolls_sideways_when_a_page_is_wider_than_720() {
-        // A linha de filtros da aba Sessões (busca, projeto, "Só abertas")
-        // passa da área de conteúdo em 720 pontos, com ou sem dados.
-        let label = |out: &egui::FullOutput| {
-            out.shapes
-                .iter()
-                .find_map(|clipped| match &clipped.shape {
-                    egui::Shape::Text(t) if t.galley.text() == "Só abertas" => {
-                        Some(t.visual_bounding_rect())
-                    }
-                    _ => None,
+    /// Sessões com dados longos: nomes de projeto, títulos e contagens
+    /// grandes, em três projetos, mais sessões e projetos.
+    fn sessions_data() -> ApiSnapshot {
+        let now = Utc::now();
+        let at = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+        let projects = [
+            "api-pagamentos-com-um-nome-de-projeto-bem-longo",
+            "portal-web",
+            "notas",
+        ];
+        ApiSnapshot {
+            at: Some(now),
+            handoff_total: Some(1234),
+            handoffs: (0..30)
+                .map(|i| Handoff {
+                    id: format!("01a19ebd-3267-4c1e-9a7e-0f31b6b467{i:02}"),
+                    agent: if i % 3 == 0 { "codex" } else { "claude-code" }.into(),
+                    at: at(i * 7),
+                    state: "open".into(),
+                    summary: Some(if i == 0 {
+                        "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum".into()
+                    } else {
+                        format!("## Handoff {i}\n\nCorpo do handoff {i}.")
+                    }),
+                    next_steps: Some(vec!["Primeiro passo".into(), "Segundo passo".into()]),
+                    scope: format!("acme / {}", projects[i as usize % 3]),
+                    ..Default::default()
                 })
-                .expect("the Sessões tab shows the filter row")
-        };
+                .collect(),
+            sessions: (0..12)
+                .map(|i| Session {
+                    session_id: format!("sessao-{i:04}-0000-4000-8000-000000000000"),
+                    agent_kind: "claude-code".into(),
+                    started_at: at(i * 30),
+                    ended_at: (i % 4 == 0).then(|| at(i)),
+                    cwd: Some("/tmp/projeto".into()),
+                    observation_count: 1_234_567,
+                    scope: format!("acme / {}-{i}", projects[0]),
+                    ..Default::default()
+                })
+                .collect(),
+            projects: (0..5)
+                .map(|i| Project {
+                    workspace_name: "acme".into(),
+                    project_name: format!("{}-{i}", projects[0]),
+                    page_count: 1234,
+                    open_session_count: Some(12),
+                    observation_count: Some(9_876_543),
+                    last_activity: Some(at(5)),
+                    ..Default::default()
+                })
+                .collect(),
+            warnings: vec!["acme / notas: lista limitada aos 200 handoffs mais recentes.".into()],
+            ..Default::default()
+        }
+    }
+    /// Retângulos dos nós da página (fora da lateral e das barras).
+    fn page_widgets(out: &egui::FullOutput, side: f32, height: f32) -> Vec<(String, egui::Rect)> {
+        use egui::accesskit::Role;
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                matches!(
+                    n.role(),
+                    Role::Label
+                        | Role::Button
+                        | Role::CheckBox
+                        | Role::ComboBox
+                        | Role::TextInput
+                        | Role::Link
+                        | Role::Pane
+                )
+            })
+            .filter_map(|(_, n)| {
+                let b = n.bounds()?;
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                );
+                let name = n.label().or(n.value()).unwrap_or_default().to_owned();
+                (rect.left() >= side && rect.top() >= 52. && rect.bottom() <= height - 28.)
+                    .then_some((name, rect))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sessions_page_fits_720_without_sideways_scrolling() {
+        use crate::sessions_ui::Tab;
+        use egui::accesskit::Role;
+        let size = [720., 560.];
+        for (tab, mounted) in [
+            (Tab::Handoffs, (Role::Pane, "Lista de handoffs")),
+            (Tab::Sessions, (Role::CheckBox, "Só abertas")),
+            (Tab::Projects, (Role::Label, "Atividade")),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Sessions;
+            app.api = sessions_data();
+            app.sessions.set_tab(tab);
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let side = sidebar_width(&ctx);
+            let (left, right) = (side + 24., size[0] - 24.);
+            let check = |out: &egui::FullOutput| {
+                let found = page_widgets(out, side, size[1]);
+                assert!(found.len() > 10, "{tab:?}: the page mounted: {found:?}");
+                for (name, rect) in &found {
+                    assert!(
+                        rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                        "{tab:?}: {name:?} {rect:?} leaves the content ({left}..{right})"
+                    );
+                }
+                widget_rect(out, mounted.0, mounted.1)
+            };
+            let before = check(&out);
+            // A roda para o lado não move nada: não há o que rolar.
+            let pointer = egui::Event::PointerMoved(before.center());
+            frame(&mut app, &ctx, size, vec![pointer.clone()]);
+            frame(
+                &mut app,
+                &ctx,
+                size,
+                vec![
+                    pointer.clone(),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(-300., 0.),
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            let mut out = frame(&mut app, &ctx, size, vec![pointer.clone()]);
+            for _ in 0..30 {
+                out = frame(&mut app, &ctx, size, vec![pointer.clone()]);
+            }
+            assert_eq!(check(&out), before, "{tab:?}: nothing scrolled sideways");
+            // A nota de somente leitura cabe numa linha (ao lado ou abaixo).
+            let note = widget_rect(
+                &out,
+                Role::Label,
+                "Somente leitura · nenhum handoff é aceito por esta tela",
+            );
+            assert!(note.height() < 20., "{tab:?}: one line, {note:?}");
+            // A legenda é a última coisa e fica acima da barra de status.
+            let legend = match tab {
+                Tab::Handoffs => "Lista limitada a 200 por projeto",
+                Tab::Sessions => {
+                    "Últimas 100 sessões por projeto. Aberta = sem encerramento registrado; não comprova atividade atual. Vínculos entre projetos podem se repetir."
+                }
+                Tab::Projects => {
+                    "Atividade = último evento ou atualização informado pela API. Contagens por projeto podem compartilhar sessões."
+                }
+            };
+            let legend = widget_rect(&out, Role::Label, legend);
+            assert!(
+                legend.bottom() <= size[1] - 28. - 20. + 0.5,
+                "{tab:?}: legend {legend:?} must sit above the status bar"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_list_and_detail_follow_the_width_of_every_frame() {
+        use egui::accesskit::Role;
         let mut app = app_with_unsaved_draft();
         app.page = Page::Sessions;
-        app.session_tab = 1;
+        app.api = sessions_data();
         let ctx = styled();
-        let size = [720., 560.];
-        let before = label(&frame(&mut app, &ctx, size, vec![]));
+        ctx.enable_accesskit();
+        let panes = |out: &egui::FullOutput| {
+            (
+                widgets(out, Role::Pane, "Lista de handoffs"),
+                widgets(out, Role::Pane, "Detalhe do handoff"),
+            )
+        };
+        let content =
+            |ctx: &egui::Context, size: [f32; 2]| (sidebar_width(ctx) + 24., size[0] - 24.);
+        let narrow = [720., 560.];
+        let wide = [1320., 860.];
+        // Aberta em 720: só a lista, na largura toda do conteúdo.
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (left, right) = content(&ctx, narrow);
+        let (list, detail) = panes(&out);
+        assert!(detail.is_empty(), "720 opens on the list");
         assert!(
-            before.right() > 720. - 24.,
-            "precondition: the filter row overflows the content area ({})",
-            before.right()
+            (list[0].left() - left).abs() < 0.5 && (list[0].right() - right).abs() < 0.5,
+            "the list spans the content at 720: {:?}",
+            list[0]
         );
-        // Ponteiro sobre a linha de filtros, dentro da área visível.
-        let pointer = egui::Event::PointerMoved(egui::pos2(400., before.center().y));
-        frame(&mut app, &ctx, size, vec![pointer.clone()]);
+        // Alargada no mesmo contexto: lado a lado, nada guardado de 720; a
+        // lista fica em 360–420 até numa tela larga.
+        for wide in [wide, wide, [1920., 1080.]] {
+            let out = frame(&mut app, &ctx, wide, vec![]);
+            let (left, right) = content(&ctx, wide);
+            let (list, detail) = panes(&out);
+            let (list, detail) = (list[0], detail[0]);
+            assert!(
+                (360. ..=420.).contains(&list.width()),
+                "list width {}",
+                list.width()
+            );
+            assert!((list.left() - left).abs() < 0.5, "{list:?}");
+            assert!(list.right() <= detail.left(), "{list:?} / {detail:?}");
+            assert!((detail.right() - right).abs() < 0.5, "{detail:?}");
+            // O detalhe é o do primeiro da lista, com o pé fixo dentro dele.
+            widget_rect(
+                &out,
+                Role::Label,
+                "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum",
+            );
+            let review = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+            assert!(
+                detail.contains_rect(review),
+                "{review:?} pinned in {detail:?}"
+            );
+        }
+        // De volta a 720: a lista outra vez.
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (list, detail) = panes(&out);
+        assert!(detail.is_empty() && list.len() == 1);
+        // Um clique numa linha abre o detalhe no lugar da lista, com "← Voltar".
+        let row = widget_rect(&out, Role::Button, "Handoff 3 · codex · 21 min");
+        click_at(&mut app, &ctx, narrow, row.center());
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (list, detail) = panes(&out);
+        let (left, right) = content(&ctx, narrow);
+        assert!(list.is_empty(), "the detail replaces the list");
+        assert!(
+            (detail[0].left() - left).abs() < 0.5 && (detail[0].right() - right).abs() < 0.5,
+            "{:?}",
+            detail[0]
+        );
+        widget_rect(&out, Role::Label, "Handoff 3");
+        for (name, rect) in page_widgets(&out, sidebar_width(&ctx), narrow[1]) {
+            assert!(
+                rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                "{name:?} {rect:?} leaves the detail at 720"
+            );
+        }
+        // Em 720 × 560 o pé vai ao fim do texto: rolando o detalhe, ele
+        // aparece dentro do painel.
+        let review = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+        assert!(
+            review.top() > detail[0].bottom(),
+            "precondition: the footer is below the fold at 560: {review:?}"
+        );
+        let pointer = egui::Event::PointerMoved(detail[0].center());
+        frame(&mut app, &ctx, narrow, vec![pointer.clone()]);
         frame(
             &mut app,
             &ctx,
-            size,
+            narrow,
             vec![
                 pointer.clone(),
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
-                    delta: Vec2::new(-300., 0.),
+                    delta: Vec2::new(0., -2000.),
                     modifiers: Default::default(),
                 },
             ],
         );
-        let mut after = before;
+        let mut out = frame(&mut app, &ctx, narrow, vec![pointer.clone()]);
         for _ in 0..30 {
-            after = label(&frame(&mut app, &ctx, size, vec![pointer.clone()]));
+            out = frame(&mut app, &ctx, narrow, vec![pointer.clone()]);
         }
+        let review = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
         assert!(
-            after.left() < before.left() - 50.,
-            "content cut at 720 must be reachable by scrolling sideways: x {} -> {}",
-            before.left(),
-            after.left()
+            detail[0].contains_rect(review),
+            "{review:?} in {:?}",
+            detail[0]
+        );
+        // Alargada com o detalhe aberto: os dois, com o mesmo handoff.
+        let out = frame(&mut app, &ctx, wide, vec![]);
+        let (list, detail) = panes(&out);
+        assert_eq!((list.len(), detail.len()), (1, 1));
+        widget_rect(&out, Role::Label, "Handoff 3");
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let back = widget_rect(&out, Role::Button, "← Voltar");
+        click_at(&mut app, &ctx, narrow, back.center());
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let (list, detail) = panes(&out);
+        assert!(detail.is_empty() && list.len() == 1, "back to the list");
+        assert_eq!(
+            update_node(&out, Role::Button, "Handoff 3 · codex · 21 min").toggled(),
+            Some(egui::accesskit::Toggled::True),
+            "the selection is kept"
+        );
+    }
+
+    #[test]
+    fn manage_in_review_opens_the_handoffs_tab_unless_the_panel_is_held() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let held = "Operação em andamento em Manutenção e backup · Manutenção. Aguarde a resposta lá; esta página usa o mesmo painel.";
+        // (aba antes, ocupado?, aba depois, aviso na Revisão?)
+        for (tab, busy, want, warned) in [
+            (0, false, 1, false),
+            (1, false, 1, false),
+            (2, false, 1, false),
+            (3, false, 1, false),
+            (0, true, 0, false),
+            (2, true, 2, true),
+        ] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Sessions;
+            app.api = sessions_data();
+            app.management.set_tab(tab);
+            app.management.busy = busy;
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let link = widget_rect(&out, Role::Link, "Gerenciar em Revisão →");
+            click_at(&mut app, &ctx, size, link.center());
+            assert_eq!(app.page, Page::Review, "tab {tab} busy {busy}");
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.management.tab(), want, "tab {tab} busy {busy}");
+            assert_eq!(
+                widgets(&out, Role::Label, held).len(),
+                usize::from(warned),
+                "tab {tab} busy {busy}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_clears_the_sessions_filters_and_selection() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Sessions;
+        app.api = sessions_data();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let row = widget_rect(&out, Role::Button, "Handoff 3 · codex · 21 min");
+        click_at(&mut app, &ctx, size, row.center());
+        let scope = "acme / api-pagamentos-com-um-nome-de-projeto-bem-longo";
+        app.sessions.set_filters(scope, "codex");
+        let out = frame(&mut app, &ctx, size, vec![]);
+        update_node(&out, Role::ComboBox, "Agente: codex");
+        update_node(&out, Role::ComboBox, scope);
+        assert_eq!(
+            app.sessions.selected(),
+            Some(&(
+                scope.to_owned(),
+                "01a19ebd-3267-4c1e-9a7e-0f31b6b46703".to_owned()
+            )),
+            "precondition: filtered, with a chosen handoff"
+        );
+        app.reconnect(app.config.clone());
+        assert_eq!(app.sessions.selected(), None);
+        app.api = sessions_data();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        update_node(&out, Role::ComboBox, "Todos os projetos");
+        update_node(&out, Role::ComboBox, "Agente: todos");
+        assert_eq!(
+            update_node(&out, Role::Button, "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum · codex · agora").toggled(),
+            Some(egui::accesskit::Toggled::True),
+            "a new connection opens on the first again"
         );
     }
 }

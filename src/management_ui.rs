@@ -389,6 +389,15 @@ impl Management {
         }
         None
     }
+    /// "Gerenciar em Revisão →" (Sessões e handoffs): a aba Handoffs, a menos
+    /// que a troca descarte algo (`holds`); aí a aba fica e a página Revisão
+    /// mostra o que prende o painel.
+    pub fn open_handoffs(&mut self) {
+        if self.tab != 1 && !self.holds() {
+            self.tab = 1;
+            self.discard();
+        }
+    }
     #[cfg(test)]
     pub(crate) fn tab(&self) -> u8 {
         self.tab

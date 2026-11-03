@@ -7,6 +7,7 @@ mod client;
 mod commands;
 mod console;
 mod docker;
+mod handoff_text;
 mod health;
 mod health_ui;
 mod keychain;
@@ -24,6 +25,7 @@ mod platform;
 #[cfg(target_os = "linux")]
 mod portal;
 mod queries;
+mod sessions_ui;
 #[cfg(test)]
 mod test_support;
 mod theme;
