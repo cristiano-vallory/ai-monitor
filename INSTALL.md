@@ -9,7 +9,7 @@ Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na 
 3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
 4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
 5. Procure **AI / Docker** na barra de menus. Clique e escolha **Abrir painel**.
-6. Em **Ajustes**, ajuste servidor, token opcional e nome do contêiner; use **Salvar e conectar**.
+6. Abra **Ajustes** (**⌘,** ou o item **Ajustes** no rodapé da lateral), vá à aba **Conexão**, ajuste servidor, token opcional e nome do contêiner; use **Salvar e conectar**.
 
 O instalador é **Universal**, com executáveis nativos para Apple Silicon e Intel. O mínimo declarado é macOS 12.0; a interface foi validada em Apple Silicon e o executável Intel foi verificado via Rosetta. Hardware Intel e versões antigas do macOS ainda não foram validados.
 
@@ -117,7 +117,7 @@ docker ps
 
 O monitor acompanha o contexto ativo do Docker CLI. Um contexto remoto representa os contêineres daquele servidor, enquanto os processos do Mac continuam locais. Não é necessário expor o daemon Docker em uma porta TCP nem fornecer credenciais Docker ao AI Monitor.
 
-O app procura o executável em `/usr/local/bin/docker`, `/opt/homebrew/bin/docker` e `/Applications/Docker.app/Contents/Resources/bin/docker`. Se a instalação usar outro local, execute `command -v docker` no terminal e informe o caminho absoluto em **Ajustes → Executável Docker**. Não use `~` nesse campo: informe o caminho expandido.
+O app procura o executável em `/usr/local/bin/docker`, `/opt/homebrew/bin/docker` e `/Applications/Docker.app/Contents/Resources/bin/docker`. Se a instalação usar outro local, execute `command -v docker` no terminal e informe o caminho absoluto em **Ajustes → Conexão → Executável Docker**. Não use `~` nesse campo: informe o caminho expandido.
 
 ### ai-memory
 
@@ -125,7 +125,7 @@ Instale ou utilize seu servidor seguindo o [projeto ai-memory](https://github.co
 
 O endereço inicial do monitor é `http://127.0.0.1:49374` e o nome de contêiner é `ai-memory`. Esses valores são padrões genéricos, não detectam todas as instalações. Ajuste o endereço e o nome conforme seu ambiente.
 
-Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalação e informe-o na interface do monitor. A identidade autenticada limita quais projetos e handoffs podem ser vistos. Com permissão administrativa, a página Administração permite gerir usuários, grants e chaves; as operações exigem prévia e confirmação.
+Se o ai-memory usar autenticação, obtenha um token autorizado na sua instalação e informe-o na interface do monitor. A identidade autenticada limita quais projetos e handoffs podem ser vistos. Com permissão administrativa, a página Administração permite gerir usuários, grants e chaves; as escritas exigem prévia e confirmação.
 
 ## 4. Baixar, compilar e abrir
 
@@ -140,7 +140,7 @@ A primeira compilação baixa e compila as crates, podendo demorar alguns minuto
 
 O script usa Cargo de `~/.cargo/bin/cargo` ou do `PATH`; `CARGO_BIN` permite informar outro executável. Ele fixa o diretório de saída em `target/`, o alvo da arquitetura solicitada e o deployment target macOS 12.0. Os flags de release remapeiam caminhos do projeto, Cargo e Rustup para evitar incluir diretórios pessoais nas mensagens de erro compiladas.
 
-**Ao abrir, procure o texto AI/Docker na barra de menus.** Não aparece uma janela nem um ícone no Dock. Clique no indicador e escolha **Abrir painel**. Em **Ajustes**, ajuste os campos e clique em **Salvar e conectar**. O botão vermelho da janela apenas oculta o painel; para encerrar, use **Sair do AI Monitor** no menu.
+**Ao abrir, procure o texto AI/Docker na barra de menus.** Não aparece uma janela nem um ícone no Dock. Clique no indicador e escolha **Abrir painel**. Abra **Ajustes** com **⌘,** (ou pelo item **Ajustes** no rodapé da lateral), ajuste os campos e clique em **Salvar e conectar**. O botão vermelho da janela apenas oculta o painel; para encerrar, use **Sair do AI Monitor** no menu.
 
 Para abrir explicitamente com a janela:
 
@@ -168,7 +168,7 @@ Para iniciar no login, adicione o app instalado em **Ajustes do Sistema → Gera
 
 ## Autenticação sem salvar segredos
 
-A opção mais simples é inserir o token em **Ajustes → Token Bearer** e clicar em **Salvar e conectar**. Ele fica somente na memória do processo e deve ser informado novamente após encerrar o aplicativo. Não é salvo no JSON de preferências. A opção **Guardar o Bearer no Keychain** permite persistir somente esse token, por endereço. Desmarque a opção e salve para removê-lo: o app apaga o token guardado do servidor que estava conectado, inclusive quando o endereço é trocado na mesma ação. **Restaurar campos padrão** seguido de **Salvar e conectar** também o remove. Variável de ambiente explícita, mesmo vazia, tem prioridade sobre o Keychain.
+A opção mais simples é inserir o token em **Ajustes → Conexão → Token** (campo com a dica “Opcional”) e clicar em **Salvar e conectar**. Ele fica somente na memória do processo e deve ser informado novamente após encerrar o aplicativo. Não é salvo no JSON de preferências. A opção **Guardar no Keychain para este servidor** permite persistir somente esse token, por endereço; **Carregar do Keychain** coloca no campo o token guardado para o endereço informado, e você ainda precisa salvar para conectar. Desmarque a opção e salve para removê-lo: o app apaga o token guardado do servidor que estava conectado, inclusive quando o endereço é trocado na mesma ação. **Restaurar padrões** (no rodapé da janela) seguido de **Salvar e conectar** também o remove. No Linux, o atalho de Ajustes é **Ctrl+,** e os rótulos dizem “chaveiro do sistema” no lugar de Keychain. Variável de ambiente explícita, mesmo vazia, tem prioridade sobre o Keychain.
 
 Para uso pelo terminal, `AI_MEMORY_SERVER_URL` e `AI_MEMORY_AUTH_TOKEN` são opcionais. Exemplo para o **zsh padrão do macOS**, solicitando o token sem escrevê-lo no histórico nem exibi-lo:
 
@@ -221,7 +221,7 @@ As preferências locais são preservadas. O app não possui atualizador automát
 | Docker inclui o consumo do ai-memory | O total inclui todos os contêineres ativos, inclusive o ai-memory |
 | Threads detalhadas indisponíveis | O daemon pode não suportar `docker top … nlwp`; tarefas/PIDs são outra métrica |
 | Contagem maior que a lista | Limites por projeto: 100 sessões e 200 handoffs; consulte a interpretação no README |
-| Dados ficam em `—` | Fonte indisponível ou amostra vencida; confira a idade da coleta e os erros em Ajustes |
+| Dados ficam em `—` | Fonte indisponível ou amostra vencida; confira a idade da coleta e os erros em **Ajustes → Conexão** (Diagnóstico da conexão) |
 
 Para diagnóstico local do app instalado, sem Rust:
 
@@ -273,27 +273,35 @@ prévias. A administração exige autoridade apropriada; uma chave pessoal `aim_
 embeddings dependem dos providers configurados no servidor e podem gerar cobrança.
 
 Abra **Revisão** (propostas e handoffs) ou **Manutenção e backup** (manutenção,
-backup e restauração), selecione o projeto, prepare uma operação, leia a
-prévia e confirme o escopo. Backup e checkpoint globais usam a confirmação
-`GLOBAL`; reconsolidação usa `SESSAO <id>`. Nunca use dados reais para testar
-exclusão/manutenção. O [guia administrativo](docs/ADMINISTRATION.md) detalha
-permissões, limites, backups privados e resultados incertos após falhas de rede.
+backup e restauração), selecione o projeto e inicie uma operação. Leituras não
+pedem confirmação. Uma escrita abre a prévia numa folha, válida por cinco
+minutos, e a maior parte confirma com um clique. Só as destrutivas, sem desfazer
+(aplicar retenção, cancelar e expirar handoffs), pedem que se digite o alvo, no
+formato `workspace / projeto`. Backup e checkpoint globais e reconsolidação
+confirmam com um clique: confira o alvo e o aviso da folha. Nunca use dados
+reais para testar exclusão/manutenção. O
+[guia administrativo](docs/ADMINISTRATION.md) detalha permissões, limites,
+backups privados e resultados incertos após falhas de rede.
 
 
 ## Administração e serviço local (v0.5)
 
-Não há ferramentas adicionais para login humano/Keychain. Em **Ajustes**, salve
-primeiro o endereço e entre com usuário/senha em **Autenticação humana**. Senha,
-cookies e CSRF ficam apenas em memória. O botão de sair retorna explicitamente
-ao Bearer previamente configurado. Senhas temporárias podem exigir troca na
-mesma tela antes de acessar a administração.
+Não há ferramentas adicionais para login humano/Keychain. Em **Ajustes → Conexão**,
+salve primeiro o endereço; depois, na aba **Conta**, entre com usuário e senha em
+**Entrar com sessão humana**. Senha, cookies e CSRF ficam apenas em memória.
+**Sair da sessão humana e voltar ao Bearer** retorna explicitamente ao Bearer
+previamente configurado. Senhas temporárias podem exigir troca na mesma aba
+(**Alterar minha senha**) antes de acessar a administração.
 
-Para operação local, **Administração → Serviço deste Mac** exige URL
-loopback e configuração explícita. Docker precisa do CLI e, para atualizar, do
+Para operação local, **Administração → Serviço deste Mac** (no Linux,
+**Serviço deste computador**) exige URL loopback e configuração explícita.
+Docker precisa do CLI e, para atualizar, do
 plugin Compose v2 com suporte a `config --format json`, arquivo Compose único,
 serviço existente e backup privado. Contextos remotos e stacks com overrides
 são recusados. Variáveis arbitrárias do terminal não são herdadas nesses comandos;
 mantenha as dependências de configuração no Compose e seus arquivos locais.
+Iniciar e reiniciar confirmam com um clique; parar e atualizar pedem que se
+digite o nome do serviço na folha de confirmação.
 
 LaunchAgent exige o plist oficial `com.github.akitaonrails.ai-memory`, executando
 `ai-memory serve` diretamente. Plist/binários de manutenção devem ser arquivos

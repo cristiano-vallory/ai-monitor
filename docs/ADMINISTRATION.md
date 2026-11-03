@@ -37,8 +37,10 @@ não fornecidos aparecem como `—`, sem presumir zero ou saúde comprovada.
 
 ## Explorar: sessões detalhadas
 
-Selecione o workspace/projeto exato e carregue sessões. A paginação consulta
-50 registros por vez no servidor, incluindo opcionalmente sessões abertas.
+Na linha de ferramentas, escolha o workspace/projeto exato e, no segmentado,
+**Sessões detalhadas**; depois use **Carregar sessões**. A paginação (**Anterior**
+e **Próxima**, com o intervalo “N–M”) consulta 50 registros por vez no servidor,
+incluindo opcionalmente sessões abertas (**Incluir abertas**).
 Uma sessão aberta não prova que seu agente ainda está executando. A mesma
 sessão pode aparecer em mais de um projeto: a timeline mostra somente eventos
 do escopo selecionado. Pesquisa textual e tipo do evento são filtrados pelo
@@ -87,29 +89,40 @@ Falhas de rede, rotas desabilitadas e permissões são mostradas; não são cont
 
 ## Revisão e Manutenção e backup (v0.4)
 
-As operações abaixo ficam em **Revisão** (propostas e handoffs) e em
-**Manutenção e backup** (auditoria, curadoria, retenção, embeddings,
-reconsolidação, feedback, backup e checkpoints). Selecione o projeto exato,
-prepare a ação, examine a prévia/evidências e digite a confirmação solicitada.
-Os campos ficam bloqueados enquanto há uma prévia aguardando decisão; **Cancelar
-e editar** permite alterá-los. Trocar aba/projeto cancela a prévia. As duas
-páginas usam o mesmo painel: com uma operação em andamento, uma prévia ou um
-resultado na tela de uma delas, a outra não descarta nada sozinha; avisa e
-oferece **Ir para** a página da operação ou **Descartar e abrir** a atual. Uma confirmação
-expira em cinco minutos e não pode ser reaproveitada após mudar a conexão.
-Salvar outra conexão fica indisponível durante uma operação administrativa.
+As operações abaixo ficam em **Revisão** (abas **Propostas** e **Handoffs**) e em
+**Manutenção e backup** (abas **Manutenção** e **Backup**: auditoria, curadoria,
+retenção, embeddings, reconsolidação, feedback, backup e checkpoints). Na linha
+de ferramentas, escolha o projeto exato e a aba. Leituras (listas, **Ver
+detalhes**, **Carregar histórico**, **Listar últimos 100 checkpoints**) rodam
+direto. Uma escrita abre a prévia numa folha de confirmação, descrita em
+[Confirmação em níveis](#confirmação-em-níveis). Enquanto a folha está aberta, o
+projeto, as abas e os campos ficam sob o véu; **Cancelar** (ou Esc) a fecha e
+libera os campos, que mantêm o que foi preenchido. Um resultado, um erro ou o
+aviso de prévia vencida ficam na página até **Limpar**, trocar de aba ou de
+projeto. Depois de aplicar uma escrita, o cartão **Resultado** traz o aviso
+“Resposta recebida. Confira os detalhes abaixo.”. As duas páginas usam o mesmo
+painel: com uma operação em andamento, uma prévia ou um resultado na tela de
+uma delas, a outra não descarta nada sozinha; avisa e oferece **Ir para** a
+página da operação ou **Descartar e abrir** a atual. Uma confirmação expira em
+cinco minutos e não pode ser reaproveitada após mudar a conexão. Salvar outra
+conexão fica indisponível durante uma operação administrativa.
+
+**Gerenciar em Revisão →**, no detalhe de um handoff em **Sessões e handoffs**,
+abre Revisão · Handoffs com o projeto e o handoff selecionados. Se o painel
+estiver preso a uma operação, prévia ou resultado ainda na tela, nada muda e a
+página Revisão mostra o que o prende.
 
 | Área | Operações e limites |
 | --- | --- |
-| Propostas | Filtrar pendentes/aprovadas/rejeitadas/conflitos/falhas, até 200; detalhes por ID; evidências, corpo e comparação antes de aprovar/rejeitar. O servidor verifica conflito da página ao aprovar. |
-| Handoffs | Histórico até 200, sem consumir; cancelamento de ID visível na lista de abertos; expiração por idade. Zero dias abrange todos os abertos próprios/compartilhados no projeto. |
+| Propostas | A lista carrega sozinha ao escolher o projeto ou o estado (pendentes/aprovadas/rejeitadas/em conflito/com falha) e ao abrir a aba, até 200. Ao selecionar uma proposta (clique na linha, ou ID digitado e confirmado com Enter, Tab ou clique fora, inclusive um ID fora da lista), o detalhe é buscado sozinho (GET, só leitura) e mostra “Proposta <estado> · criada por <agente> há N”, o título, a justificativa e as evidências. O campo de ID e **Ver detalhes** ficam no pé da coluna da lista; **Ver detalhes** mostra a resposta inteira no cartão **Resultado**. Na tela estreita, o campo de ID fica no pé da lista e Enter abre o detalhe. **Atualizar** relê a lista e o detalhe selecionado; depois de aprovar ou rejeitar com sucesso, os dois são relidos sozinhos (com falha, nada é relido). **Rejeitar…** e **Aprovar…** ficam na linha do título do detalhe, e o motivo da rejeição, no pé do detalhe. A folha traz o alvo, o efeito, se é reversível (só em Aprovar) e a comparação entre a página atual e a proposta; com uma resposta fora do formato esperado, mostra os valores recebidos. O servidor verifica conflito da página ao aprovar. |
+| Handoffs | A lista mostra os abertos da última coleta do monitor, sem consulta nova; **Carregar histórico** consulta até 200, sem consumir. **Cancelar handoff…** vale para um ID visível na lista de abertos; **Expirar antigos…** usa a idade mínima escolhida. Zero dias abrange todos os abertos próprios/compartilhados no projeto. |
 | Auditoria | Prévia com `dry_run=true` e `no_llm=true`; aplicação grava o relatório, sem LLM. |
 | Curadoria | Prévia somente leitura; aplicação cria proposta de relatório para revisão, sem autoaprovação. |
 | Retenção | Prévia da política do servidor; aplicação pode remover/compactar páginas e eventos. Faça backup antes. |
 | Embeddings | Prévia conta páginas sem chamar provider; aplicação no projeto selecionado, com opção de regenerar existentes. Pode gerar cobrança. |
-| Reconsolidação | ID explícito de sessão, prévia de admissão, execução com LLM. A API não recebe workspace/projeto: o servidor decide o destino a partir da sessão. A seleção do painel é apenas contexto. Confirme `SESSAO <id>` após conferir esse limite. |
+| Reconsolidação | ID explícito de sessão, prévia de admissão, execução com LLM. A API não recebe workspace/projeto: o servidor decide o destino a partir da sessão. A seleção do painel é apenas contexto. A folha confirma com um clique (**Reconsolidar**) e repete esse limite no subtítulo e no aviso: confira-o antes de confirmar. |
 | Feedback | Útil/não ajudou/desatualizada/incorreta, caminho exato e motivo de até 500 caracteres. Aplica à versão atual; não há trava de versão oferecida por essa API. |
-| Checkpoints | Lista os últimos 100 da wiki inteira; criar checkpoint global com descrição. A prévia da criação é um plano local, sem execução no servidor. |
+| Checkpoints | Lista os últimos 100 da wiki inteira; criar checkpoint global com descrição; a folha mostra “Toda a wiki” como alvo. A prévia da criação é um plano local, sem execução no servidor. |
 | Restauração | Por ID de versão, compara a página atual com a versão escolhida; exige página atual legível. Por checkpoint Git, exige OID completo listado nos últimos 100; a API não fornece prévia do corpo dessa revisão. |
 
 Prévia não é transação ou reserva do estado. Outros agentes podem alterar dados
@@ -123,10 +136,59 @@ essa configuração nem usa `memory_auto_improve` como se tivesse dry-run: essa
 ferramenta rejeita os antigos campos de prévia. A revisão de propostas existentes
 é oferecida independentemente de como elas foram criadas.
 
+### Confirmação em níveis
+
+A folha de confirmação vale para toda escrita em **Revisão**, **Manutenção e
+backup** e **Administração**. O nível depende da operação:
+
+| Nível | Operações | O que a folha pede |
+| --- | --- | --- |
+| Leitura | Listas, detalhes, inventários, consultas, logs e roteiro de recuperação offline | Nada: não há prévia nem folha. |
+| Clique | A maior parte das escritas, inclusive backup e checkpoint globais e reconsolidação | O botão final, com o verbo da ação (**Aprovar**, **Restaurar**, **Iniciar**…). |
+| Digitação | Só as destrutivas, sem desfazer | O botão final, em vermelho, só habilita com o nome do alvo digitado. |
+
+O que digitar:
+
+| Onde | Operações | Digite |
+| --- | --- | --- |
+| Revisão · Handoffs | **Cancelar handoff…**, **Expirar antigos…** | o projeto, como `workspace / projeto` |
+| Manutenção | **Aplicar retenção** | o projeto, como `workspace / projeto` |
+| Administração · Projetos | Mover, mesclar, excluir | o nome do projeto |
+| Administração · Workspaces | Mesclar, excluir | o nome do workspace |
+| Administração · Sessões | Mover uma sessão | o ID da sessão |
+| Administração · Perfil | Reconstruir | `GLOBAL` |
+| Administração · Usuários | Desabilitar login, redefinir senha | o nome do usuário |
+| Administração · Permissões | Revogar | o nome do usuário |
+| Administração · Permissões | Alterar acesso ao projeto | o nome do projeto |
+| Administração · Chaves | Rotacionar, revogar | o ID da credencial |
+| Administração · Mensagens | Cancelar por ID | o ID da mensagem |
+| Serviço local | Parar, atualizar | o nome do contêiner (Docker) ou `ai-memory` (LaunchAgent, systemd) |
+
+O texto digitado é comparado por igualdade exata: maiúsculas, espaços (inclusive
+no fim) e a barra de `workspace / projeto` contam, e não há prefixo. A folha
+mostra **Digite … para confirmar** com o texto pedido.
+
+A folha desce do topo da área de conteúdo, sobre um véu; a lateral e a barra
+superior seguem clicáveis. Mostra a pergunta como título, o projeto (ou
+**Servidor · administração**, ou **Serviço deste Mac**), os fatos **Operação** e
+**Alvo** (mais **Efeito** e **Reversível** em Aprovar; só **Efeito** em Rejeitar;
+**Motivo** em Rejeitar e Feedback), a prévia (**Prévia da alteração** em Revisão e Manutenção
+e backup; **Prévia de impacto** na Administração, sempre com credenciais
+ocultas), a faixa **Atenção.** com o aviso da operação e, com digitação, o
+campo. No rodapé, **Prévia válida por m:ss**, **Cancelar** e o botão com o verbo
+da ação.
+
+A prévia vale 5 minutos, com contagem regressiva. Ao chegar a zero, a folha
+fecha e a operação precisa ser preparada de novo; em Revisão e Manutenção e
+backup, o aviso fica na página até **Limpar**. **Cancelar** (ou Esc) descarta a
+prévia e o texto digitado, sem enviar nada.
+
 ### Backup e exportação privada
 
-Informe um **arquivo novo com caminho absoluto** e prepare o download. Confirme
-`GLOBAL` para backup de toda a instalação, ou o projeto para exportar OKF.
+No segmentado, escolha **Backup global** ou **Exportar projeto (OKF)**, informe
+um **arquivo novo com caminho absoluto** e use **Revisar download privado**. A folha mostra
+o alvo (“Toda a instalação” no backup global; o projeto no OKF) e confirma com
+um clique (**Salvar backup** ou **Exportar**).
 O backup inclui SQLite consistente, wiki com histórico e `config.toml` da área
 de dados; esse arquivo pode conter segredos. Não inclui todos os recursos externos
 (modelos, raw, logs e credenciais externas). OKF contém conhecimento do projeto,
@@ -160,12 +222,18 @@ fonte completa antes de aprovar conteúdo que exceda esses limites.
 
 ## Administração (v0.5)
 
-O catálogo fica na página **Administração**. Escolha a operação; os campos
-indicam exatamente os parâmetros aceitos. O seletor de projeto preenche nomes
+O catálogo fica na página **Administração**. Na linha de ferramentas, o
+segmentado alterna entre **Servidor · administração** e **Serviço deste Mac** (no
+Linux, **Serviço deste computador**). No servidor, escolha o **Grupo** (Projetos,
+Workspaces, Sessões, Perfil, Usuários, Permissões, Chaves, Mensagens ou
+Workstreams) e depois a **Operação**; os campos indicam exatamente os parâmetros
+aceitos, e os opcionais trazem a dica “Opcional”. Nas operações com workspace, o
+seletor **Preencher a partir de um projeto conhecido…** preenche nomes
 conhecidos, e campos editáveis permitem administrar instalações ainda sem projetos.
-Consultas usam **Consultar**. Escritas exigem **Preparar prévia**, revisão dos
-parâmetros e confirmação digitada do alvo. A conexão e outros grupos de escrita
-ficam bloqueados enquanto a operação está em andamento.
+Consultas usam **Consultar**. Escritas usam **Prévia…**, que abre a folha de
+confirmação com a prévia de impacto; o nível (clique ou digitação do alvo) está em
+[Confirmação em níveis](#confirmação-em-níveis). A conexão e outros grupos de
+escrita ficam bloqueados enquanto a operação está em andamento.
 
 | Área | Operações | Prévia e limites |
 | --- | --- | --- |
@@ -186,7 +254,8 @@ para produzir essas prévias. A API reavalia autorização e estado ao executar.
 
 ### Autenticação e credenciais
 
-Em **Ajustes**, salve o endereço e use Bearer ou login humano. Cookies humanos e
+Em **Ajustes → Conexão**, salve o endereço e informe o Bearer (**Token**); em
+**Ajustes → Conta**, entre com sessão humana. Cookies humanos e
 CSRF ficam em memória; falha/expiração não faz fallback silencioso para Bearer.
 Para MCP/workstreams, saia explicitamente da sessão humana. Senha temporária
 pode exigir troca antes de usar outras APIs. O Keychain é opcional e guarda
@@ -201,18 +270,23 @@ ao trocar operação/conexão ou ao clicar **Limpar resultado privado**. Isso n�
 ### Menu e acompanhamento
 
 O menu tem os atalhos **Saúde**, **Revisão** e **Administração**; mostra handoffs abertos.
-Selecione um projeto em **Ajustes → Propostas na barra de menus** para acompanhar
-pendentes a cada ciclo de saúde, com a janela fechada. `P200+` significa que a
-listagem atingiu o limite; `—` significa indisponível/atrasado, nunca zero presumido.
+Selecione um projeto em **Ajustes → Barra de menus** (no Linux, **Ajustes →
+Bandeja**), no seletor de projeto (legenda "Propostas na barra de menus", ou
+"Propostas no menu da bandeja" no Linux), para acompanhar pendentes a cada ciclo de
+saúde, com a janela fechada. `P200+` significa que a listagem atingiu o limite;
+`—` significa indisponível/atrasado, nunca zero presumido.
 A contagem é do projeto e da identidade conectada, não um total global. Na
 lateral do painel, o mesmo número aparece em âmbar ao lado de **Revisão** quando
 há pendentes; sem leitura válida ou com zero, não aparece.
 
 ### Operação local
 
-**Serviço deste Mac** oferece status, logs, iniciar, parar, reiniciar e atualizar.
-Só funciona com conexão loopback. Configuração local é informada explicitamente
-na tela e fica na memória; o app não infere qual serviço deve ser interrompido.
+**Serviço deste Mac** (no Linux, **Serviço deste computador**) oferece status,
+logs, iniciar, parar, reiniciar e atualizar. Status, logs e recuperação offline
+são leituras; iniciar e reiniciar confirmam com um clique; parar e atualizar
+pedem que se digite o nome do serviço. Só funciona com conexão loopback.
+Configuração local é informada explicitamente na tela e fica na memória; o app
+não infere qual serviço deve ser interrompido.
 
 Docker exige contexto com socket Unix. A prévia fixa ID do contêiner, imagem e
 labels; execução revalida o alvo. Atualização exige backup privado, Compose com

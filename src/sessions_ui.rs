@@ -206,8 +206,14 @@ impl Sessions {
         self.selected.as_ref()
     }
 
-    /// A página. Devolve `true` quando "Gerenciar em Revisão →" foi clicado.
-    pub(crate) fn show(&mut self, ui: &mut Ui, api: &ApiSnapshot, now: DateTime<Utc>) -> bool {
+    /// A página. Devolve (projeto, ID) do handoff quando "Gerenciar em
+    /// Revisão →" foi clicado.
+    pub(crate) fn show(
+        &mut self,
+        ui: &mut Ui,
+        api: &ApiSnapshot,
+        now: DateTime<Utc>,
+    ) -> Option<(String, String)> {
         let collected = api.at.is_some();
         let total = api.handoff_total.map(number).unwrap_or_else(|| {
             if collected {
@@ -281,7 +287,7 @@ impl Sessions {
                     SESSIONS_NOTE.into(),
                 ];
                 widgets::split(ui, &legend, |ui| sessions_table(ui, api, &rows, refilter));
-                false
+                None
             }
             Tab::Projects => {
                 let rows: Vec<&Project> = api
@@ -296,7 +302,7 @@ impl Sessions {
                 widgets::split(ui, &[PROJECTS_NOTE.into()], |ui| {
                     projects_table(ui, api, &rows, refilter)
                 });
-                false
+                None
             }
         }
     }
@@ -427,7 +433,7 @@ impl Sessions {
         total: &str,
         now: DateTime<Utc>,
         refilter: bool,
-    ) -> bool {
+    ) -> Option<(String, String)> {
         let p = theme::palette(ui.visuals());
         let count = shown.len();
         let groups = group(shown);
@@ -465,11 +471,13 @@ impl Sessions {
                     "Aguardando a consulta ao ai-memory."
                 },
             );
-            return false;
+            return None;
         }
         let wide = rect.width() >= SIDE_BY_SIDE;
         if !wide && self.open {
-            return current.is_some_and(|h| self.detail(ui, rect, h, now, true));
+            return current
+                .filter(|h| self.detail(ui, rect, h, now, true))
+                .map(key);
         }
         let list = if wide {
             let width = (rect.width() * 0.35).clamp(LIST_MIN, LIST_MAX);
@@ -489,7 +497,7 @@ impl Sessions {
             self.open = true;
         }
         if !wide {
-            return false;
+            return None;
         }
         ui.painter().vline(
             list.right() + 0.5,
@@ -497,7 +505,9 @@ impl Sessions {
             Stroke::new(1.0_f32, p.line),
         );
         let detail = Rect::from_min_max(pos2(list.right() + 1., rect.top()), rect.max);
-        current.is_some_and(|h| self.detail(ui, detail, h, now, false))
+        current
+            .filter(|h| self.detail(ui, detail, h, now, false))
+            .map(key)
     }
 
     /// A lista virtualizada: só os grupos e as linhas visíveis são montados.
@@ -999,6 +1009,14 @@ impl Age {
         }
     }
 }
+/// A data do detalhe com a idade: "03/11 18:25 (há 2 h)"; só a data além
+/// de ontem, e "—" se ilegível.
+pub(crate) fn dated(at: &str, now: DateTime<Utc>) -> String {
+    match age(at, now).and_then(|a| a.long()) {
+        Some(ago) => format!("{} ({ago})", date(at)),
+        None => date(at),
+    }
+}
 /// Abaixo de 1 min = agora (o futuro, por relógio adiantado, também); até
 /// 24 h, em min ou h; depois, "ontem" se foi no dia anterior (fuso local) e
 /// senão a data ("dd/mm", com o ano se for outro). `None` = data ilegível.
@@ -1090,10 +1108,7 @@ fn meta(ui: &mut Ui, h: &Handoff, now: DateTime<Utc>) {
     let small = |ui: &mut Ui, text: &str| {
         ui.label(RichText::new(text).size(12.).color(p.text2));
     };
-    let when = match age(&h.at, now).and_then(|a| a.long()) {
-        Some(ago) => format!("{} ({ago})", date(&h.at)),
-        None => date(&h.at),
-    };
+    let when = dated(&h.at, now);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(10., 4.);
         pill(ui, "Aberto", p.surf2, Some(p.line), p.text);
@@ -1393,7 +1408,8 @@ mod tests {
         sessions: Sessions,
         api: ApiSnapshot,
         now: DateTime<Utc>,
-        review: usize,
+        /// O que cada "Gerenciar em Revisão →" pediu: (projeto, ID).
+        review: Vec<(String, String)>,
     }
     impl Page {
         fn new(theme: egui::Theme, size: [f32; 2], api: ApiSnapshot, now: DateTime<Utc>) -> Self {
@@ -1403,7 +1419,7 @@ mod tests {
                 sessions: Sessions::default(),
                 api,
                 now,
-                review: 0,
+                review: Vec::new(),
             }
         }
         fn frame(&mut self, events: Vec<Event>) -> egui::FullOutput {
@@ -1416,8 +1432,8 @@ mod tests {
                 review,
             } = self;
             run_sized(ctx, *size, events, |ui| {
-                if sessions.show(ui, api, *now) {
-                    *review += 1;
+                if let Some(asked) = sessions.show(ui, api, *now) {
+                    review.push(asked);
                 }
             })
         }
@@ -2367,15 +2383,24 @@ mod tests {
         let now = Utc::now();
         let mut page = Page::new(egui::Theme::Light, WIDE, collected(abc(now)), now);
         let out = page.show();
-        assert_eq!(page.review, 0);
+        assert!(page.review.is_empty());
         let link = rect_of(&node(&out, Role::Link, "Gerenciar em Revisão →"));
         page.click(link.center());
         for _ in 0..3 {
             page.show();
         }
-        assert_eq!(page.review, 1);
+        let a = ("ws / p1".to_owned(), "id-a".to_owned());
+        assert_eq!(page.review, vec![a.clone()], "the handoff in the detail");
         page.click(link.center());
-        assert_eq!(page.review, 2);
+        assert_eq!(page.review, [a.clone(), a.clone()]);
+        // Outro handoff no detalhe: o pedido é o dele.
+        page.click_on(Role::Button, "C · codex · 10 min");
+        page.click(link.center());
+        assert_eq!(
+            page.review.last(),
+            Some(&("ws / p1".to_owned(), "id-c".to_owned()))
+        );
+        assert_eq!(page.review.len(), 3);
     }
 
     #[test]
