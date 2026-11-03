@@ -19,9 +19,9 @@ marcadas como atrasadas. Os limites são fixos nesta versão.
 A tela mostra contagens, fila, providers, tokens reportados/estimados por
 atividade, armazenamento e índices. São observações passivas do servidor:
 abrir a tela não dispara testes pagos dos providers. Os contadores podem
-reiniciar quando o processo ai-memory reinicia. `Pausar tela` congela as
-medições do painel; a barra continua atualizando. Consultas manuais da Central
-continuam disponíveis.
+reiniciar quando o processo ai-memory reinicia. O botão de pausa do painel
+(`Pausar atualização da tela`) congela as medições; a barra continua
+atualizando. Consultas manuais da Central continuam disponíveis.
 
 As rotas administrativas podem exigir root/Admin. Uma chave pessoal `aim_`
 continua com nível User, mesmo se pertencer a um administrador. Sem permissão,
@@ -174,7 +174,7 @@ para produzir essas prévias. A API reavalia autorização e estado ao executar.
 
 ### Autenticação e credenciais
 
-Em **Conexão**, salve o endereço e use Bearer ou login humano. Cookies humanos e
+Em **Ajustes**, salve o endereço e use Bearer ou login humano. Cookies humanos e
 CSRF ficam em memória; falha/expiração não faz fallback silencioso para Bearer.
 Para MCP/workstreams, saia explicitamente da sessão humana. Senha temporária
 pode exigir troca antes de usar outras APIs. O Keychain é opcional e guarda
@@ -189,7 +189,7 @@ ao trocar operação/conexão ou ao clicar **Limpar resultado privado**. Isso n�
 ### Menu e acompanhamento
 
 O menu tem atalhos para saúde, revisão e administração; mostra handoffs abertos.
-Selecione um projeto em **Conexão → Propostas na barra de menus** para acompanhar
+Selecione um projeto em **Ajustes → Propostas na barra de menus** para acompanhar
 pendentes a cada ciclo de saúde, com a janela fechada. `P200+` significa que a
 listagem atingiu o limite; `—` significa indisponível/atrasado, nunca zero presumido.
 A contagem é do projeto e da identidade conectada, não um total global.

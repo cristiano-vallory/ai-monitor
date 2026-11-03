@@ -9,7 +9,7 @@ Para encerrar, use Sair do AI Monitor no menu.
 
 Não é necessário instalar Rust, Xcode ou ferramentas de desenvolvimento.
 Docker Desktop e o servidor ai-memory devem estar disponíveis para coletar
-seus respectivos dados. Ajuste o servidor e o contêiner em Conexão.
+seus respectivos dados. Ajuste o servidor e o contêiner em Ajustes.
 
 Esta versão tem assinatura ad hoc e não foi notarizada pela Apple.
 Se o macOS informar que não pode verificar o desenvolvedor, após tentar abrir

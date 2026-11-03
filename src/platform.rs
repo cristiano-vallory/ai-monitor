@@ -5,10 +5,11 @@ pub const HOST: &str = "Mac";
 #[cfg(not(target_os = "macos"))]
 pub const HOST: &str = "computador";
 
+/// Atalho de Ajustes (`Modifiers::COMMAND` + vírgula).
 #[cfg(target_os = "macos")]
-pub const OS: &str = "macOS";
+pub const SETTINGS_SHORTCUT: &str = "⌘,";
 #[cfg(not(target_os = "macos"))]
-pub const OS: &str = "Linux";
+pub const SETTINGS_SHORTCUT: &str = "Ctrl+,";
 
 #[cfg(target_os = "macos")]
 pub const SECRET_STORE: &str = "Keychain";
