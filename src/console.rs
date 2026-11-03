@@ -5,11 +5,26 @@ use crate::{
     monitor::Shared,
     queries::{Query, Worker},
     theme,
+    widgets::{self, Button, Fact, Segment, Tone, Type},
 };
 use chrono::{Local, Utc};
 use eframe::egui::{self, RichText};
 use serde_json::Value;
 use std::sync::{Arc, atomic::Ordering};
+
+/// Os tipos do filtro de eventos ("" = todos).
+const KINDS: [&str; 10] = [
+    "",
+    "session-start",
+    "user-prompt",
+    "pre-tool-use",
+    "post-tool-use",
+    "stop",
+    "pre-compact",
+    "post-compaction",
+    "session-end",
+    "other",
+];
 
 #[derive(Default, Clone, Copy, PartialEq)]
 enum Tab {
@@ -108,73 +123,105 @@ impl Console {
     }
     pub fn show(&mut self, ui: &mut egui::Ui, shared: &Arc<Shared>, projects: &[Project]) {
         self.poll(shared);
-        let previous = self.tab;
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Sessions, "Sessões detalhadas");
-            ui.selectable_value(&mut self.tab, Tab::Knowledge, "Conhecimento");
-        });
-        if previous != self.tab {
+        let (tab, old) = (self.tab, self.scope.clone());
+        self.toolbar(ui, projects);
+        if tab != self.tab {
             self.clear_result();
         }
-        ui.separator();
-        let old = self.scope.clone();
-        egui::ComboBox::from_id_salt("central-scope")
-            .width(440.)
-            .selected_text(
-                self.scope
-                    .as_ref()
-                    .map(Scope::label)
-                    .unwrap_or("Selecione um projeto".into()),
-            )
-            .show_ui(ui, |ui| {
-                for p in projects {
-                    let s = Scope {
-                        workspace: p.workspace_name.clone(),
-                        project: p.project_name.clone(),
-                    };
-                    let label = s.label();
-                    ui.selectable_value(&mut self.scope, Some(s), label);
-                }
-            });
         if old != self.scope {
             self.clear_result();
             self.observation_search.clear();
             self.kind.clear();
         }
         let Some(scope) = self.scope.clone() else {
-            ui.label("Escolha o projeto cujos dados você deseja consultar.");
+            widgets::empty(
+                ui,
+                "Nenhum projeto selecionado",
+                "Escolha o projeto cujos dados você deseja consultar.",
+            );
             return;
         };
-        if self.busy {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Consultando…");
-            });
-        }
-        if let Some(e) = &self.error {
-            ui.colored_label(theme::palette(ui.visuals()).warn, e);
-        }
-        if let Some(at) = self.at {
-            ui.small(format!(
-                "Consulta: {} · conteúdo restrito às permissões da conexão",
-                at.with_timezone(&Local).format("%H:%M:%S")
-            ));
-        }
         ui.add_enabled_ui(!self.busy, |ui| match self.tab {
             Tab::Sessions => self.session_controls(ui, shared, &scope),
             Tab::Knowledge => self.knowledge_controls(ui, shared, &scope),
         });
-        ui.separator();
-        if let Some((query, data)) = self.result.clone() {
+        if let Some(e) = &self.error {
+            widgets::strip(ui, Tone::Bad, "Falha na consulta.", e, None);
+        }
+        if self.busy {
+            widgets::empty(
+                ui,
+                "Consultando…",
+                "Os dados aparecem aqui quando o servidor responder.",
+            );
+            ui.vertical_centered(|ui| ui.spinner());
+        } else if let Some((query, data)) = self.result.clone() {
+            if let Some(at) = self.at {
+                widgets::caption(
+                    ui,
+                    &format!(
+                        "Consulta: {} · conteúdo restrito às permissões da conexão",
+                        at.with_timezone(&Local).format("%H:%M:%S")
+                    ),
+                );
+            }
             self.render(ui, shared, &query, &data);
-        } else if !self.busy && self.error.is_none() {
-            ui.label("Use os controles acima para carregar os dados.");
+        } else if self.error.is_none() {
+            widgets::empty(
+                ui,
+                "Nada carregado",
+                "Use os controles acima para carregar os dados.",
+            );
         }
     }
+    /// O seletor de projeto e as abas.
+    fn toolbar(&mut self, ui: &mut egui::Ui, projects: &[Project]) {
+        let (scope, tab) = (&mut self.scope, &mut self.tab);
+        let text = scope
+            .as_ref()
+            .map_or_else(|| "Selecione um projeto".to_owned(), Scope::label);
+        widgets::toolbar(
+            ui,
+            |ui| {
+                widgets::select(ui, "Projeto", &text, 200., |ui| {
+                    for p in projects {
+                        let s = Scope {
+                            workspace: p.workspace_name.clone(),
+                            project: p.project_name.clone(),
+                        };
+                        let label = s.label();
+                        if widgets::option(ui, scope.as_ref() == Some(&s), &label).clicked() {
+                            *scope = Some(s);
+                        }
+                    }
+                });
+                let tabs = ui.scope(|ui| {
+                    widgets::segmented(
+                        ui,
+                        tab,
+                        &[
+                            Segment {
+                                value: Tab::Sessions,
+                                label: "Sessões detalhadas",
+                                count: None,
+                            },
+                            Segment {
+                                value: Tab::Knowledge,
+                                label: "Conhecimento",
+                                count: None,
+                            },
+                        ],
+                    )
+                });
+                widgets::edge(ui, &tabs.response, 7.);
+            },
+            |_| {},
+        );
+    }
     fn session_controls(&mut self, ui: &mut egui::Ui, shared: &Shared, scope: &Scope) {
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.include_open, "Incluir abertas");
-            if ui.button("Carregar sessões").clicked() {
+        widgets::row(ui, |ui| {
+            widgets::checkbox(ui, &mut self.include_open, "Incluir abertas");
+            if widgets::edged(ui, true, Button::secondary("Carregar sessões"), 6.).clicked() {
                 self.observation_search.clear();
                 self.kind.clear();
                 self.begin(
@@ -191,7 +238,7 @@ impl Console {
                 ("accepted", "Aceitos"),
                 ("expired", "Expirados"),
             ] {
-                if ui.button(label).clicked() {
+                if widgets::edged(ui, true, Button::secondary(label), 6.).clicked() {
                     self.begin(
                         shared,
                         Query::Handoffs {
@@ -202,31 +249,36 @@ impl Console {
                 }
             }
         });
-        ui.small("Sessão aberta não comprova um processo ativo. Consultar esta tela não aceita handoffs.");
+        widgets::caption(
+            ui,
+            "Sessão aberta não comprova um processo ativo. Consultar esta tela não aceita handoffs.",
+        );
     }
     fn knowledge_controls(&mut self, ui: &mut egui::Ui, shared: &Shared, scope: &Scope) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Páginas").clicked() {
-                self.begin(shared, Query::Pages(scope.clone()));
-            }
-            if ui.button("Resumo do projeto").clicked() {
-                self.begin(shared, Query::Briefing(scope.clone()));
-            }
-            if ui.button("Relações do projeto").clicked() {
-                self.begin(shared, Query::Graph(scope.clone()));
-            }
-            if ui.button("Relações entre projetos").clicked() {
-                self.begin(shared, Query::CrossGraph);
+        widgets::row(ui, |ui| {
+            for (label, query) in [
+                ("Páginas", Query::Pages(scope.clone())),
+                ("Resumo do projeto", Query::Briefing(scope.clone())),
+                ("Relações do projeto", Query::Graph(scope.clone())),
+                ("Relações entre projetos", Query::CrossGraph),
+            ] {
+                if widgets::edged(ui, true, Button::secondary(label), 6.).clicked() {
+                    self.begin(shared, query);
+                }
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Pesquisar conhecimento…")
-                    .char_limit(1024),
+        widgets::row(ui, |ui| {
+            let field = widgets::text_field(
+                ui,
+                &mut self.search,
+                280.,
+                "Pesquisar conhecimento…",
+                false,
+                1024,
             );
-            ui.checkbox(&mut self.global, "Todos os projetos autorizados");
-            if ui.button("Buscar").clicked() {
+            widgets::edge(ui, &field, 5.);
+            widgets::checkbox(ui, &mut self.global, "Todos os projetos autorizados");
+            if widgets::edged(ui, true, Button::secondary("Buscar"), 6.).clicked() {
                 self.begin(
                     shared,
                     Query::Search {
@@ -236,7 +288,10 @@ impl Console {
                 );
             }
         });
-        ui.small("Pesquisa com escopo pode usar embeddings/reranking do servidor. As páginas são exibidas como texto histórico.");
+        widgets::caption(
+            ui,
+            "Pesquisa com escopo pode usar embeddings/reranking do servidor. As páginas são exibidas como texto histórico.",
+        );
     }
     fn render(&mut self, ui: &mut egui::Ui, shared: &Shared, query: &Query, data: &Value) {
         let p = theme::palette(ui.visuals());
@@ -247,43 +302,60 @@ impl Console {
                 include_open,
             } => {
                 let rows = array(&data["sessions"]);
-                self.pager(ui, shared, *offset, rows.len(), None, |n| Query::Sessions {
-                    scope: scope.clone(),
-                    offset: n,
-                    include_open: *include_open,
+                self.pager(ui, shared, *offset, rows.len(), None, false, |n| {
+                    Query::Sessions {
+                        scope: scope.clone(),
+                        offset: n,
+                        include_open: *include_open,
+                    }
                 });
                 if rows.is_empty() {
-                    ui.label("Nenhuma sessão nesta página.");
+                    widgets::empty(
+                        ui,
+                        "Nenhuma sessão nesta página",
+                        "Volte à página anterior ou inclua as sessões abertas.",
+                    );
                 }
                 for row in rows {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.strong(text(row, "agent_kind"));
-                            ui.label(if row["ended_at"].is_null() {
-                                "Aberta"
-                            } else {
-                                "Encerrada"
-                            });
-                            ui.small(text(row, "started_at"));
-                            if ui
-                                .add_enabled(!self.busy, egui::Button::new("Ver eventos"))
-                                .clicked()
-                            {
-                                self.observation_search.clear();
-                                self.kind.clear();
-                                self.begin(
-                                    shared,
-                                    Query::Observations {
-                                        scope: scope.clone(),
-                                        session: text(row, "session_id").into(),
-                                        offset: 0,
-                                        text: String::new(),
-                                        kind: String::new(),
-                                    },
-                                );
-                            }
+                    card(ui, "", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(24.);
+                            ui.label(
+                                RichText::new(text(row, "agent_kind")).font(Type::Section.font()),
+                            );
+                            let open = row["ended_at"].is_null();
+                            ui.label(
+                                RichText::new(if open { "Aberta" } else { "Encerrada" })
+                                    .size(12.)
+                                    .color(if open { p.acc } else { p.text2 }),
+                            );
+                            widgets::caption(ui, text(row, "started_at"));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let events = Button::secondary("Ver eventos").small().on_surf();
+                                    if widgets::edged(ui, !self.busy, events, 6.).clicked() {
+                                        self.observation_search.clear();
+                                        self.kind.clear();
+                                        self.begin(
+                                            shared,
+                                            Query::Observations {
+                                                scope: scope.clone(),
+                                                session: text(row, "session_id").into(),
+                                                offset: 0,
+                                                text: String::new(),
+                                                kind: String::new(),
+                                            },
+                                        );
+                                    }
+                                },
+                            );
                         });
-                        ui.small(text(row, "session_id"));
+                        ui.label(
+                            RichText::new(text(row, "session_id"))
+                                .font(Type::Mono.font())
+                                .color(p.text2),
+                        );
                         ui.label(format!(
                             "{} eventos · consolidação: {} · tentativas: {}",
                             number(&row["observation_count"]),
@@ -298,147 +370,184 @@ impl Console {
                 scope,
                 session,
                 offset,
-                ..
+                text: filter,
+                kind: filter_kind,
             } => {
-                ui.strong(format!("Eventos da sessão {session}"));
-                show_usage(ui, &data["session"]["usage"]);
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.observation_search)
-                                .hint_text("Pesquisar eventos…")
-                                .char_limit(1024),
-                        );
-                        egui::ComboBox::from_id_salt("event-kind")
-                            .selected_text(if self.kind.is_empty() {
-                                "Todos os tipos"
+                let rows = array(&data["observations"]);
+                card(ui, &format!("Eventos da sessão {session}"), |ui| {
+                    show_usage(ui, &data["session"]["usage"]);
+                    ui.add_enabled_ui(!self.busy, |ui| {
+                        widgets::row(ui, |ui| {
+                            let field = widgets::text_field(
+                                ui,
+                                &mut self.observation_search,
+                                240.,
+                                "Pesquisar eventos…",
+                                false,
+                                1024,
+                            );
+                            widgets::edge(ui, &field, 5.);
+                            let shown = if self.kind.is_empty() {
+                                "Todos os tipos".to_owned()
                             } else {
-                                &self.kind
-                            })
-                            .show_ui(ui, |ui| {
-                                for k in [
-                                    "",
-                                    "session-start",
-                                    "user-prompt",
-                                    "pre-tool-use",
-                                    "post-tool-use",
-                                    "stop",
-                                    "pre-compact",
-                                    "post-compaction",
-                                    "session-end",
-                                    "other",
-                                ] {
-                                    ui.selectable_value(
-                                        &mut self.kind,
-                                        k.into(),
-                                        if k.is_empty() { "Todos os tipos" } else { k },
-                                    );
+                                self.kind.clone()
+                            };
+                            let kind = &mut self.kind;
+                            widgets::select(ui, "Tipo de evento", &shown, 160., |ui| {
+                                for k in KINDS {
+                                    let label = if k.is_empty() { "Todos os tipos" } else { k };
+                                    if widgets::option(ui, kind.as_str() == k, label).clicked() {
+                                        *kind = k.into();
+                                    }
                                 }
                             });
-                        if ui.button("Aplicar filtro").clicked() {
-                            self.begin(
-                                shared,
-                                Query::Observations {
-                                    scope: scope.clone(),
-                                    session: session.clone(),
-                                    offset: 0,
-                                    text: self.observation_search.clone(),
-                                    kind: self.kind.clone(),
-                                },
-                            );
-                        }
+                            let apply = Button::secondary("Aplicar filtro").on_surf();
+                            if widgets::edged(ui, true, apply, 6.).clicked() {
+                                self.begin(
+                                    shared,
+                                    Query::Observations {
+                                        scope: scope.clone(),
+                                        session: session.clone(),
+                                        offset: 0,
+                                        text: self.observation_search.clone(),
+                                        kind: self.kind.clone(),
+                                    },
+                                );
+                            }
+                        });
                     });
-                });
-                if let Query::Observations { text, kind, .. } = query {
                     self.pager(
                         ui,
                         shared,
                         *offset,
-                        array(&data["observations"]).len(),
+                        rows.len(),
                         data["total"].as_u64(),
+                        true,
                         |n| Query::Observations {
                             scope: scope.clone(),
                             session: session.clone(),
                             offset: n,
-                            text: text.clone(),
-                            kind: kind.clone(),
+                            text: filter.clone(),
+                            kind: filter_kind.clone(),
                         },
                     );
-                }
-                let mut seen = std::collections::HashSet::new();
-                for (idx, row) in array(&data["observations"]).iter().enumerate() {
-                    egui::CollapsingHeader::new(format!(
-                        "{} · {} · {}",
-                        text(row, "created_at"),
-                        text(row, "kind"),
-                        text(row, "title")
-                    ))
-                    .id_salt(row_key(&mut seen, row["id"].as_str(), idx))
-                    .show(ui, |ui| {
-                        ui.add(egui::Label::new(text(row, "body")).wrap().selectable(true));
+                });
+                if rows.is_empty() {
+                    widgets::empty(
+                        ui,
+                        "Nenhum evento nesta página",
+                        "Ajuste o filtro ou volte à página anterior.",
+                    );
+                } else {
+                    widgets::card(ui).inner_margin(0).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 0.;
+                        let mut seen = std::collections::HashSet::new();
+                        for (idx, row) in rows.iter().enumerate() {
+                            if idx > 0 {
+                                let (line, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), 1.),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(line, 0., p.line);
+                            }
+                            widgets::disclosure_row(
+                                ui,
+                                row_key(&mut seen, row["id"].as_str(), idx),
+                                &format!("{} · {}", text(row, "kind"), text(row, "title")),
+                                text(row, "created_at"),
+                                |ui| {
+                                    ui.reset_style();
+                                    ui.add(
+                                        egui::Label::new(text(row, "body")).wrap().selectable(true),
+                                    );
+                                },
+                            );
+                        }
                     });
                 }
                 if data["elided_other_scope"].as_u64().is_some_and(|n| n > 0) {
-                    ui.small("Esta sessão também deixou eventos em outros projetos; apenas este escopo é exibido.");
+                    widgets::caption(
+                        ui,
+                        "Esta sessão também deixou eventos em outros projetos; apenas este escopo é exibido.",
+                    );
                 }
             }
-            Query::Pages(scope) => self.page_list(ui, shared, scope, array(data)),
+            Query::Pages(scope) => card(ui, "Páginas", |ui| {
+                self.page_list(ui, shared, scope, array(data))
+            }),
             Query::Search { scope, .. } => {
-                ui.small("Até 100 resultados. Refine a pesquisa para reduzir o conjunto.");
-                for row in array(data) {
-                    let s = scope.clone().unwrap_or_else(|| Scope {
-                        workspace: text(row, "workspace").into(),
-                        project: text(row, "project").into(),
-                    });
-                    self.page_list(ui, shared, &s, std::slice::from_ref(row));
-                    ui.label(
-                        text(row, "snippet")
-                            .replace("<mark>", "")
-                            .replace("</mark>", ""),
+                widgets::caption(
+                    ui,
+                    "Até 100 resultados. Refine a pesquisa para reduzir o conjunto.",
+                );
+                let rows = array(data);
+                if rows.is_empty() {
+                    widgets::empty(
+                        ui,
+                        "Nenhum resultado",
+                        "Refine a pesquisa ou inclua todos os projetos autorizados.",
                     );
+                } else {
+                    card(ui, "Resultados", |ui| {
+                        for row in rows {
+                            let s = scope.clone().unwrap_or_else(|| Scope {
+                                workspace: text(row, "workspace").into(),
+                                project: text(row, "project").into(),
+                            });
+                            self.page_list(ui, shared, &s, std::slice::from_ref(row));
+                            widgets::caption(
+                                ui,
+                                &text(row, "snippet")
+                                    .replace("<mark>", "")
+                                    .replace("</mark>", ""),
+                            );
+                        }
+                    });
                 }
             }
             Query::Page { scope, path } => {
-                ui.heading(text(data, "title"));
-                ui.small(format!(
-                    "{} · {} · versão {}",
-                    scope.label(),
-                    path,
-                    text(data, "id")
-                ));
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Histórico e comparação"))
-                    .clicked()
-                {
-                    self.from.clear();
-                    self.to.clear();
-                    self.begin(
-                        shared,
-                        Query::History {
-                            scope: scope.clone(),
-                            path: path.clone(),
-                            offset: 0,
-                            from: String::new(),
-                            to: String::new(),
-                        },
+                card(ui, "", |ui| {
+                    ui.label(RichText::new(text(data, "title")).font(Type::Detail.font()));
+                    widgets::caption(
+                        ui,
+                        &format!("{} · {} · versão {}", scope.label(), path, text(data, "id")),
                     );
-                }
-                if text(data, "body_markdown").len() > 100_000 {
-                    ui.colored_label(
-                        p.warn,
-                        "Prévia limitada a 100 KiB; o conteúdo no servidor permanece completo.",
+                    let history = Button::secondary("Histórico e comparação").on_surf();
+                    if widgets::edged(ui, !self.busy, history, 6.).clicked() {
+                        self.from.clear();
+                        self.to.clear();
+                        self.begin(
+                            shared,
+                            Query::History {
+                                scope: scope.clone(),
+                                path: path.clone(),
+                                offset: 0,
+                                from: String::new(),
+                                to: String::new(),
+                            },
+                        );
+                    }
+                    if text(data, "body_markdown").len() > 100_000 {
+                        widgets::strip(
+                            ui,
+                            Tone::Warn,
+                            "Prévia limitada a 100 KiB;",
+                            "o conteúdo no servidor permanece completo.",
+                            None,
+                        );
+                    }
+                    ui.add(
+                        egui::Label::new(bounded_text(text(data, "body_markdown"), 100_000))
+                            .wrap()
+                            .selectable(true),
                     );
-                }
-                ui.add(
-                    egui::Label::new(bounded_text(text(data, "body_markdown"), 100_000))
-                        .wrap()
-                        .selectable(true),
-                );
+                });
                 for (key, label) in [("links", "Referências"), ("backlinks", "Referenciada por")] {
-                    ui.separator();
-                    ui.strong(label);
-                    ui.push_id(key, |ui| {
-                        self.page_list(ui, shared, scope, array(&data[key]))
+                    card(ui, label, |ui| {
+                        ui.push_id(key, |ui| {
+                            self.page_list(ui, shared, scope, array(&data[key]))
+                        });
                     });
                 }
             }
@@ -449,148 +558,170 @@ impl Console {
                 from,
                 to,
             } => {
-                ui.heading(format!("Histórico: {path}"));
-                ui.horizontal_wrapped(|ui| {
-                    for (label, selected) in
-                        [("Comparar de", &mut self.from), ("Até", &mut self.to)]
-                    {
-                        egui::ComboBox::from_id_salt(label)
-                            .selected_text(if selected.is_empty() {
-                                label
+                let versions = array(&data["versions"]);
+                card(ui, &format!("Histórico: {path}"), |ui| {
+                    widgets::row(ui, |ui| {
+                        for (label, selected) in
+                            [("Comparar de", &mut self.from), ("Até", &mut self.to)]
+                        {
+                            let shown = if selected.is_empty() {
+                                label.to_owned()
                             } else {
-                                selected.as_str()
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(selected, String::new(), "Automático");
-                                for row in array(&data["versions"]) {
-                                    ui.selectable_value(
-                                        selected,
-                                        text(row, "id").into(),
-                                        format!(
-                                            "{} · {}",
-                                            text(row, "created_at"),
-                                            text(row, "id")
-                                        ),
-                                    );
+                                selected.clone()
+                            };
+                            widgets::select(ui, label, &shown, 160., |ui| {
+                                if widgets::option(ui, selected.is_empty(), "Automático").clicked()
+                                {
+                                    selected.clear();
+                                }
+                                for row in versions {
+                                    let id = text(row, "id");
+                                    let version = format!("{} · {id}", text(row, "created_at"));
+                                    if widgets::option(ui, selected.as_str() == id, &version)
+                                        .clicked()
+                                    {
+                                        *selected = id.into();
+                                    }
                                 }
                             });
+                        }
+                        let compare = Button::secondary("Comparar").on_surf();
+                        if widgets::edged(ui, !self.busy, compare, 6.).clicked() {
+                            self.begin(
+                                shared,
+                                Query::History {
+                                    scope: scope.clone(),
+                                    path: path.clone(),
+                                    offset: *offset,
+                                    from: self.from.clone(),
+                                    to: self.to.clone(),
+                                },
+                            );
+                        }
+                    });
+                    self.pager(
+                        ui,
+                        shared,
+                        *offset,
+                        versions.len(),
+                        data["total"].as_u64(),
+                        true,
+                        |n| Query::History {
+                            scope: scope.clone(),
+                            path: path.clone(),
+                            offset: n,
+                            from: from.clone(),
+                            to: to.clone(),
+                        },
+                    );
+                    for row in versions {
+                        ui.label(format!(
+                            "{} · {} · {} caracteres",
+                            text(row, "created_at"),
+                            text(row, "id"),
+                            number(&row["body_chars"])
+                        ));
                     }
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Comparar"))
-                        .clicked()
-                    {
-                        self.begin(
-                            shared,
-                            Query::History {
-                                scope: scope.clone(),
-                                path: path.clone(),
-                                offset: *offset,
-                                from: self.from.clone(),
-                                to: self.to.clone(),
-                            },
+                });
+                let diff = &data["diff"];
+                card(
+                    ui,
+                    &format!("Comparação: {}", text(diff, "status")),
+                    |ui| {
+                        if diff["truncated"].as_bool() == Some(true)
+                            || diff["status"] == "too_large"
+                        {
+                            widgets::strip(
+                                ui,
+                                Tone::Warn,
+                                "Comparação parcial ou grande demais.",
+                                "Consulte versões menores.",
+                                None,
+                            );
+                        }
+                        for hunk in array(&diff["hunks"]) {
+                            for line in array(&hunk["lines"]) {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "{} {}",
+                                            text(line, "op"),
+                                            text(line, "text")
+                                        ))
+                                        .monospace()
+                                        .color(
+                                            match text(line, "op") {
+                                                "+" => p.acc,
+                                                "-" => p.warn,
+                                                _ => ui.visuals().text_color(),
+                                            },
+                                        ),
+                                    )
+                                    .wrap()
+                                    .selectable(true),
+                                );
+                            }
+                        }
+                    },
+                );
+            }
+            Query::Briefing(scope) => {
+                card(ui, "Resumo do projeto", |ui| {
+                    widgets::facts(
+                        ui,
+                        &[
+                            Fact::new("Páginas atuais", number(&data["counts"]["pages_latest"])),
+                            Fact::new("Sessões", number(&data["counts"]["sessions"])),
+                            Fact::new("Eventos", number(&data["counts"]["observations"])),
+                            Fact::new("Handoffs pendentes", number(&data["pending_handoff_count"])),
+                            Fact::new("Último evento", text(data, "last_observation_at")),
+                        ],
+                    );
+                    for (key, title) in [
+                        ("activity_7d", "Últimos 7 dias"),
+                        ("activity_30d", "Últimos 30 dias"),
+                    ] {
+                        ui.label(RichText::new(title).font(Type::Section.font()));
+                        widgets::facts(
+                            ui,
+                            &[
+                                Fact::new("Sessões", number(&data[key]["sessions"])),
+                                Fact::new("Eventos", number(&data[key]["observations"])),
+                                Fact::new(
+                                    "Páginas atualizadas",
+                                    number(&data[key]["pages_updated"]),
+                                ),
+                            ],
                         );
                     }
                 });
-                self.pager(
-                    ui,
-                    shared,
-                    *offset,
-                    array(&data["versions"]).len(),
-                    data["total"].as_u64(),
-                    |n| Query::History {
-                        scope: scope.clone(),
-                        path: path.clone(),
-                        offset: n,
-                        from: from.clone(),
-                        to: to.clone(),
-                    },
-                );
-                for row in array(&data["versions"]) {
-                    ui.label(format!(
-                        "{} · {} · {} caracteres",
-                        text(row, "created_at"),
-                        text(row, "id"),
-                        number(&row["body_chars"])
-                    ));
-                }
-                let diff = &data["diff"];
-                ui.separator();
-                ui.strong(format!("Comparação: {}", text(diff, "status")));
-                if diff["truncated"].as_bool() == Some(true) || diff["status"] == "too_large" {
-                    ui.colored_label(
-                        p.warn,
-                        "Comparação parcial ou grande demais. Consulte versões menores.",
-                    );
-                }
-                for hunk in array(&diff["hunks"]) {
-                    for line in array(&hunk["lines"]) {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!(
-                                    "{} {}",
-                                    text(line, "op"),
-                                    text(line, "text")
-                                ))
-                                .monospace()
-                                .color(match text(line, "op") {
-                                    "+" => p.acc,
-                                    "-" => p.warn,
-                                    _ => ui.visuals().text_color(),
-                                }),
-                            )
-                            .wrap()
-                            .selectable(true),
-                        );
-                    }
-                }
-            }
-            Query::Briefing(scope) => {
-                ui.heading("Resumo do projeto");
-                count_grid(
-                    ui,
-                    "briefing-counts",
-                    &data["counts"],
-                    &[
-                        ("pages_latest", "Páginas atuais"),
-                        ("sessions", "Sessões"),
-                        ("observations", "Eventos"),
-                    ],
-                );
-                ui.label(format!(
-                    "Handoffs pendentes: {} · último evento: {}",
-                    number(&data["pending_handoff_count"]),
-                    text(data, "last_observation_at")
-                ));
-                for key in ["activity_7d", "activity_30d"] {
-                    count_grid(
-                        ui,
-                        key,
-                        &data[key],
-                        &[
-                            ("sessions", "Sessões"),
-                            ("observations", "Eventos"),
-                            ("pages_updated", "Páginas atualizadas"),
-                        ],
-                    );
-                }
                 for (key, label) in [("rules", "Regras"), ("recent_pages", "Páginas recentes")] {
-                    ui.strong(label);
-                    ui.push_id(key, |ui| {
-                        self.page_list(ui, shared, scope, array(&data[key]))
+                    card(ui, label, |ui| {
+                        ui.push_id(key, |ui| {
+                            self.page_list(ui, shared, scope, array(&data[key]))
+                        });
                     });
                 }
             }
-            Query::Graph(scope) => {
+            Query::Graph(scope) => card(ui, "Relações do projeto", |ui| {
                 if data["truncated"] == true {
-                    ui.colored_label(p.warn, "Grafo parcial: o servidor limita a 120 páginas.");
+                    widgets::strip(
+                        ui,
+                        Tone::Warn,
+                        "Grafo parcial:",
+                        "o servidor limita a 120 páginas.",
+                        None,
+                    );
                 }
                 draw_graph(ui, data);
                 self.page_list(ui, shared, scope, array(&data["nodes"]));
-            }
-            Query::CrossGraph => {
-                ui.heading("Relações entre projetos autorizados");
+            }),
+            Query::CrossGraph => card(ui, "Relações entre projetos autorizados", |ui| {
                 let edges = array(&data["edges"]);
-                let range = local_page(ui, edges.len());
+                if edges.is_empty() {
+                    widgets::caption(ui, "Nenhuma relação.");
+                }
+                let range = explore_page(ui, edges.len());
                 for edge in &edges[range] {
                     ui.label(format!(
                         "{} / {} : {} → {} / {} : {}",
@@ -602,44 +733,62 @@ impl Console {
                         text(edge, "to_path")
                     ));
                 }
-            }
+            }),
             Query::Handoffs { .. } => {
-                ui.small("Lista limitada a 200 registros; nenhum handoff é consumido.");
-                for row in array(&data["handoffs"]) {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.strong(format!("{} · {}", text(row, "state"), text(row, "agent")));
-                        ui.small(format!("{} · {}", text(row, "at"), text(row, "id")));
-                        if row["redacted"] == true {
-                            ui.label("Resumo restrito pelas permissões.");
-                        } else {
-                            ui.add(
-                                egui::Label::new(text(row, "summary"))
-                                    .wrap()
-                                    .selectable(true),
+                widgets::caption(
+                    ui,
+                    "Lista limitada a 200 registros; nenhum handoff é consumido.",
+                );
+                let rows = array(&data["handoffs"]);
+                if rows.is_empty() {
+                    widgets::empty(
+                        ui,
+                        "Nenhum handoff neste estado",
+                        "Os handoffs do projeto neste estado aparecem aqui.",
+                    );
+                }
+                for row in rows {
+                    card(
+                        ui,
+                        &format!("{} · {}", text(row, "state"), text(row, "agent")),
+                        |ui| {
+                            widgets::caption(
+                                ui,
+                                &format!("{} · {}", text(row, "at"), text(row, "id")),
                             );
-                            for step in array(&row["next_steps"]) {
-                                if let Some(step) = step.as_str() {
-                                    ui.label(format!("• {step}"));
+                            if row["redacted"] == true {
+                                ui.label("Resumo restrito pelas permissões.");
+                            } else {
+                                ui.add(
+                                    egui::Label::new(text(row, "summary"))
+                                        .wrap()
+                                        .selectable(true),
+                                );
+                                for step in array(&row["next_steps"]) {
+                                    if let Some(step) = step.as_str() {
+                                        ui.label(format!("• {step}"));
+                                    }
                                 }
                             }
-                        }
-                    });
+                        },
+                    );
                 }
             }
         }
     }
     fn page_list(&mut self, ui: &mut egui::Ui, shared: &Shared, scope: &Scope, rows: &[Value]) {
+        let p = theme::palette(ui.visuals());
         if rows.is_empty() {
-            ui.small("Nenhuma página.");
+            widgets::caption(ui, "Nenhuma página.");
         }
-        let range = local_page(ui, rows.len());
+        let range = explore_page(ui, rows.len());
         for row in &rows[range] {
             let target = related_scope(scope, row);
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new(text(row, "title")))
-                    .clicked()
-                {
+                // Com seleção de texto, o egui anuncia o link como Label.
+                ui.style_mut().interaction.selectable_labels = false;
+                let link = egui::Link::new(RichText::new(text(row, "title")).color(p.acc));
+                if ui.add_enabled(!self.busy, link).clicked() {
                     self.begin(
                         shared,
                         Query::Page {
@@ -648,10 +797,12 @@ impl Console {
                         },
                     );
                 }
-                ui.small(format!("{} · {}", target.label(), text(row, "path")));
+                widgets::caption(ui, &format!("{} · {}", target.label(), text(row, "path")));
             });
         }
     }
+    /// A paginação do servidor, de 50 em 50; `on_surf` dentro de um cartão.
+    #[allow(clippy::too_many_arguments)]
     fn pager(
         &mut self,
         ui: &mut egui::Ui,
@@ -659,27 +810,60 @@ impl Console {
         offset: usize,
         count: usize,
         total: Option<u64>,
+        on_surf: bool,
         query: impl Fn(usize) -> Query,
     ) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(page_label(offset, count, total));
-            if ui
-                .add_enabled(!self.busy && offset > 0, egui::Button::new("Anterior"))
-                .clicked()
-            {
-                self.begin(shared, query(offset.saturating_sub(50)));
-            }
-            let more = total
-                .map(|n| offset.saturating_add(count) < n as usize)
-                .unwrap_or(count == 50);
-            if ui
-                .add_enabled(!self.busy && more, egui::Button::new("Próxima"))
-                .clicked()
-            {
-                self.begin(shared, query(offset.saturating_add(50)));
-            }
-        });
+        let more = total
+            .map(|n| offset.saturating_add(count) < n as usize)
+            .unwrap_or(count == 50);
+        let label = range_label(offset, count, total.map(|n| n as usize));
+        let (back, next) = pager_row(
+            ui,
+            &label,
+            !self.busy && offset > 0,
+            !self.busy && more,
+            on_surf,
+        );
+        if back {
+            self.begin(shared, query(offset.saturating_sub(50)));
+        }
+        if next {
+            self.begin(shared, query(offset.saturating_add(50)));
+        }
     }
+}
+/// Um cartão da largura toda, com o título (Seção) quando há um.
+fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    widgets::card(ui)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if !title.is_empty() {
+                ui.label(RichText::new(title).font(Type::Section.font()));
+            }
+            add(ui)
+        })
+        .inner
+}
+/// "N–M de T" e os botões Secundários Anterior e Próxima; devolve os cliques.
+fn pager_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    back: bool,
+    next: bool,
+    on_surf: bool,
+) -> (bool, bool) {
+    let button = |text| {
+        let button = Button::secondary(text).small();
+        if on_surf { button.on_surf() } else { button }
+    };
+    ui.horizontal(|ui| {
+        ui.set_min_height(24.);
+        widgets::caption(ui, label);
+        let back = widgets::edged(ui, back, button("Anterior"), 6.).clicked();
+        let next = widgets::edged(ui, next, button("Próxima"), 6.).clicked();
+        (back, next)
+    })
+    .inner
 }
 fn related_scope(fallback: &Scope, row: &Value) -> Scope {
     match (row["workspace"].as_str(), row["project"].as_str()) {
@@ -697,33 +881,39 @@ fn bounded_text(text: &str, max: usize) -> &str {
     }
     &text[..end]
 }
-fn page_label(offset: usize, count: usize, total: Option<u64>) -> String {
+/// "N–M de T" (M = N + `count` − 1), ou "N–M" sem o total; sem registros,
+/// "0 de T", ou "Nenhum registro" sem o total.
+fn range_label(offset: usize, count: usize, total: Option<usize>) -> String {
     let number = crate::model::number;
-    format!(
-        "Página {} · {} registros{}",
-        number(offset / 50 + 1),
-        number(count),
-        total
-            .map(|n| format!(" de {}", number(n as usize)))
-            .unwrap_or_default()
-    )
+    let span = format!("{}–{}", number(offset + 1), number(offset + count));
+    match (count, total) {
+        (0, None) => "Nenhum registro".into(),
+        (0, Some(total)) => format!("0 de {}", number(total)),
+        (_, Some(total)) => format!("{span} de {}", number(total)),
+        (_, None) => span,
+    }
 }
-fn range_label(offset: usize, total: usize) -> String {
-    let number = crate::model::number;
-    format!(
-        "{}–{} de {}",
-        number(offset + 1),
-        number((offset + 100).min(total)),
-        number(total)
-    )
-}
-fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
+/// O deslocamento da página local (de 100 em 100), guardado na memória do
+/// egui e preso à última página. Com mais de 100, `nav` mostra a navegação e
+/// devolve o deslocamento novo.
+fn local_offset(
+    ui: &mut egui::Ui,
+    total: usize,
+    nav: impl FnOnce(&mut egui::Ui, usize) -> usize,
+) -> std::ops::Range<usize> {
     let id = ui.id().with("local-page");
     let mut offset = ui.data(|d| d.get_temp::<usize>(id).unwrap_or(0));
     offset = offset.min(total.saturating_sub(1) / 100 * 100);
     if total > 100 {
+        offset = nav(ui, offset);
+    }
+    ui.data_mut(|d| d.insert_temp(id, offset));
+    offset..(offset + 100).min(total)
+}
+fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
+    local_offset(ui, total, |ui, mut offset| {
         ui.horizontal(|ui| {
-            ui.small(range_label(offset, total));
+            ui.small(range_label(offset, (total - offset).min(100), Some(total)));
             if ui
                 .add_enabled(offset > 0, egui::Button::new("← 100"))
                 .clicked()
@@ -737,9 +927,20 @@ fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
                 offset += 100;
             }
         });
-    }
-    ui.data_mut(|d| d.insert_temp(id, offset));
-    offset..(offset + 100).min(total)
+        offset
+    })
+}
+/// A página local das listas de Explorar, dentro de cartões: "N–M de T" e
+/// Anterior/Próxima.
+fn explore_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
+    local_offset(ui, total, |ui, offset| {
+        let label = range_label(offset, (total - offset).min(100), Some(total));
+        match pager_row(ui, &label, offset > 0, offset + 100 < total, true) {
+            (true, _) => offset.saturating_sub(100),
+            (_, true) => offset + 100,
+            _ => offset,
+        }
+    })
 }
 pub(crate) fn array(v: &Value) -> &[Value] {
     v.as_array().map(Vec::as_slice).unwrap_or(&[])
@@ -764,7 +965,7 @@ pub(crate) fn number(v: &Value) -> String {
 }
 fn show_usage(ui: &mut egui::Ui, usage: &Value) {
     if usage.is_null() {
-        ui.small("Tokens: não reportados pelo cliente.");
+        widgets::caption(ui, "Tokens: não reportados pelo cliente.");
         return;
     }
     ui.label(format!(
@@ -775,7 +976,10 @@ fn show_usage(ui: &mut egui::Ui, usage: &Value) {
         number(&usage["cache_read_tokens"]),
         text(usage, "model")
     ));
-    ui.small("Totais reportados da sessão; não são valores de faturamento nem rateio por projeto/modelo.");
+    widgets::caption(
+        ui,
+        "Totais reportados da sessão; não são valores de faturamento nem rateio por projeto/modelo.",
+    );
 }
 pub(crate) fn count_grid(ui: &mut egui::Ui, id: &str, data: &Value, fields: &[(&str, &str)]) {
     egui::Grid::new(id).num_columns(2).show(ui, |ui| {
@@ -850,7 +1054,7 @@ fn draw_graph(ui: &mut egui::Ui, data: &Value) {
     let p = theme::palette(ui.visuals());
     let nodes = array(&data["nodes"]);
     if nodes.is_empty() {
-        ui.label("Nenhuma relação disponível.");
+        widgets::caption(ui, "Nenhuma relação disponível.");
         return;
     }
     let (rect, _) = ui.allocate_exact_size(
@@ -867,9 +1071,11 @@ fn draw_graph(ui: &mut egui::Ui, data: &Value) {
         let from = nodes.iter().position(|n| n["path"] == e["from_path"]);
         let to = nodes.iter().position(|n| n["path"] == e["to_path"]);
         if let (Some(a), Some(b)) = (from, to) {
+            // text2: as ligações se veem (≥ 3:1) sobre o cartão; a `line`
+            // ficaria em 1,25:1.
             ui.painter().line_segment(
                 [positions[a], positions[b]],
-                egui::Stroke::new(1.0_f32, p.line),
+                egui::Stroke::new(1.0_f32, p.text2),
             );
         }
     }
@@ -886,7 +1092,8 @@ fn draw_graph(ui: &mut egui::Ui, data: &Value) {
             text(&nodes[i], "path")
         ));
     }
-    ui.small(
+    widgets::caption(
+        ui,
         "Passe o mouse sobre os pontos para identificar páginas. Abra uma página na lista abaixo.",
     );
 }
@@ -952,12 +1159,15 @@ mod tests {
                 state: "open".into(),
             },
         ];
-        let ctx = egui::Context::default();
-        for query in queries {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default()
-                    .show(ctx, |ui| inspector.render(ui, &shared, &query, &json!({})));
-            });
+        // Com as fontes do app: os títulos usam a família SemiBold.
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = crate::widgets::tests::context(theme);
+            for query in &queries {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| inspector.render(ui, &shared, query, &json!({})));
+                });
+            }
         }
         inspector.result = Some((Query::CrossGraph, json!({"edges":[]})));
         inspector.search = "private fixture".into();
@@ -1002,14 +1212,17 @@ mod tests {
 
     #[test]
     fn pager_and_range_labels_group_thousands() {
-        assert_eq!(page_label(0, 50, None), "Página 1 · 50 registros");
-        assert_eq!(page_label(0, 0, Some(0)), "Página 1 · 0 registros de 0");
+        // A paginação do servidor: "N–M de T", ou "N–M" sem o total.
+        assert_eq!(range_label(0, 50, None), "1–50");
+        assert_eq!(range_label(0, 0, Some(0)), "0 de 0");
+        assert_eq!(range_label(0, 0, None), "Nenhum registro");
         assert_eq!(
-            page_label(49_950, 50, Some(1_234_567)),
-            "Página 1.000 · 50 registros de 1.234.567"
+            range_label(49_950, 50, Some(1_234_567)),
+            "49.951–50.000 de 1.234.567"
         );
-        assert_eq!(range_label(0, 5_000), "1–100 de 5.000");
-        assert_eq!(range_label(1_200, 1_234), "1.201–1.234 de 1.234");
+        // A página local (de 100), a mesma de antes.
+        assert_eq!(range_label(0, 100, Some(5_000)), "1–100 de 5.000");
+        assert_eq!(range_label(1_200, 34, Some(1_234)), "1.201–1.234 de 1.234");
     }
 
     #[test]
@@ -1029,5 +1242,538 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         assert_eq!(row_key(&mut seen, None, 0), ("".into(), Some(0)));
         assert_eq!(row_key(&mut seen, Some(""), 3), ("".into(), Some(3)));
+    }
+
+    use crate::{
+        test_support::{Mock, Response},
+        widgets::tests::{THEMES, click_sized, context, node, nodes, rect_of, rects, run_sized},
+    };
+    use egui::accesskit::{Role, Toggled};
+
+    /// Alto o bastante para a lista inteira ficar à vista.
+    const TALL: [f32; 2] = [1000., 6000.];
+    fn fixture() -> Scope {
+        Scope {
+            workspace: "fixture".into(),
+            project: "demo".into(),
+        }
+    }
+    /// Explorar num servidor sintético; `chosen`: com o projeto escolhido.
+    fn explore(chosen: bool) -> (Mock, Arc<Shared>, Console) {
+        let mock = Mock::new(|_| Response::json(200, json!({"sessions": []})));
+        let shared = Shared::unstarted(mock.config());
+        let mut console = Console::new(shared.clone());
+        if chosen {
+            console.scope = Some(fixture());
+        }
+        (mock, shared, console)
+    }
+    /// Dois frames: o segundo já com os tamanhos medidos no primeiro.
+    fn frames(ctx: &egui::Context, add: &mut impl FnMut(&mut egui::Ui)) -> egui::FullOutput {
+        run_sized(ctx, TALL, vec![], &mut *add);
+        run_sized(ctx, TALL, vec![], &mut *add)
+    }
+    /// Clica no nó `role` `text` do frame atual.
+    fn press(ctx: &egui::Context, add: &mut impl FnMut(&mut egui::Ui), role: Role, text: &str) {
+        let out = frames(ctx, add);
+        let at = rect_of(&node(&out, role, text)).center();
+        click_sized(ctx, TALL, at, &mut *add);
+    }
+    /// Espera a resposta do worker.
+    fn settle(console: &mut Console, shared: &Shared) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while console.busy {
+            assert!(
+                std::time::Instant::now() < until,
+                "the worker never answered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            console.poll(shared);
+        }
+    }
+    fn toggled(out: &egui::FullOutput, text: &str) -> Option<Toggled> {
+        node(out, Role::Button, text).toggled()
+    }
+
+    #[test]
+    fn the_tabs_expose_their_selection_and_switching_clears_the_result() {
+        for (theme, _) in THEMES {
+            let (_mock, shared, mut console) = explore(true);
+            console.result = Some((Query::CrossGraph, json!({"edges": []})));
+            console.at = Some(Utc::now());
+            let ctx = context(theme);
+            let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+            let out = frames(&ctx, &mut add);
+            assert_eq!(
+                (
+                    toggled(&out, "Sessões detalhadas"),
+                    toggled(&out, "Conhecimento")
+                ),
+                (Some(Toggled::True), Some(Toggled::False)),
+                "{theme:?}"
+            );
+            node(&out, Role::Label, "Relações entre projetos autorizados");
+            press(&ctx, &mut add, Role::Button, "Conhecimento");
+            let out = frames(&ctx, &mut add);
+            assert_eq!(
+                (
+                    toggled(&out, "Sessões detalhadas"),
+                    toggled(&out, "Conhecimento")
+                ),
+                (Some(Toggled::False), Some(Toggled::True)),
+                "{theme:?}"
+            );
+            node(&out, Role::Button, "Páginas");
+            assert!(nodes(&out, Role::Button, "Carregar sessões").is_empty());
+            assert!(nodes(&out, Role::Label, "Relações entre projetos autorizados").is_empty());
+            node(&out, Role::Label, "Nada carregado");
+            drop(add);
+            assert!(console.tab == Tab::Knowledge);
+            assert!(
+                console.result.is_none() && console.at.is_none(),
+                "{theme:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_project_selector_lists_the_projects_and_a_new_pick_clears_the_result() {
+        let projects = ["demo", "outro"].map(|name| Project {
+            workspace_name: "fixture".into(),
+            project_name: name.into(),
+            ..Default::default()
+        });
+        let (_mock, shared, mut console) = explore(true);
+        console.result = Some((Query::CrossGraph, json!({"edges": []})));
+        console.observation_search = "busca".into();
+        console.kind = "stop".into();
+        let ctx = context(egui::Theme::Light);
+        let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &projects);
+        let out = frames(&ctx, &mut add);
+        let combo = node(&out, Role::ComboBox, "Projeto");
+        assert_eq!(combo.value(), Some("fixture / demo"));
+        let at = rect_of(&combo);
+        assert_eq!(at.height(), 26.);
+        click_sized(&ctx, TALL, at.center(), &mut add);
+        let out = frames(&ctx, &mut add);
+        assert_eq!(toggled(&out, "fixture / demo"), Some(Toggled::True));
+        assert_eq!(toggled(&out, "fixture / outro"), Some(Toggled::False));
+        let other = rect_of(&node(&out, Role::Button, "fixture / outro"));
+        assert!(
+            other.top() > at.bottom(),
+            "the list opens below the selector"
+        );
+        click_sized(&ctx, TALL, other.center(), &mut add);
+        let out = frames(&ctx, &mut add);
+        assert_eq!(
+            node(&out, Role::ComboBox, "Projeto").value(),
+            Some("fixture / outro")
+        );
+        drop(add);
+        assert_eq!(
+            console.scope.as_ref().map(|s| s.project.as_str()),
+            Some("outro")
+        );
+        assert!(console.result.is_none());
+        assert_eq!(
+            (console.observation_search.as_str(), console.kind.as_str()),
+            ("", "")
+        );
+    }
+
+    #[test]
+    fn the_server_pager_at_its_limits() {
+        // (deslocamento, linhas, total, rótulo, Anterior?, Próxima?)
+        let cases = [
+            (0, 0, Some(0), "0 de 0", false, false),
+            (0, 1, Some(1), "1–1 de 1", false, false),
+            (0, 50, Some(120), "1–50 de 120", false, true),
+            (50, 50, Some(100), "51–100 de 100", true, false),
+            (100, 20, Some(120), "101–120 de 120", true, false),
+            // Sessões não informam o total: página cheia sugere mais.
+            (0, 50, None, "1–50", false, true),
+            (50, 49, None, "51–99", true, false),
+            (0, 0, None, "Nenhum registro", false, false),
+        ];
+        for (offset, count, total, label, back, next) in cases {
+            let case = format!("{offset} + {count} of {total:?}");
+            let (mock, shared, mut console) = explore(true);
+            let query = match total {
+                Some(total) => {
+                    let rows: Vec<Value> = (0..count)
+                        .map(|i| json!({"id": format!("e{i}"), "kind": "stop", "title": "t"}))
+                        .collect();
+                    let data = json!({"observations": rows, "total": total});
+                    let query = Query::Observations {
+                        scope: fixture(),
+                        session: "s1".into(),
+                        offset,
+                        text: String::new(),
+                        kind: String::new(),
+                    };
+                    console.result = Some((query, data));
+                    "observations"
+                }
+                None => {
+                    let rows: Vec<Value> = (0..count)
+                        .map(|i| json!({"session_id": format!("s{i}"), "agent_kind": "codex"}))
+                        .collect();
+                    let query = Query::Sessions {
+                        scope: fixture(),
+                        offset,
+                        include_open: true,
+                    };
+                    console.result = Some((query, json!({"sessions": rows})));
+                    "sessions?"
+                }
+            };
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+            let out = frames(&ctx, &mut add);
+            node(&out, Role::Label, label);
+            assert_eq!(
+                (
+                    !node(&out, Role::Button, "Anterior").is_disabled(),
+                    !node(&out, Role::Button, "Próxima").is_disabled()
+                ),
+                (back, next),
+                "{case}"
+            );
+            // O botão habilitado pede a página vizinha ao servidor.
+            let (button, to) = match (back, next) {
+                (_, true) => ("Próxima", offset + 50),
+                (true, false) => ("Anterior", offset - 50),
+                (false, false) => continue,
+            };
+            press(&ctx, &mut add, Role::Button, button);
+            drop(add);
+            settle(&mut console, &shared);
+            let requests = mock.requests();
+            assert_eq!(requests.len(), 1, "{case}");
+            assert!(
+                requests[0].path.contains(query)
+                    && requests[0].path.contains(&format!("offset={to}&")),
+                "{case}: {}",
+                requests[0].path
+            );
+        }
+    }
+
+    #[test]
+    fn the_local_pager_at_its_limits() {
+        // (páginas, rótulo, Anterior?, Próxima?, links, a última página e os links dela)
+        for (total, label, back, next, links, last) in [
+            (0, None, false, false, 0, None),
+            (1, None, false, false, 1, None),
+            (100, None, false, false, 100, None),
+            (
+                101,
+                Some("1–100 de 101"),
+                false,
+                true,
+                100,
+                Some(("101–101 de 101", 1)),
+            ),
+            (
+                200,
+                Some("1–100 de 200"),
+                false,
+                true,
+                100,
+                Some(("101–200 de 200", 100)),
+            ),
+        ] {
+            let rows: Vec<Value> = (0..total)
+                .map(|i| json!({"title": format!("Página {i}"), "path": format!("p{i}.md")}))
+                .collect();
+            let (_mock, shared, mut console) = explore(true);
+            console.tab = Tab::Knowledge;
+            console.result = Some((Query::Pages(fixture()), json!(rows)));
+            let ctx = context(egui::Theme::Light);
+            let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+            let out = frames(&ctx, &mut add);
+            let shown = |out: &egui::FullOutput| {
+                let update = out.platform_output.accesskit_update.as_ref().unwrap();
+                update
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.role() == Role::Link)
+                    .count()
+            };
+            assert_eq!(shown(&out), links, "{total}");
+            assert_eq!(
+                nodes(&out, Role::Label, "Nenhuma página.").len(),
+                usize::from(total == 0),
+                "{total}"
+            );
+            let Some(label) = label else {
+                assert!(nodes(&out, Role::Button, "Próxima").is_empty(), "{total}");
+                continue;
+            };
+            node(&out, Role::Label, label);
+            assert_eq!(
+                (
+                    !node(&out, Role::Button, "Anterior").is_disabled(),
+                    !node(&out, Role::Button, "Próxima").is_disabled()
+                ),
+                (back, next),
+                "{total}"
+            );
+            // A última página, e de volta à primeira.
+            let (last, last_links) = last.unwrap();
+            press(&ctx, &mut add, Role::Button, "Próxima");
+            let out = frames(&ctx, &mut add);
+            node(&out, Role::Label, last);
+            assert_eq!(shown(&out), last_links, "{total}");
+            node(&out, Role::Link, "Página 100");
+            assert_eq!(
+                (
+                    !node(&out, Role::Button, "Anterior").is_disabled(),
+                    !node(&out, Role::Button, "Próxima").is_disabled()
+                ),
+                (true, false),
+                "{total}: the last page"
+            );
+            press(&ctx, &mut add, Role::Button, "Anterior");
+            let out = frames(&ctx, &mut add);
+            node(&out, Role::Label, label);
+            node(&out, Role::Link, "Página 0");
+        }
+    }
+
+    #[test]
+    fn the_graph_draws_its_links_at_3_to_1_on_its_card() {
+        use crate::theme::tests::contrast;
+        for (theme, p) in THEMES {
+            let (_mock, shared, mut console) = explore(true);
+            console.tab = Tab::Knowledge;
+            let data = json!({
+                "nodes": [{"path": "a.md", "title": "A"}, {"path": "b.md", "title": "B"}],
+                "edges": [{"from_path": "a.md", "to_path": "b.md"}],
+            });
+            console.result = Some((Query::Graph(fixture()), data));
+            let ctx = context(theme);
+            let out = frames(&ctx, &mut |ui: &mut egui::Ui| {
+                console.show(ui, &shared, &[])
+            });
+            node(&out, Role::Label, "Relações do projeto");
+            let links: Vec<egui::Color32> = crate::widgets::tests::shapes(&out)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::LineSegment { stroke, .. } => Some(stroke.color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(links.len(), 1, "{theme:?}: one link");
+            let ratio = contrast(links[0], p.surf);
+            assert!(
+                ratio >= 3.,
+                "{theme:?}: the link on the card is {ratio:.2}:1"
+            );
+            node(&out, Role::Link, "A");
+            node(&out, Role::Link, "B");
+        }
+    }
+
+    #[test]
+    fn empty_loading_and_error_states_say_what_is_going_on() {
+        for (theme, p) in THEMES {
+            let (_mock, shared, mut console) = explore(false);
+            let ctx = context(theme);
+            let show = |console: &mut Console| {
+                frames(&ctx, &mut |ui: &mut egui::Ui| {
+                    console.show(ui, &shared, &[])
+                })
+            };
+            let out = show(&mut console);
+            node(&out, Role::Label, "Nenhum projeto selecionado");
+            node(
+                &out,
+                Role::Label,
+                "Escolha o projeto cujos dados você deseja consultar.",
+            );
+            assert!(nodes(&out, Role::Button, "Carregar sessões").is_empty());
+            console.scope = Some(fixture());
+            let out = show(&mut console);
+            node(&out, Role::Label, "Nada carregado");
+            assert!(!node(&out, Role::Button, "Carregar sessões").is_disabled());
+            console.busy = true;
+            let out = show(&mut console);
+            node(&out, Role::Label, "Consultando…");
+            assert!(nodes(&out, Role::Label, "Nada carregado").is_empty());
+            assert!(node(&out, Role::Button, "Carregar sessões").is_disabled());
+            console.busy = false;
+            console.error = Some("Servidor respondeu HTTP 500.".into());
+            let out = show(&mut console);
+            let strip = rect_of(&node(
+                &out,
+                Role::Label,
+                "Falha na consulta. Servidor respondeu HTTP 500.",
+            ));
+            assert!(
+                rects(&out)
+                    .iter()
+                    .any(|r| r.rect == strip && r.fill == widgets::tone(p.bad, 0.08)),
+                "{theme:?}: a Bad strip"
+            );
+            assert!(nodes(&out, Role::Label, "Nada carregado").is_empty());
+            console.error = None;
+            // Listas vazias: a mensagem de cada consulta.
+            for (query, data, message) in [
+                (
+                    Query::Sessions {
+                        scope: fixture(),
+                        offset: 0,
+                        include_open: true,
+                    },
+                    json!({"sessions": []}),
+                    "Nenhuma sessão nesta página",
+                ),
+                (
+                    Query::Observations {
+                        scope: fixture(),
+                        session: "s1".into(),
+                        offset: 0,
+                        text: String::new(),
+                        kind: String::new(),
+                    },
+                    json!({"observations": [], "total": 0}),
+                    "Nenhum evento nesta página",
+                ),
+                (
+                    Query::Search {
+                        scope: Some(fixture()),
+                        text: "nada".into(),
+                    },
+                    json!([]),
+                    "Nenhum resultado",
+                ),
+                (
+                    Query::Handoffs {
+                        scope: fixture(),
+                        state: "open".into(),
+                    },
+                    json!({"handoffs": []}),
+                    "Nenhum handoff neste estado",
+                ),
+            ] {
+                console.result = Some((query, data));
+                let out = show(&mut console);
+                node(&out, Role::Label, message);
+            }
+        }
+    }
+
+    #[test]
+    fn the_session_filters_send_what_they_show() {
+        for include in [true, false] {
+            let (mock, shared, mut console) = explore(true);
+            let ctx = context(egui::Theme::Dark);
+            {
+                let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+                let out = frames(&ctx, &mut add);
+                let check = node(&out, Role::CheckBox, "Incluir abertas");
+                assert_eq!(check.toggled(), Some(Toggled::True), "on by default");
+                if !include {
+                    press(&ctx, &mut add, Role::CheckBox, "Incluir abertas");
+                    let out = frames(&ctx, &mut add);
+                    assert_eq!(
+                        node(&out, Role::CheckBox, "Incluir abertas").toggled(),
+                        Some(Toggled::False)
+                    );
+                }
+                press(&ctx, &mut add, Role::Button, "Carregar sessões");
+            }
+            settle(&mut console, &shared);
+            let requests = mock.requests();
+            assert_eq!(requests.len(), 1, "{include}");
+            assert!(
+                requests[0]
+                    .path
+                    .contains(&format!("offset=0&include_open={include}")),
+                "{include}: {}",
+                requests[0].path
+            );
+        }
+    }
+
+    #[test]
+    fn explore_controls_have_3_to_1_edges_and_4_5_to_1_text_in_both_themes() {
+        use crate::widgets::edge_tests::audit;
+        for (theme, p) in THEMES {
+            for tab in [Tab::Sessions, Tab::Knowledge] {
+                let (_mock, shared, mut console) = explore(true);
+                console.tab = tab;
+                console.search = "texto".into();
+                console.result = Some(if tab == Tab::Sessions {
+                    // A paginação no meio (as duas setas valem) e o filtro de eventos.
+                    let rows: Vec<Value> = (0..50)
+                        .map(|i| json!({"id": format!("e{i}"), "kind": "stop", "title": "t"}))
+                        .collect();
+                    (
+                        Query::Observations {
+                            scope: fixture(),
+                            session: "s1".into(),
+                            offset: 50,
+                            text: String::new(),
+                            kind: String::new(),
+                        },
+                        json!({"observations": rows, "total": 500}),
+                    )
+                } else {
+                    let rows: Vec<Value> = (0..150)
+                        .map(|i| json!({"title": format!("Página {i}"), "path": "p.md"}))
+                        .collect();
+                    (Query::Pages(fixture()), json!(rows))
+                });
+                let ctx = context(theme);
+                let out = frames(&ctx, &mut |ui: &mut egui::Ui| {
+                    console.show(ui, &shared, &[])
+                });
+                let audit = audit(&out, p);
+                let case = format!(
+                    "{theme:?} {}",
+                    if tab == Tab::Sessions {
+                        "sessions"
+                    } else {
+                        "knowledge"
+                    }
+                );
+                assert!(audit.failures.is_empty(), "{case}: {:#?}", audit.failures);
+                let mut want = vec![
+                    "ComboBox Projeto",
+                    "Button Sessões detalhadas",
+                    "Button Próxima",
+                ];
+                if tab == Tab::Sessions {
+                    want.extend([
+                        "CheckBox Incluir abertas",
+                        "Button Carregar sessões",
+                        "Button Handoffs abertos",
+                        "Button Anterior",
+                        "ComboBox Tipo de evento",
+                        "Button Aplicar filtro",
+                    ]);
+                } else {
+                    want.extend([
+                        "CheckBox Todos os projetos autorizados",
+                        "Button Páginas",
+                        "Button Buscar",
+                        "TextInput texto",
+                    ]);
+                }
+                for name in want {
+                    assert!(
+                        audit.checked.iter().any(|c| c == name),
+                        "{case}: {name} was measured, {:#?}",
+                        audit.checked
+                    );
+                }
+                assert!(
+                    audit.checked.iter().any(|c| c.starts_with("segmented at ")),
+                    "{case}: the tabs"
+                );
+            }
+        }
     }
 }
