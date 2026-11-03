@@ -195,25 +195,22 @@ impl Console {
                         }
                     }
                 });
-                let tabs = ui.scope(|ui| {
-                    widgets::segmented(
-                        ui,
-                        tab,
-                        &[
-                            Segment {
-                                value: Tab::Sessions,
-                                label: "Sessões detalhadas",
-                                count: None,
-                            },
-                            Segment {
-                                value: Tab::Knowledge,
-                                label: "Conhecimento",
-                                count: None,
-                            },
-                        ],
-                    )
-                });
-                widgets::edge(ui, &tabs.response, 7.);
+                widgets::segmented(
+                    ui,
+                    tab,
+                    &[
+                        Segment {
+                            value: Tab::Sessions,
+                            label: "Sessões detalhadas",
+                            count: None,
+                        },
+                        Segment {
+                            value: Tab::Knowledge,
+                            label: "Conhecimento",
+                            count: None,
+                        },
+                    ],
+                );
             },
             |_| {},
         );
@@ -221,7 +218,7 @@ impl Console {
     fn session_controls(&mut self, ui: &mut egui::Ui, shared: &Shared, scope: &Scope) {
         widgets::row(ui, |ui| {
             widgets::checkbox(ui, &mut self.include_open, "Incluir abertas");
-            if widgets::edged(ui, true, Button::secondary("Carregar sessões"), 6.).clicked() {
+            if ui.add(Button::secondary("Carregar sessões")).clicked() {
                 self.observation_search.clear();
                 self.kind.clear();
                 self.begin(
@@ -238,7 +235,7 @@ impl Console {
                 ("accepted", "Aceitos"),
                 ("expired", "Expirados"),
             ] {
-                if widgets::edged(ui, true, Button::secondary(label), 6.).clicked() {
+                if ui.add(Button::secondary(label)).clicked() {
                     self.begin(
                         shared,
                         Query::Handoffs {
@@ -262,13 +259,13 @@ impl Console {
                 ("Relações do projeto", Query::Graph(scope.clone())),
                 ("Relações entre projetos", Query::CrossGraph),
             ] {
-                if widgets::edged(ui, true, Button::secondary(label), 6.).clicked() {
+                if ui.add(Button::secondary(label)).clicked() {
                     self.begin(shared, query);
                 }
             }
         });
         widgets::row(ui, |ui| {
-            let field = widgets::text_field(
+            widgets::text_field(
                 ui,
                 &mut self.search,
                 280.,
@@ -276,9 +273,8 @@ impl Console {
                 false,
                 1024,
             );
-            widgets::edge(ui, &field, 5.);
             widgets::checkbox(ui, &mut self.global, "Todos os projetos autorizados");
-            if widgets::edged(ui, true, Button::secondary("Buscar"), 6.).clicked() {
+            if ui.add(Button::secondary("Buscar")).clicked() {
                 self.begin(
                     shared,
                     Query::Search {
@@ -334,7 +330,7 @@ impl Console {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     let events = Button::secondary("Ver eventos").small().on_surf();
-                                    if widgets::edged(ui, !self.busy, events, 6.).clicked() {
+                                    if ui.add_enabled(!self.busy, events).clicked() {
                                         self.observation_search.clear();
                                         self.kind.clear();
                                         self.begin(
@@ -378,7 +374,7 @@ impl Console {
                     show_usage(ui, &data["session"]["usage"]);
                     ui.add_enabled_ui(!self.busy, |ui| {
                         widgets::row(ui, |ui| {
-                            let field = widgets::text_field(
+                            widgets::text_field(
                                 ui,
                                 &mut self.observation_search,
                                 240.,
@@ -386,7 +382,6 @@ impl Console {
                                 false,
                                 1024,
                             );
-                            widgets::edge(ui, &field, 5.);
                             let shown = if self.kind.is_empty() {
                                 "Todos os tipos".to_owned()
                             } else {
@@ -402,7 +397,7 @@ impl Console {
                                 }
                             });
                             let apply = Button::secondary("Aplicar filtro").on_surf();
-                            if widgets::edged(ui, true, apply, 6.).clicked() {
+                            if ui.add(apply).clicked() {
                                 self.begin(
                                     shared,
                                     Query::Observations {
@@ -514,7 +509,7 @@ impl Console {
                         &format!("{} · {} · versão {}", scope.label(), path, text(data, "id")),
                     );
                     let history = Button::secondary("Histórico e comparação").on_surf();
-                    if widgets::edged(ui, !self.busy, history, 6.).clicked() {
+                    if ui.add_enabled(!self.busy, history).clicked() {
                         self.from.clear();
                         self.to.clear();
                         self.begin(
@@ -586,7 +581,7 @@ impl Console {
                             });
                         }
                         let compare = Button::secondary("Comparar").on_surf();
-                        if widgets::edged(ui, !self.busy, compare, 6.).clicked() {
+                        if ui.add_enabled(!self.busy, compare).clicked() {
                             self.begin(
                                 shared,
                                 Query::History {
@@ -859,8 +854,8 @@ fn pager_row(
     ui.horizontal(|ui| {
         ui.set_min_height(24.);
         widgets::caption(ui, label);
-        let back = widgets::edged(ui, back, button("Anterior"), 6.).clicked();
-        let next = widgets::edged(ui, next, button("Próxima"), 6.).clicked();
+        let back = ui.add_enabled(back, button("Anterior")).clicked();
+        let next = ui.add_enabled(next, button("Próxima")).clicked();
         (back, next)
     })
     .inner
@@ -1698,8 +1693,8 @@ mod tests {
     }
 
     #[test]
-    fn explore_controls_have_3_to_1_edges_and_4_5_to_1_text_in_both_themes() {
-        use crate::widgets::edge_tests::audit;
+    fn explore_controls_have_line_borders_and_4_5_to_1_text_in_both_themes() {
+        use crate::widgets::tests::audit;
         for (theme, p) in THEMES {
             for tab in [Tab::Sessions, Tab::Knowledge] {
                 let (_mock, shared, mut console) = explore(true);

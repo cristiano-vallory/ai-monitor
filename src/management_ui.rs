@@ -10,6 +10,12 @@
 //!   aba com projeto e em Atualizar; resposta de uma consulta anterior é
 //!   ignorada. A lista não toca no recibo nem no resultado, e eles não tocam
 //!   nela.
+//! - O detalhe da proposta é a GET `/admin/pending-writes/{id}` da seleção,
+//!   com consulta, voo e resposta próprios (`Detail`): uma por seleção (um
+//!   clique na linha, ou o ID digitado ao sair do campo); a resposta de uma
+//!   seleção anterior é ignorada. Não prende o painel, e a lista, o recibo e
+//!   o resultado não o apagam (nem ele a eles); trocar de aba ou de projeto,
+//!   sim.
 //! - Handoffs: a lista são os handoffs abertos do projeto na coleta do monitor
 //!   (`ApiSnapshot`); nenhuma consulta nova.
 //! - A seleção é o campo de ID: clicar numa linha o preenche; um ID fora da
@@ -125,56 +131,62 @@ enum Ask {
     Expire,
 }
 
-/// A lista de Revisão · Propostas: consulta, voo e resposta próprios, num
-/// trabalhador só dela. Não toca no recibo nem no resultado do painel, e eles
-/// não tocam nela.
-struct List {
+/// Uma leitura de Revisão · Propostas com consulta, voo e resposta próprios,
+/// num trabalhador só dela: a lista e o detalhe da proposta selecionada. Não
+/// toca no recibo, no resultado nem na outra leitura, e eles não tocam nela.
+struct Fetch<T> {
     worker: Worker,
-    /// A senha da consulta mais recente: resposta com outra é de um projeto
-    /// ou estado anterior e é ignorada.
+    /// A leitura de uma chave (projeto, estado ou ID).
+    read: fn(Scope, String) -> Read,
+    /// A resposta no formato da tela; `Err` = formato incompatível.
+    parse: fn(Value) -> Result<T, Error>,
+    /// A senha da consulta mais recente: resposta com outra é de uma chave
+    /// anterior e é ignorada.
     ticket: u64,
-    /// O projeto e o estado da consulta mais recente.
+    /// A chave da consulta mais recente.
     key: Option<(Scope, String)>,
     /// `None` = carregando (ou nada pedido).
-    rows: Option<Result<Vec<Value>, String>>,
+    value: Option<Result<T, String>>,
     /// A consulta mais recente ainda não entrou na fila do trabalhador
     /// (ocupado com as anteriores); `poll` tenta de novo.
     unsent: bool,
 }
-impl List {
-    fn new(shared: Arc<Shared>) -> Self {
+impl<T> Fetch<T> {
+    fn new(
+        shared: Arc<Shared>,
+        read: fn(Scope, String) -> Read,
+        parse: fn(Value) -> Result<T, Error>,
+    ) -> Self {
         Self {
             worker: Worker::new(shared),
+            read,
+            parse,
             ticket: 0,
             key: None,
-            rows: None,
+            value: None,
             unsent: false,
         }
     }
     fn reset(&mut self) {
         self.ticket = self.ticket.wrapping_add(1);
         self.key = None;
-        self.rows = None;
+        self.value = None;
         self.unsent = false;
     }
     fn request(&mut self, shared: &Shared, key: (Scope, String)) {
         self.ticket = self.ticket.wrapping_add(1);
         self.key = Some(key);
-        self.rows = None;
+        self.value = None;
         self.unsent = true;
         self.send(shared);
     }
     fn send(&mut self, shared: &Shared) {
-        let Some((scope, status)) = self.key.clone().filter(|_| self.unsent) else {
+        let Some((scope, key)) = self.key.clone().filter(|_| self.unsent) else {
             return;
         };
         self.unsent = self
             .worker
-            .submit(
-                self.ticket,
-                shared,
-                Work::Read(Read::Proposals { scope, status }),
-            )
+            .submit(self.ticket, shared, Work::Read((self.read)(scope, key)))
             .is_err();
     }
     fn poll(&mut self, shared: &Shared) {
@@ -184,23 +196,40 @@ impl List {
             {
                 continue;
             }
-            self.rows = Some(match reply.result {
-                Ok(Value::Array(mut rows)) => {
-                    rows.truncate(LIMIT);
-                    Ok(rows)
-                }
-                Ok(_) => Err(Error::Format.to_string()),
-                Err(e) => Err(e.to_string()),
-            });
+            self.value = Some(reply.result.and_then(self.parse).map_err(|e| e.to_string()));
         }
         self.send(shared);
     }
+}
+/// A lista: a GET de até `LIMIT` propostas do projeto e do estado.
+type List = Fetch<Vec<Value>>;
+impl List {
+    fn proposals(shared: Arc<Shared>) -> Self {
+        Self::new(
+            shared,
+            |scope, status| Read::Proposals { scope, status },
+            |value| match value {
+                Value::Array(mut rows) => {
+                    rows.truncate(LIMIT);
+                    Ok(rows)
+                }
+                _ => Err(Error::Format),
+            },
+        )
+    }
     /// As linhas carregadas para `key`; vazio enquanto carrega ou com erro.
     fn loaded(&self, key: &(Scope, String)) -> Option<&[Value]> {
-        match &self.rows {
+        match &self.value {
             Some(Ok(rows)) if self.key.as_ref() == Some(key) => Some(rows),
             _ => None,
         }
+    }
+}
+/// O detalhe: a GET `/admin/pending-writes/{id}` da proposta selecionada.
+type Detail = Fetch<Value>;
+impl Detail {
+    fn proposal(shared: Arc<Shared>) -> Self {
+        Self::new(shared, |scope, id| Read::Proposal { scope, id }, Ok)
     }
 }
 
@@ -233,6 +262,10 @@ pub struct Management {
     destination: String,
     okf: bool,
     list: List,
+    detail: Detail,
+    /// O campo de ID da proposta tinha o foco no último frame: o ID ainda
+    /// está sendo digitado e não pede o detalhe.
+    editing: bool,
     /// Tela estreita: o detalhe no lugar da lista.
     open: bool,
     /// O frame em que a aba Propostas foi mostrada pela última vez: um
@@ -267,7 +300,9 @@ impl Management {
             message: "Checkpoint solicitado pelo AI Monitor".into(),
             destination: String::new(),
             okf: false,
-            list: List::new(shared),
+            list: List::proposals(shared.clone()),
+            detail: Detail::proposal(shared),
+            editing: false,
             open: false,
             seen: None,
         }
@@ -283,6 +318,7 @@ impl Management {
         self.version.clear();
         self.destination.clear();
         self.list.reset();
+        self.detail.reset();
         self.open = false;
         self.seen = None;
     }
@@ -294,9 +330,11 @@ impl Management {
         self.notice.clear();
         self.expired = false;
     }
-    /// Troca de aba ou de projeto: descarta prévia, resultado e os campos.
+    /// Troca de aba ou de projeto: descarta prévia, resultado, os campos e
+    /// o detalhe da proposta.
     fn discard(&mut self) {
         self.clear();
+        self.detail.reset();
         self.identifier.clear();
         self.reason.clear();
         self.path.clear();
@@ -391,6 +429,7 @@ impl Management {
     }
     pub fn poll(&mut self, shared: &Shared) {
         self.list.poll(shared);
+        self.detail.poll(shared);
         while let Ok(reply) = self.worker.replies.try_recv() {
             self.busy = false;
             if reply.ticket != self.ticket
@@ -653,7 +692,9 @@ impl Management {
                 facts.push(Fact::new("Alvo", p.target).mono());
                 if let Some((effect, reversible)) = p.consequences {
                     facts.push(Fact::new("Efeito", effect));
-                    facts.push(Fact::new("Reversível", reversible));
+                    if let Some(reversible) = reversible {
+                        facts.push(Fact::new("Reversível", reversible));
+                    }
                 }
             }
             None => facts.push(Fact::new("Alvo", action.target())),
@@ -754,17 +795,12 @@ impl Management {
         widgets::split(ui, &[REVIEW_NOTE.into()], |ui| {
             let rect = ui.max_rect();
             let wide = rect.width() >= SIDE_BY_SIDE;
-            let row = self.list.loaded(&key).and_then(|rows| {
-                rows.iter()
-                    .find(|r| r["id"].as_str() == Some(self.identifier.trim()))
-                    .cloned()
-            });
             if !wide && self.open {
-                self.proposal(ui, shared, s, rect, row.as_ref(), true, now);
+                self.proposal(ui, shared, s, rect, true, now);
                 return;
             }
             let list = list_rect(rect, wide);
-            let picked = match (&self.list.rows, self.list.loaded(&key)) {
+            let picked = match (&self.list.value, self.list.loaded(&key)) {
                 (_, Some([])) => {
                     empty_in(
                         ui,
@@ -817,24 +853,35 @@ impl Management {
             }
             if wide {
                 let detail = divide(ui, rect, list);
-                self.proposal(ui, shared, s, detail, row.as_ref(), false, now);
+                self.proposal(ui, shared, s, detail, false, now);
             }
         });
     }
-    /// O detalhe da proposta `row` (a do ID, se está na lista) em `rect`, com
+    /// Pede o detalhe da proposta do campo de ID quando ela muda: um clique
+    /// na linha ou o ID digitado, ao sair do campo (Enter, Tab ou um clique
+    /// fora). Uma GET por seleção; a resposta de uma seleção anterior é
+    /// ignorada (`Fetch`).
+    fn select(&mut self, shared: &Shared, s: &Scope) {
+        let key = (s.clone(), self.identifier.trim().to_owned());
+        if !self.editing && !key.1.is_empty() && self.detail.key.as_ref() != Some(&key) {
+            self.detail.request(shared, key);
+        }
+    }
+    /// O detalhe da proposta do campo de ID em `rect` (a GET da seleção), com
     /// o ID, o motivo da rejeição e as ações. `back` = tela estreita.
-    #[allow(clippy::too_many_arguments)]
     fn proposal(
         &mut self,
         ui: &mut Ui,
         shared: &Shared,
         s: &Scope,
         rect: Rect,
-        row: Option<&Value>,
         back: bool,
         now: DateTime<Utc>,
     ) {
+        self.select(shared, s);
         let mut ask = None;
+        let key = (s.clone(), self.identifier.trim().to_owned());
+        let loaded = (self.detail.key.as_ref() == Some(&key)).then_some(&self.detail.value);
         detail(
             ui,
             rect,
@@ -842,54 +889,49 @@ impl Management {
             back,
             &mut self.open,
             |ui| {
-                match row {
-                    Some(row) => {
-                        let status = row["status"].as_str().map(|s| status_label(s).2);
-                        let when = proposal_age(row, now).map(|a| match a.long() {
-                            Some(ago) => format!("criada {ago}"),
-                            None => format!("criada em {}", a.short()),
-                        });
-                        let meta = match (status, when) {
-                            (Some(status), Some(when)) => format!("Proposta {status} · {when}"),
-                            (Some(status), None) => format!("Proposta {status}"),
-                            (None, Some(when)) => format!("Proposta · {when}"),
-                            (None, None) => "Proposta".into(),
-                        };
-                        widgets::caption(ui, &meta);
-                        ui.add(
-                            Label::new(
-                                RichText::new(row["title"].as_str().unwrap_or("Proposta"))
-                                    .font(Type::Detail.font()),
-                            )
-                            .wrap(),
+                // Numa `Ui` própria: o campo de ID abaixo guarda o id (e o
+                // foco) quando o que está acima dele muda.
+                ui.scope(|ui| match loaded {
+                    _ if key.1.is_empty() => note(
+                        ui,
+                        "Nenhuma proposta selecionada",
+                        "Escolha uma na lista ou informe o ID de uma proposta fora dela.",
+                    ),
+                    None => note(
+                        ui,
+                        "Proposta não carregada",
+                        "Conclua o ID e pressione Enter para buscá-la no servidor.",
+                    ),
+                    Some(None) => note(
+                        ui,
+                        "Carregando proposta…",
+                        "Os detalhes aparecem aqui quando o servidor responder.",
+                    ),
+                    Some(Some(Err(e))) => {
+                        widgets::strip(
+                            ui,
+                            Tone::Bad,
+                            "Não foi possível carregar a proposta.",
+                            e,
+                            None,
                         );
                     }
-                    None => placeholder(
-                        ui,
-                        self.identifier.trim().is_empty(),
-                        (
-                            "Nenhuma proposta selecionada",
-                            "Escolha uma na lista ou informe o ID de uma proposta fora dela.",
-                        ),
-                        (
-                            "Proposta fora da lista",
-                            "Este ID não está na lista do estado escolhido. Ver detalhes busca a proposta no servidor.",
-                        ),
-                    ),
-                }
-                let id = !self.identifier.trim().is_empty();
+                    Some(Some(Ok(v))) => proposal_view(ui, v, now),
+                });
+                let id = !key.1.is_empty();
                 labeled(ui, "ID da proposta", |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = space::S;
                         let width = (ui.available_width() - 110.).clamp(120., FIELD);
-                        widgets::text_field(
+                        self.editing = widgets::text_field(
                             ui,
                             &mut self.identifier,
                             width,
                             "ID exato",
                             false,
                             128,
-                        );
+                        )
+                        .has_focus();
                         if ui
                             .add_enabled(id, Button::secondary("Ver detalhes"))
                             .clicked()
@@ -923,6 +965,8 @@ impl Management {
                 });
             },
         );
+        // O ID digitado vale ao sair do campo, já neste frame.
+        self.select(shared, s);
         let id = self.identifier.trim().to_owned();
         match ask {
             Some(0) => self.begin(
@@ -1209,10 +1253,22 @@ impl Management {
         let mut checkpoints = false;
         cards(ui, |ui| {
             form(ui, "Backup e exportação", |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.radio_value(&mut self.okf, false, "Backup global");
-                    ui.radio_value(&mut self.okf, true, "Exportar projeto (OKF)");
-                });
+                widgets::segmented(
+                    ui,
+                    &mut self.okf,
+                    &[
+                        Segment {
+                            value: false,
+                            label: "Backup global",
+                            count: None,
+                        },
+                        Segment {
+                            value: true,
+                            label: "Exportar projeto (OKF)",
+                            count: None,
+                        },
+                    ],
+                );
                 field_line(
                     ui,
                     "Arquivo de destino (caminho absoluto)",
@@ -1301,6 +1357,74 @@ fn proposal_age(row: &Value, now: DateTime<Utc>) -> Option<crate::sessions_ui::A
         _ => return None,
     };
     age(&at, now)
+}
+
+/// O detalhe da proposta `v`, a resposta de `GET /admin/pending-writes/{id}`
+/// (`summary` com `status`, `title` e `staged_at`, `rationale`,
+/// `evidence_json` = [{page, quote}] e `events`): "Proposta <estado> · criada
+/// por <agente> há N" (12, text2), o título, a justificativa e as evidências
+/// (text2). Um campo ausente some com a sua linha.
+fn proposal_view(ui: &mut Ui, v: &Value, now: DateTime<Utc>) {
+    fn text(value: &Value) -> Option<&str> {
+        value.as_str().filter(|t| !t.trim().is_empty())
+    }
+    let p = theme::palette(ui.visuals());
+    if let Some(meta) = proposal_meta(v, now) {
+        widgets::caption(ui, &meta);
+    }
+    if let Some(title) = text(&v["summary"]["title"]) {
+        ui.add(Label::new(RichText::new(title).font(Type::Detail.font())).wrap());
+    }
+    if let Some(rationale) = text(&v["rationale"]) {
+        body(ui, rationale, p.text);
+    }
+    let evidence: Vec<String> = v["evidence_json"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| match (text(&e["quote"]), text(&e["page"])) {
+            (Some(quote), Some(page)) => Some(format!("“{quote}” — {page}")),
+            (Some(quote), None) => Some(format!("“{quote}”")),
+            (None, Some(page)) => Some(page.to_owned()),
+            (None, None) => None,
+        })
+        .collect();
+    if !evidence.is_empty() {
+        ui.label(
+            RichText::new("Evidências")
+                .size(12.)
+                .family(theme::semibold())
+                .color(p.text2),
+        );
+        for line in &evidence {
+            body(ui, line, p.text2);
+        }
+    }
+}
+/// "Proposta <estado> · criada por <agente> há N", sem as partes ausentes:
+/// o estado do `summary`, o agente do evento `staged` (a criação) e a idade
+/// de `staged_at`. `None` sem nenhuma das três.
+fn proposal_meta(v: &Value, now: DateTime<Utc>) -> Option<String> {
+    let status = v["summary"]["status"].as_str().map(|s| status_label(s).2);
+    let agent = v["events"]
+        .as_array()
+        .and_then(|events| events.iter().find(|e| e["event"] == "staged"))
+        .and_then(|e| e["actor_json"]["agent"].as_str())
+        .filter(|a| !a.trim().is_empty());
+    let when = proposal_age(&v["summary"], now)
+        .map(|a| a.long().unwrap_or_else(|| format!("em {}", a.short())));
+    let created = match (agent, when) {
+        (Some(agent), Some(when)) => Some(format!("criada por {agent} {when}")),
+        (Some(agent), None) => Some(format!("criada por {agent}")),
+        (None, Some(when)) => Some(format!("criada {when}")),
+        (None, None) => None,
+    };
+    match (status, created) {
+        (None, None) => None,
+        (Some(status), None) => Some(format!("Proposta {status}")),
+        (None, Some(created)) => Some(format!("Proposta · {created}")),
+        (Some(status), Some(created)) => Some(format!("Proposta {status} · {created}")),
+    }
 }
 
 /// As ações da aba à direita da linha de ferramentas, montadas da direita
@@ -1640,6 +1764,10 @@ fn detail(
 /// lista (`outside`): (título, legenda).
 fn placeholder(ui: &mut Ui, blank: bool, none: (&str, &str), outside: (&str, &str)) {
     let (title, subtitle) = if blank { none } else { outside };
+    note(ui, title, subtitle);
+}
+/// Um aviso no lugar do detalhe: o título (Seção) e a legenda.
+fn note(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = space::XS;
         ui.label(RichText::new(title).font(Type::Section.font()));
@@ -1717,8 +1845,9 @@ fn field_line(ui: &mut Ui, label: &str, value: &mut String, limit: usize) {
 /// (a página atual inteira e a proposta inteira, não um diff de linhas).
 struct Proposed<'a> {
     target: &'a str,
-    /// (Efeito, Reversível); `None` com uma operação desconhecida.
-    consequences: Option<(&'static str, &'static str)>,
+    /// (Efeito, Reversível); `None` com uma operação desconhecida. Rejeitar
+    /// não tem Reversível.
+    consequences: Option<(&'static str, Option<&'static str>)>,
     lines: Vec<(Mark, String)>,
 }
 fn proposed<'a>(intent: &Intent, result: &'a Value) -> Option<Proposed<'a>> {
@@ -1736,14 +1865,14 @@ fn proposed<'a>(intent: &Intent, result: &'a Value) -> Option<Proposed<'a>> {
         .as_str()
         .unwrap_or_default();
     let consequences = match (intent, operation) {
-        (Intent::Reject { .. }, _) => Some((
-            "Recusa a proposta; a página não muda",
-            "Não: a proposta deixa de estar pendente",
+        (Intent::Reject { .. }, _) => Some(("Recusa a proposta; a página não muda", None)),
+        (_, "create") => Some((
+            "Cria a página",
+            Some("Não há versão anterior para restaurar"),
         )),
-        (_, "create") => Some(("Cria a página", "Não há versão anterior para restaurar")),
         (_, "update") => Some((
             "Grava uma nova versão da página; a atual fica no histórico",
-            "Sim, restaurando a versão anterior em Manutenção e backup",
+            Some("Sim, restaurando a versão anterior em Manutenção e backup"),
         )),
         _ => None,
     };
@@ -2005,11 +2134,71 @@ mod tests {
     /// Espera a resposta da lista (até 3 s).
     fn settle_list(m: &mut Management, shared: &Shared) {
         let until = Instant::now() + Duration::from_secs(3);
-        while m.list.rows.is_none() {
+        while m.list.value.is_none() {
             assert!(Instant::now() < until, "the list never answered");
             std::thread::sleep(Duration::from_millis(2));
             m.poll(shared);
         }
+    }
+    /// Espera a resposta do detalhe (até 3 s).
+    fn settle_detail(m: &mut Management, shared: &Shared) {
+        let until = Instant::now() + Duration::from_secs(3);
+        while m.detail.value.is_none() {
+            assert!(Instant::now() < until, "the detail never answered");
+            std::thread::sleep(Duration::from_millis(2));
+            m.poll(shared);
+        }
+    }
+    /// A resposta de `GET /admin/pending-writes/p-{i}` no formato do
+    /// servidor (o `AutoImproveProposalDetail` do ai-memory): a linha `i` da
+    /// lista, a justificativa, uma evidência e o histórico, com a criação
+    /// (`staged`) por claude-code e a aprovação por outro agente.
+    fn proposal_detail(i: usize) -> Value {
+        let summary = proposal(i);
+        json!({
+            "summary": summary,
+            "rationale": format!("Justificativa da proposta {i}."),
+            "evidence_json": [{"page": "sessions/a.md", "quote": "expirou"}],
+            "body_markdown": "# Corpo",
+            "events": [
+                {"id": 1, "proposal_id": format!("p-{i}"), "event": "staged",
+                 "actor_json": {"agent": "claude-code"}, "author_id": null,
+                 "detail_json": {}, "at": summary["staged_at"]},
+                {"id": 2, "proposal_id": format!("p-{i}"), "event": "approved",
+                 "actor_json": {"agent": "revisor"}, "author_id": null,
+                 "detail_json": {}, "at": summary["staged_at"]},
+            ],
+        })
+    }
+    /// O N de `GET /admin/pending-writes/p-N?…`: o detalhe, não o diff.
+    fn detail_of(path: &str) -> Option<usize> {
+        path.strip_prefix("/admin/pending-writes/p-")?
+            .split_once('?')?
+            .0
+            .parse()
+            .ok()
+    }
+    /// Servidor sintético: a lista são `rows` e o detalhe de qualquer `p-N`
+    /// é `proposal_detail(N)`; o resto, 404.
+    fn catalog(rows: Vec<Value>) -> Mock {
+        Mock::new(move |r| {
+            if r.path.starts_with("/admin/pending-writes?") {
+                Response::json(200, Value::Array(rows.clone()))
+            } else if let Some(i) = detail_of(&r.path) {
+                Response::json(200, proposal_detail(i))
+            } else {
+                Response::json(404, json!({}))
+            }
+        })
+    }
+    /// As GETs do detalhe da proposta `id`.
+    fn read(mock: &Mock, id: &str) -> usize {
+        mock.requests()
+            .iter()
+            .filter(|r| {
+                r.method == "GET" && r.path.starts_with(&format!("/admin/pending-writes/{id}?"))
+            })
+            .count()
     }
     /// O item do segmentado (rótulo com ou sem o contador).
     fn segment(out: &egui::FullOutput, label: &str) -> Node {
@@ -2661,9 +2850,9 @@ mod tests {
         }
         m.poll(&shared);
         assert!(
-            m.list.rows.is_none(),
+            m.list.value.is_none(),
             "the answer for demo is ignored: {:?}",
-            m.list.rows
+            m.list.value
         );
         let out = run(&ctx, vec![], |ui| {
             page(&mut m, ui, &shared, &api, Section::Review);
@@ -2796,7 +2985,7 @@ mod tests {
             page(&mut m, ui, &shared, &api, Section::Review);
         });
         assert!(
-            m.list.rows.is_none(),
+            m.list.value.is_none(),
             "precondition: the list was asked again"
         );
         settle_list(&mut m, &shared);
@@ -2829,8 +3018,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_row_opens_its_detail_and_the_actions_use_its_id() {
-        let rows = vec![proposal(1), proposal(2)];
-        let mock = server(move |_, _| Response::json(200, Value::Array(rows.clone())));
+        let mock = catalog(vec![proposal(1), proposal(2)]);
         let shared = Shared::unstarted(mock.config());
         let mut m = Management::new(shared.clone());
         m.scope = Some(scope());
@@ -2853,6 +3041,11 @@ mod tests {
             "Proposta 2 · decisions/p-2.md · 25 min",
         ));
         click_sized(&ctx, WINDOW, second.center(), &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
         let out = run_sized(&ctx, WINDOW, vec![], &mut add);
         assert_eq!(
             rows_of(&out),
@@ -2861,7 +3054,11 @@ mod tests {
                 ("Proposta 2 · decisions/p-2.md · 25 min".to_owned(), true),
             ]
         );
-        node(&out, Role::Label, "Proposta pendente · criada há 25 min");
+        node(
+            &out,
+            Role::Label,
+            "Proposta pendente · criada por claude-code há 25 min",
+        );
         let title = node(&out, Role::Label, "Proposta 2");
         let list = rect_of(&node(&out, Role::Pane, "Lista de propostas"));
         assert!(
@@ -2881,28 +3078,38 @@ mod tests {
         assert_eq!(m.identifier, "p-2");
         assert!(m.busy, "the preview was asked");
         settle(&mut m, &shared);
+        // A prévia relê a proposta e pede a comparação dela: a 2.
         let asked: Vec<String> = sent(&mock).into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            read(&mock, "p-2"),
+            2,
+            "the selection and the preview: {asked:?}"
+        );
         assert!(
             asked
-                .first()
-                .is_some_and(|p| p.starts_with("/admin/pending-writes/p-2?")),
+                .iter()
+                .any(|p| p.starts_with("/admin/pending-writes/p-2/diff?")),
             "{asked:?}"
         );
-        // Um ID fora da lista: o detalhe diz que está fora.
+        // Um ID fora da lista também é lido e mostrado.
         m.clear();
         m.identifier = "p-9".into();
+        run_sized(&ctx, WINDOW, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_detail(&mut m, &shared);
         let out = run_sized(&ctx, WINDOW, vec![], |ui| {
             page(&mut m, ui, &shared, &api, Section::Review);
         });
-        node(&out, Role::Label, "Proposta fora da lista");
+        node(&out, Role::Label, "Proposta 9");
+        assert_eq!(read(&mock, "p-9"), 1);
         assert!(rows_of(&out).iter().all(|(_, picked)| !picked));
     }
 
     #[test]
     fn narrow_shows_the_list_or_the_detail_with_back() {
         const NARROW: [f32; 2] = [720., 600.];
-        let rows = vec![proposal(1), proposal(2)];
-        let mock = server(move |_, _| Response::json(200, Value::Array(rows.clone())));
+        let mock = catalog(vec![proposal(1), proposal(2)]);
         let shared = Shared::unstarted(mock.config());
         let mut m = Management::new(shared.clone());
         m.scope = Some(scope());
@@ -2929,6 +3136,13 @@ mod tests {
             "Proposta 1 · decisions/p-1.md · 25 min",
         ));
         click_sized(&ctx, NARROW, row.center(), &mut add);
+        // O detalhe abre no frame seguinte e pede a proposta.
+        run_sized(&ctx, NARROW, vec![], &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
         let out = run_sized(&ctx, NARROW, vec![], &mut add);
         assert_eq!(panes(&out), (0, 1), "the detail alone");
         node(&out, Role::Label, "Proposta 1");
@@ -2981,6 +3195,665 @@ mod tests {
         assert_eq!(panes(&out), (1, 1));
         assert!(nodes(&out, Role::Button, "← Voltar").is_empty());
         assert!(nodes(&out, Role::Button, "Informar ID…").is_empty());
+    }
+
+    /// Uma tecla apertada, sem modificadores.
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }
+    }
+    /// O texto `text` pintado em `area`: (cor, tamanho da fonte).
+    fn painted(out: &egui::FullOutput, area: Rect, text: &str) -> Vec<(egui::Color32, f32)> {
+        crate::widgets::tests::shapes(out)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t)
+                    if t.galley.text() == text
+                        && area.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) =>
+                {
+                    let format = &t.galley.job.sections.first()?.format;
+                    let color = t
+                        .override_text_color
+                        .or(Some(format.color).filter(|&c| c != egui::Color32::PLACEHOLDER))
+                        .unwrap_or(t.fallback_color);
+                    Some((color, format.font_id.size))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    /// Espera até `done` (3 s), sondando o painel.
+    fn wait(m: &mut Management, shared: &Shared, what: &str, done: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(3);
+        while !done() {
+            assert!(Instant::now() < until, "{what}");
+            std::thread::sleep(Duration::from_millis(2));
+            m.poll(shared);
+        }
+    }
+
+    #[test]
+    fn each_selection_reads_its_detail_once_and_shows_it() {
+        for (theme, p) in crate::widgets::tests::THEMES {
+            let mock = catalog(vec![proposal(1), proposal(2)]);
+            let shared = Shared::unstarted(mock.config());
+            let mut m = Management::new(shared.clone());
+            m.scope = Some(scope());
+            let api = projects(&[scope()]);
+            let ctx = context(theme);
+            run(&ctx, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            settle_list(&mut m, &shared);
+            let reads = |mock: &Mock| {
+                mock.requests()
+                    .iter()
+                    .filter(|r| detail_of(&r.path).is_some())
+                    .count()
+            };
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            node(&out, Role::Label, "Nenhuma proposta selecionada");
+            let row = rect_of(&node(
+                &out,
+                Role::Button,
+                "Proposta 2 · decisions/p-2.md · 25 min",
+            ))
+            .center();
+            for _ in 0..3 {
+                run_sized(&ctx, WINDOW, vec![], &mut add);
+            }
+            assert_eq!(reads(&mock), 0, "{theme:?}: nothing selected, nothing read");
+            click_sized(&ctx, WINDOW, row, &mut add);
+            drop(add);
+            settle_detail(&mut m, &shared);
+            // Mais frames e outro clique na mesma linha: a mesma seleção,
+            // nenhum pedido novo (a senha conta os pedidos).
+            let asked = m.detail.ticket;
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            for _ in 0..5 {
+                run_sized(&ctx, WINDOW, vec![], &mut add);
+            }
+            click_sized(&ctx, WINDOW, row, &mut add);
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            drop(add);
+            assert_eq!(m.detail.ticket, asked, "{theme:?}: the same selection");
+            assert_eq!(
+                (read(&mock, "p-1"), read(&mock, "p-2")),
+                (0, 1),
+                "{theme:?}: one GET for the selection"
+            );
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            // A linha de estado (12, text2), o título (18), a justificativa
+            // (text) e a evidência (text2).
+            let meta = "Proposta pendente · criada por claude-code há 25 min";
+            let evidence = "“expirou” — sessions/a.md";
+            let detail = rect_of(&node(&out, Role::Pane, "Proposta selecionada"));
+            for (text, want) in [
+                (meta, (p.text2, 12.)),
+                ("Proposta 2", (p.text, 18.)),
+                ("Justificativa da proposta 2.", (p.text, 13.)),
+                ("Evidências", (p.text2, 12.)),
+                (evidence, (p.text2, 13.)),
+            ] {
+                node(&out, Role::Label, text);
+                assert_eq!(painted(&out, detail, text), [want], "{theme:?}: {text}");
+            }
+            assert!(
+                nodes(&out, Role::Label, "Proposta não carregada").is_empty(),
+                "{theme:?}"
+            );
+            // O ID digitado: nada é lido enquanto se digita; Enter lê uma vez.
+            let field = rect_of(&node(&out, Role::TextInput, "p-2")).center();
+            click_sized(&ctx, WINDOW, field, &mut add);
+            run_sized(
+                &ctx,
+                WINDOW,
+                vec![
+                    key(egui::Key::End),
+                    key(egui::Key::Backspace),
+                    key(egui::Key::Backspace),
+                    key(egui::Key::Backspace),
+                ],
+                &mut add,
+            );
+            for typed in ["p", "-", "1"] {
+                run_sized(
+                    &ctx,
+                    WINDOW,
+                    vec![egui::Event::Text(typed.into())],
+                    &mut add,
+                );
+            }
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            assert_eq!(
+                nodes(&out, Role::TextInput, "p-1").len(),
+                1,
+                "{theme:?}: precondition, typed"
+            );
+            node(&out, Role::Label, "Proposta não carregada");
+            assert!(
+                nodes(&out, Role::Label, "Proposta 2").is_empty(),
+                "{theme:?}"
+            );
+            drop(add);
+            assert_eq!(
+                (m.detail.ticket, reads(&mock)),
+                (asked, 1),
+                "{theme:?}: nothing asked while typing"
+            );
+            run_sized(&ctx, WINDOW, vec![key(egui::Key::Enter)], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            assert_eq!(m.detail.ticket, asked + 1, "{theme:?}: Enter asks once");
+            settle_detail(&mut m, &shared);
+            let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            node(&out, Role::Label, "Proposta 1");
+            assert_eq!(
+                (read(&mock, "p-1"), read(&mock, "p-2"), reads(&mock)),
+                (1, 1, 2),
+                "{theme:?}: one GET per selection"
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_detail_for_the_previous_selection_is_ignored() {
+        let (release_1, gate_1) = mpsc::channel::<()>();
+        let (release_2, gate_2) = mpsc::channel::<()>();
+        let gates = Mutex::new((gate_1, gate_2));
+        let mock = Mock::new(move |r| {
+            if r.path.starts_with("/admin/pending-writes?") {
+                return Response::json(200, json!([proposal(1), proposal(2)]));
+            }
+            match detail_of(&r.path) {
+                Some(i) => {
+                    let gates = gates.lock().unwrap();
+                    let gate = if i == 1 { &gates.0 } else { &gates.1 };
+                    let _ = gate.recv_timeout(Duration::from_secs(5));
+                    Response::json(200, proposal_detail(i))
+                }
+                None => Response::json(404, json!({})),
+            }
+        });
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Dark);
+        run(&ctx, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_list(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        let rows: Vec<egui::Pos2> = [1, 2]
+            .map(|i| {
+                rect_of(&node(
+                    &out,
+                    Role::Button,
+                    &format!("Proposta {i} · decisions/p-{i}.md · 25 min"),
+                ))
+                .center()
+            })
+            .into();
+        click_sized(&ctx, WINDOW, rows[0], &mut add);
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        node(&out, Role::Label, "Carregando proposta…");
+        // A 1 está no servidor; o usuário escolhe a 2.
+        click_sized(&ctx, WINDOW, rows[1], &mut add);
+        drop(add);
+        release_1.send(()).unwrap();
+        // O servidor só atende a 2 depois de responder a 1: a resposta da 1
+        // já está na fila do painel.
+        wait(&mut m, &shared, "p-2 was never asked", || {
+            read(&mock, "p-2") == 1
+        });
+        m.poll(&shared);
+        assert!(
+            m.detail.value.is_none(),
+            "the answer for p-1 is ignored: {:?}",
+            m.detail.value
+        );
+        let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        node(&out, Role::Label, "Carregando proposta…");
+        assert!(nodes(&out, Role::Label, "Proposta 1").is_empty());
+        release_2.send(()).unwrap();
+        settle_detail(&mut m, &shared);
+        let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        node(&out, Role::Label, "Proposta 2");
+        assert!(nodes(&out, Role::Label, "Proposta 1").is_empty());
+        assert_eq!((read(&mock, "p-1"), read(&mock, "p-2")), (1, 1));
+    }
+
+    #[test]
+    fn a_detail_error_shows_a_strip_and_never_holds_the_panel() {
+        for (status, body, message) in [
+            (
+                404,
+                json!({}),
+                "Recurso ausente, desabilitado ou incompatível com esta versão.",
+            ),
+            (500, json!({}), "Servidor respondeu HTTP 500."),
+            // A resposta de outra proposta.
+            (
+                200,
+                json!({"summary": {"id": "p-7", "title": "Outra"}}),
+                "Formato de resposta incompatível.",
+            ),
+        ] {
+            for (theme, p) in crate::widgets::tests::THEMES {
+                let body = body.clone();
+                let mock = Mock::new(move |r| {
+                    if r.path.starts_with("/admin/pending-writes?") {
+                        Response::json(200, json!([proposal(1)]))
+                    } else if detail_of(&r.path).is_some() {
+                        Response::json(status, body.clone())
+                    } else {
+                        Response::json(404, json!({}))
+                    }
+                });
+                let shared = Shared::unstarted(mock.config());
+                let mut m = Management::new(shared.clone());
+                m.scope = Some(scope());
+                let api = projects(&[scope()]);
+                let ctx = context(theme);
+                run(&ctx, vec![], |ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                });
+                settle_list(&mut m, &shared);
+                let mut add = |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                };
+                let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+                let row = rect_of(&node(
+                    &out,
+                    Role::Button,
+                    "Proposta 1 · decisions/p-1.md · 25 min",
+                ));
+                click_sized(&ctx, WINDOW, row.center(), &mut add);
+                drop(add);
+                settle_detail(&mut m, &shared);
+                let asked = m.detail.ticket;
+                let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                });
+                let case = format!("{status} {theme:?}");
+                assert_eq!(m.detail.ticket, asked, "{case}: no retry by itself");
+                let strip = rect_of(&node(
+                    &out,
+                    Role::Label,
+                    &format!("Não foi possível carregar a proposta. {message}"),
+                ));
+                assert!(
+                    rects(&out).iter().any(
+                        |r| r.fill == widgets::tone(p.bad, 0.08) && r.rect.contains_rect(strip)
+                    ),
+                    "{case}: a Bad strip"
+                );
+                let detail = rect_of(&node(&out, Role::Pane, "Proposta selecionada"));
+                assert!(detail.contains_rect(strip), "{case}: in the detail");
+                assert!(nodes(&out, Role::Label, "Outra").is_empty(), "{case}");
+                assert!(!m.holds(), "{case}: the detail error is not the panel's");
+                assert!(m.error.is_none() && m.result.is_none(), "{case}");
+                assert_eq!(rows_of(&out).len(), 1, "{case}: the list stays");
+                assert!(
+                    !node(&out, Role::Button, "Aprovar…").is_disabled(),
+                    "{case}"
+                );
+                assert_eq!(read(&mock, "p-1"), 1, "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_meta_line_drops_what_the_detail_lacks() {
+        let now = DateTime::parse_from_rfc3339("2026-03-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let micros = |at: &str| DateTime::parse_from_rfc3339(at).unwrap().timestamp_micros();
+        let staged = |agent: Value| json!({"event": "staged", "actor_json": {"agent": agent}});
+        let detail = |summary: Value, events: Value| json!({"summary": summary, "events": events});
+        let pending = |at: Value| json!({"id": "p-1", "status": "pending", "staged_at": at});
+        let ago = json!(micros("2026-03-15T11:35:00Z"));
+        let by = json!([staged(json!("claude-code"))]);
+        let cases: Vec<(&str, Value, Option<&str>)> = vec![
+            (
+                "everything",
+                detail(pending(ago.clone()), by.clone()),
+                Some("Proposta pendente · criada por claude-code há 25 min"),
+            ),
+            (
+                "no status",
+                detail(json!({"staged_at": ago.clone()}), by.clone()),
+                Some("Proposta · criada por claude-code há 25 min"),
+            ),
+            (
+                "unknown status",
+                detail(
+                    json!({"status": "weird", "staged_at": ago.clone()}),
+                    by.clone(),
+                ),
+                Some("Proposta weird · criada por claude-code há 25 min"),
+            ),
+            (
+                "no events",
+                detail(pending(ago.clone()), Value::Null),
+                Some("Proposta pendente · criada há 25 min"),
+            ),
+            (
+                "no staged event: the approver is not the author",
+                detail(
+                    pending(ago.clone()),
+                    json!([{"event": "approved", "actor_json": {"agent": "revisor"}}]),
+                ),
+                Some("Proposta pendente · criada há 25 min"),
+            ),
+            (
+                "staged after another event",
+                detail(
+                    pending(ago.clone()),
+                    json!([
+                        {"event": "approved", "actor_json": {"agent": "revisor"}},
+                        staged(json!("codex")),
+                    ]),
+                ),
+                Some("Proposta pendente · criada por codex há 25 min"),
+            ),
+            (
+                "no agent",
+                detail(
+                    pending(ago.clone()),
+                    json!([{"event": "staged", "actor_json": {}}]),
+                ),
+                Some("Proposta pendente · criada há 25 min"),
+            ),
+            (
+                "blank agent",
+                detail(pending(ago.clone()), json!([staged(json!(" "))])),
+                Some("Proposta pendente · criada há 25 min"),
+            ),
+            (
+                "agent not a string",
+                detail(pending(ago.clone()), json!([staged(json!(7))])),
+                Some("Proposta pendente · criada há 25 min"),
+            ),
+            (
+                "no staged_at",
+                detail(json!({"status": "pending"}), by.clone()),
+                Some("Proposta pendente · criada por claude-code"),
+            ),
+            (
+                "unreadable staged_at",
+                detail(pending(json!("ontem")), by.clone()),
+                Some("Proposta pendente · criada por claude-code"),
+            ),
+            (
+                "only the status",
+                detail(json!({"status": "rejected"}), Value::Null),
+                Some("Proposta rejeitada"),
+            ),
+            ("nothing", json!({}), None),
+            ("not an object", json!("p-1"), None),
+            ("null", Value::Null, None),
+        ];
+        for (case, v, want) in cases {
+            assert_eq!(proposal_meta(&v, now).as_deref(), want, "{case}");
+        }
+        // A idade: `staged_at` em microssegundos, ou RFC 3339.
+        for (at, want) in [
+            (json!(micros("2026-03-15T11:59:30Z")), "agora"),
+            (json!(micros("2026-03-15T11:35:00Z")), "há 25 min"),
+            (json!(micros("2026-03-15T09:00:00Z")), "há 3 h"),
+            (json!(micros("2026-01-02T12:00:00Z")), "em 02/01"),
+            (json!(micros("2025-01-02T12:00:00Z")), "em 02/01/25"),
+            (json!("2026-03-15T11:35:00Z"), "há 25 min"),
+        ] {
+            assert_eq!(
+                proposal_meta(&detail(pending(at.clone()), by.clone()), now).as_deref(),
+                Some(format!("Proposta pendente · criada por claude-code {want}").as_str()),
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_detail_without_fields_shows_only_what_it_has() {
+        let (_mock, shared, mut m) = quiet();
+        m.scope = Some(scope());
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Light);
+        let full = proposal_detail(1);
+        // (resposta, o que aparece, o que não)
+        let cases: [(Value, Vec<&str>, Vec<&str>); 4] = [
+            (
+                json!({"summary": {"id": "p-1"}}),
+                vec![],
+                vec![
+                    "Proposta",
+                    "Proposta 1",
+                    "Justificativa da proposta 1.",
+                    "Evidências",
+                ],
+            ),
+            (
+                json!({"summary": {"id": "p-1", "title": " "}, "rationale": "", "evidence_json": []}),
+                vec![],
+                vec!["Proposta", " ", "", "Evidências"],
+            ),
+            (
+                json!({
+                    "summary": {"id": "p-1", "title": "Só título"},
+                    "evidence_json": [
+                        {"quote": "sem página"},
+                        {"page": "sem-citação.md"},
+                        {},
+                        "texto solto",
+                    ],
+                }),
+                vec!["Só título", "Evidências", "“sem página”", "sem-citação.md"],
+                vec!["“texto solto”", "texto solto"],
+            ),
+            (
+                full,
+                vec![
+                    "Proposta 1",
+                    "Justificativa da proposta 1.",
+                    "Evidências",
+                    "“expirou” — sessions/a.md",
+                ],
+                vec![],
+            ),
+        ];
+        for (n, (detail, shown, absent)) in cases.into_iter().enumerate() {
+            m.identifier = "p-1".into();
+            m.detail.key = Some((scope(), "p-1".into()));
+            m.detail.value = Some(Ok(detail));
+            let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            for text in shown {
+                node(&out, Role::Label, text);
+            }
+            for text in absent {
+                assert!(
+                    nodes(&out, Role::Label, text).is_empty(),
+                    "case {n}: {text}"
+                );
+            }
+            // Sem nada a mostrar, nenhum aviso de estado no lugar.
+            for state in [
+                "Carregando proposta…",
+                "Proposta não carregada",
+                "Nenhuma proposta selecionada",
+            ] {
+                assert!(
+                    nodes(&out, Role::Label, state).is_empty(),
+                    "case {n}: {state}"
+                );
+            }
+            node(&out, Role::TextInput, "p-1");
+        }
+    }
+
+    #[test]
+    fn the_detail_and_the_list_the_receipt_and_the_result_never_clear_each_other() {
+        let mock = catalog(vec![proposal(1), proposal(2)]);
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Dark);
+        let key = (scope(), "pending".to_owned());
+        run(&ctx, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_list(&mut m, &shared);
+        // Um resultado na tela: a seleção não o apaga, nem a lista.
+        m.result = Some(json!({"ok": true}));
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        let row = rect_of(&node(
+            &out,
+            Role::Button,
+            "Proposta 2 · decisions/p-2.md · 25 min",
+        ));
+        click_sized(&ctx, WINDOW, row.center(), &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        let shown = |m: &Management| {
+            m.detail
+                .value
+                .as_ref()
+                .and_then(|v| v.as_ref().ok())
+                .map(|v| v["summary"]["id"].clone())
+        };
+        assert_eq!(shown(&m), Some(json!("p-2")));
+        assert_eq!(m.result, Some(json!({"ok": true})), "the result stays");
+        assert_eq!(m.list.loaded(&key).map(<[Value]>::len), Some(2));
+        assert_eq!(listed(&mock, "demo"), 1, "the list was not asked again");
+        // Limpar o resultado não apaga o detalhe.
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        node(&out, Role::Label, "Proposta 2");
+        click_sized(
+            &ctx,
+            WINDOW,
+            rect_of(&node(&out, Role::Button, "Limpar")).center(),
+            &mut add,
+        );
+        drop(add);
+        assert!(m.result.is_none(), "precondition: cleared");
+        assert_eq!(shown(&m), Some(json!("p-2")), "Limpar keeps the detail");
+        // Atualizar pede a lista de novo e não apaga o detalhe.
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        click_sized(
+            &ctx,
+            WINDOW,
+            rect_of(&node(&out, Role::Button, "Atualizar")).center(),
+            &mut add,
+        );
+        drop(add);
+        assert!(m.list.value.is_none(), "precondition: the list was asked");
+        assert_eq!(shown(&m), Some(json!("p-2")), "the list keeps the detail");
+        settle_list(&mut m, &shared);
+        assert_eq!(shown(&m), Some(json!("p-2")));
+        // Uma resposta do detalhe com a folha aberta: a folha, o resultado e
+        // o texto digitado ficam.
+        m.receipt = Some(receipt());
+        m.result = Some(json!({"preview": true}));
+        m.confirm = "fixture / de".into();
+        m.detail.request(&shared, (scope(), "p-1".into()));
+        settle_detail(&mut m, &shared);
+        assert_eq!(shown(&m), Some(json!("p-1")), "precondition: answered");
+        assert!(m.receipt.is_some(), "the detail kept the sheet");
+        assert_eq!(m.result, Some(json!({"preview": true})));
+        assert_eq!(m.confirm, "fixture / de");
+        assert_eq!(m.list.loaded(&key).map(<[Value]>::len), Some(2));
+        // Cancelar a folha não apaga o detalhe.
+        m.clear();
+        assert_eq!(shown(&m), Some(json!("p-1")), "the sheet keeps the detail");
+        assert_eq!((read(&mock, "p-1"), read(&mock, "p-2")), (1, 1));
+    }
+
+    #[test]
+    fn another_project_drops_the_detail_and_a_new_selection_reads_again() {
+        let mock = catalog(vec![proposal(1), proposal(2)]);
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        let api = projects(&[scope(), other()]);
+        let ctx = context(egui::Theme::Light);
+        run(&ctx, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_list(&mut m, &shared);
+        let row = "Proposta 2 · decisions/p-2.md · 25 min";
+        for (round, (from, to)) in [
+            ("fixture / demo", "fixture / other"),
+            ("fixture / other", "fixture / demo"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            click_sized(
+                &ctx,
+                WINDOW,
+                rect_of(&node(&out, Role::Button, row)).center(),
+                &mut add,
+            );
+            drop(add);
+            settle_detail(&mut m, &shared);
+            assert_eq!(
+                read(&mock, "p-2"),
+                round + 1,
+                "{round}: one GET per selection"
+            );
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            choose(&ctx, WINDOW, &mut add, from, to);
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            drop(add);
+            assert!(
+                m.detail.key.is_none() && m.detail.value.is_none(),
+                "{round}"
+            );
+            node(&out, Role::Label, "Nenhuma proposta selecionada");
+            assert!(nodes(&out, Role::Label, "Proposta 2").is_empty(), "{round}");
+            settle_list(&mut m, &shared);
+        }
+        assert_eq!(read(&mock, "p-2"), 2);
     }
 
     #[test]
@@ -3154,6 +4027,43 @@ mod tests {
     }
 
     #[test]
+    fn the_backup_mode_is_a_segmented_that_speaks_and_switches_its_choice() {
+        for (theme, _) in crate::widgets::tests::THEMES {
+            let (_mock, shared, mut m) = quiet();
+            m.scope = Some(scope());
+            m.tab = 3;
+            let api = projects(&[scope()]);
+            let ctx = context(theme);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Maintenance);
+            };
+            let modes = ["Backup global", "Exportar projeto (OKF)"];
+            let state =
+                |out: &egui::FullOutput| modes.map(|mode| node(out, Role::Button, mode).toggled());
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let on = Some(Toggled::True);
+            let off = Some(Toggled::False);
+            assert_eq!(state(&out), [on, off], "{theme:?}");
+            for mode in modes {
+                assert!(
+                    nodes(&out, Role::RadioButton, mode).is_empty(),
+                    "{theme:?}: {mode} is not an egui radio"
+                );
+            }
+            let at = modes.map(|mode| rect_of(&node(&out, Role::Button, mode)).center());
+            click_sized(&ctx, WINDOW, at[1], &mut add);
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            assert_eq!(state(&out), [off, on], "{theme:?}: OKF");
+            click_sized(&ctx, WINDOW, at[0], &mut add);
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            assert_eq!(state(&out), [on, off], "{theme:?}: back to the backup");
+            click_sized(&ctx, WINDOW, at[1], &mut add);
+            drop(add);
+            assert!(m.okf, "{theme:?}: the mode follows the choice");
+        }
+    }
+
+    #[test]
     fn maintenance_forms_are_cards_with_26_px_fields_and_the_app_checkbox() {
         for (theme, p) in crate::widgets::tests::THEMES {
             let (_mock, shared, mut m) = quiet();
@@ -3291,6 +4201,9 @@ mod tests {
             page(&mut m, ui, &shared, &api, Section::Review);
         });
         settle_list(&mut m, &shared);
+        // O ID no campo é a seleção: o detalhe dele chega antes de medir os
+        // botões, que descem quando ele aparece.
+        settle_detail(&mut m, &shared);
         // Ver detalhes: a leitura vai ao cartão de resultado.
         let mut add = |ui: &mut Ui| {
             page(&mut m, ui, &shared, &api, Section::Review);
@@ -3393,7 +4306,9 @@ mod tests {
         ui.identifier = "old-id".into();
         ui.result = Some(json!({"private":"fixture"}));
         ui.list.key = Some((scope(), "pending".into()));
-        ui.list.rows = Some(Ok(vec![proposal(1)]));
+        ui.list.value = Some(Ok(vec![proposal(1)]));
+        ui.detail.key = Some((scope(), "old-id".into()));
+        ui.detail.value = Some(Ok(proposal_detail(1)));
         ui.open = true;
         ui.reset();
         assert!(ui.receipt.is_none());
@@ -3402,8 +4317,12 @@ mod tests {
         assert!(ui.identifier.is_empty());
         assert!(ui.result.is_none());
         assert!(
-            ui.list.key.is_none() && ui.list.rows.is_none(),
+            ui.list.key.is_none() && ui.list.value.is_none(),
             "the list of the old connection goes too"
+        );
+        assert!(
+            ui.detail.key.is_none() && ui.detail.value.is_none(),
+            "and the detail"
         );
         assert!(!ui.open);
     }
@@ -3613,7 +4532,6 @@ mod tests {
                 vec![
                     "Alvo: decisions/cache.md",
                     "Efeito: Recusa a proposta; a página não muda",
-                    "Reversível: Não: a proposta deixa de estar pendente",
                     "Motivo: duplicada",
                     "- TTL: 5 min",
                     "+ TTL: 15 min",
@@ -3662,6 +4580,27 @@ mod tests {
                         "case {n} {theme:?}: {text}"
                     );
                 }
+                // Reversível só onde a tabela o mostra (Aprovar): Rejeitar
+                // não tem a linha.
+                let reversible = out
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .filter(|(_, l)| {
+                        l.role() == Role::Label
+                            && l.label()
+                                .or(l.value())
+                                .is_some_and(|t| t.starts_with("Reversível"))
+                    })
+                    .count();
+                assert_eq!(
+                    reversible,
+                    usize::from(shown.iter().any(|t| t.starts_with("Reversível: "))),
+                    "case {n} {theme:?}: Reversível"
+                );
                 // − em bad sobre bad_bg, + em acc sobre add_bg, iguais em text2.
                 let painted = texts(&out);
                 for line in &shown {
@@ -3839,7 +4778,16 @@ mod tests {
             assert_eq!(m.identifier, "draft-id", "{way}: the form keeps its fields");
             assert!(!m.holds(), "{way}");
             assert!(nodes(&out, Role::Button, "Expirar").is_empty(), "{way}");
-            assert!(sent(&mock).is_empty(), "{way}: nothing was sent");
+            // Nada além da leitura do detalhe do ID no campo.
+            let asked: Vec<(String, String)> = sent(&mock)
+                .into_iter()
+                .map(|r| (r.method, r.path))
+                .collect();
+            assert!(
+                asked.iter().all(|(method, path)| method == "GET"
+                    && path.starts_with("/admin/pending-writes/draft-id?")),
+                "{way}: nothing was sent, {asked:?}"
+            );
         }
     }
 

@@ -221,25 +221,22 @@ impl Panel {
             ui,
             |ui| {
                 ui.add_enabled_ui(!self.busy, |ui| {
-                    let tabs = ui.scope(|ui| {
-                        widgets::segmented(
-                            ui,
-                            &mut self.local_tab,
-                            &[
-                                Segment {
-                                    value: false,
-                                    label: "Servidor · administração",
-                                    count: None,
-                                },
-                                Segment {
-                                    value: true,
-                                    label: &local,
-                                    count: None,
-                                },
-                            ],
-                        )
-                    });
-                    widgets::edge(ui, &tabs.response, 7.);
+                    widgets::segmented(
+                        ui,
+                        &mut self.local_tab,
+                        &[
+                            Segment {
+                                value: false,
+                                label: "Servidor · administração",
+                                count: None,
+                            },
+                            Segment {
+                                value: true,
+                                label: &local,
+                                count: None,
+                            },
+                        ],
+                    );
                 });
             },
             |_| {},
@@ -327,7 +324,7 @@ impl Panel {
                     ui.label(RichText::new("Resultado").font(Type::Section.font()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let clear = Button::secondary("Limpar resultado privado").on_surf();
-                        if widgets::edged(ui, true, clear, 6.).clicked() {
+                        if ui.add(clear).clicked() {
                             self.clear();
                         }
                         widgets::switch(
@@ -415,9 +412,7 @@ impl Panel {
                 } else {
                     // Opcional como no Settings.dc.html: a dica do campo.
                     let hint = if field.optional { "Opcional" } else { "" };
-                    let field = widgets::text_field(ui, value, width, hint, false, 1024)
-                        .labelled_by(label.id);
-                    widgets::edge(ui, &field, 5.);
+                    widgets::text_field(ui, value, width, hint, false, 1024).labelled_by(label.id);
                 }
             });
         }
@@ -456,8 +451,7 @@ impl Panel {
             count: None,
         });
         widgets::row(ui, |ui| {
-            let frame = ui.scope(|ui| widgets::segmented(ui, &mut self.local.backend, &backends));
-            widgets::edge(ui, &frame.response, 7.);
+            widgets::segmented(ui, &mut self.local.backend, &backends);
             let label = self.local.label();
             let (backend, kind) = (self.local.backend, &mut self.local.kind);
             widgets::select(ui, "Operação", label, 240., |ui| {
@@ -485,9 +479,7 @@ impl Panel {
                 ui.spacing_mut().item_spacing.y = widgets::space::XS;
                 let label = ui.label(RichText::new(label).font(Type::Body.font()));
                 let value = self.local.values.entry(key.into()).or_default();
-                let field =
-                    widgets::text_field(ui, value, width, "", false, 4096).labelled_by(label.id);
-                widgets::edge(ui, &field, 5.);
+                widgets::text_field(ui, value, width, "", false, 4096).labelled_by(label.id);
             });
         }
         let read = self.local.read();
@@ -523,7 +515,7 @@ fn warning(ui: &mut egui::Ui, read: bool, text: &str) {
     }
 }
 
-/// Um campo de opções fixas: um segmentado com a borda de `widgets::edge`.
+/// Um campo de opções fixas: um segmentado.
 fn choice(ui: &mut egui::Ui, value: &mut String, choices: &'static [&'static str]) {
     let mut at = choices.iter().position(|c| *c == value.as_str());
     let items: Vec<Segment<'_, Option<usize>>> = choices
@@ -535,9 +527,7 @@ fn choice(ui: &mut egui::Ui, value: &mut String, choices: &'static [&'static str
             count: None,
         })
         .collect();
-    let frame = ui.scope(|ui| widgets::segmented(ui, &mut at, &items));
-    widgets::edge(ui, &frame.response, 7.);
-    if frame.inner
+    if widgets::segmented(ui, &mut at, &items)
         && let Some(i) = at
     {
         *value = choices[i].into();
@@ -545,7 +535,7 @@ fn choice(ui: &mut egui::Ui, value: &mut String, choices: &'static [&'static str
 }
 
 /// O campo da mensagem: o `text_field` em 5 linhas (fundo field, raio 5,
-/// texto 12, borda acc com foco), com a borda de `widgets::edge`.
+/// texto 12, borda line, acc com foco).
 fn text_area(ui: &mut egui::Ui, text: &mut String, width: f32, limit: usize) -> egui::Response {
     let p = theme::palette(ui.visuals());
     let background = ui.painter().add(egui::Shape::Noop);
@@ -569,7 +559,6 @@ fn text_area(ui: &mut egui::Ui, text: &mut String, width: f32, limit: usize) -> 
             egui::StrokeKind::Inside,
         ),
     );
-    widgets::edge(ui, &response, 5.);
     response
 }
 
@@ -1436,8 +1425,8 @@ mod tests {
     }
 
     #[test]
-    fn every_control_has_a_3_to_1_edge_and_4_5_to_1_text_in_both_themes() {
-        use crate::widgets::edge_tests::audit;
+    fn every_control_has_the_line_border_and_4_5_to_1_text_in_both_themes() {
+        use crate::widgets::tests::audit;
         for (theme, p) in THEMES {
             for local_tab in [false, true] {
                 let (_mock, shared, mut panel) = idle();

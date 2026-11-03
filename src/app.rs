@@ -559,7 +559,8 @@ impl MonitorApp {
     }
 
     /// Avisos globais, no topo de todas as páginas: Docker e ai-memory fora
-    /// (Bad; o do ai-memory leva a Ajustes) e dados parciais da API (Warn).
+    /// (Bad; o do ai-memory abre Ajustes na aba Conexão) e dados parciais da
+    /// API (Warn).
     fn notices(&mut self, ui: &mut egui::Ui) {
         use crate::widgets::{Tone, strip};
         if let Some(e) = &self.resources.docker_error {
@@ -575,6 +576,7 @@ impl MonitorApp {
             )
             .is_some_and(|r| r.clicked())
         {
+            self.settings.tab = SettingsTab::Connection;
             self.open_settings();
         }
         if !self.api.errors.is_empty() {
@@ -824,7 +826,7 @@ impl MonitorApp {
     fn connection(&mut self, ui: &mut egui::Ui) {
         use crate::{
             platform::SECRET_STORE,
-            widgets::{Button, caption, checkbox, text_field},
+            widgets::{Button, caption, checkbox, mono_field, text_field},
         };
         let p = theme::palette(ui.visuals());
         let busy = self.management.busy || self.authentication.busy || self.operations.busy;
@@ -1202,32 +1204,6 @@ pub(crate) fn setting_row<R>(
 pub(crate) fn name(ui: &egui::Ui, control: &egui::Response, label: &str) {
     ui.ctx()
         .accesskit_node_builder(control.id, |node| node.set_label(label));
-}
-/// `widgets::text_field` em mono (endereço e caminho), sem dica nem limite.
-fn mono_field(ui: &mut egui::Ui, text: &mut String, width: f32) -> egui::Response {
-    let p = theme::palette(ui.visuals());
-    let background = ui.painter().add(egui::Shape::Noop);
-    let response = ui.add(
-        egui::TextEdit::singleline(text)
-            .frame(false)
-            .font(egui::FontId::monospace(12.))
-            .margin(egui::Margin::symmetric(8, 0))
-            .min_size(Vec2::new(width, 26.))
-            .desired_width(width - 16.)
-            .vertical_align(egui::Align::Center),
-    );
-    let border = if response.has_focus() { p.acc } else { p.line };
-    ui.painter().set(
-        background,
-        egui::epaint::RectShape::new(
-            response.rect,
-            5.,
-            p.field,
-            Stroke::new(1.0_f32, border),
-            egui::StrokeKind::Inside,
-        ),
-    );
-    response
 }
 /// Um intervalo em segundos: campo de 56 × 24 (arrasta ou digita; o valor
 /// fica em `range`), a unidade e os limites em text2.
@@ -3882,6 +3858,118 @@ mod tests {
         assert!(app.settings.open, "Abrir Ajustes opens the window");
         assert_eq!(settings_windows(&out), 1);
         assert_eq!(app.page, Page::Sessions);
+    }
+
+    #[test]
+    fn the_connection_strip_opens_on_connection_and_the_rest_keep_the_last_tab() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let shown = |out: &egui::FullOutput, tab: SettingsTab| {
+            for other in SettingsTab::ALL {
+                assert_eq!(
+                    update_node(out, Role::Tab, other.label()).is_selected(),
+                    Some(other == tab),
+                    "{tab:?} shown: {other:?}"
+                );
+            }
+        };
+        for last in SettingsTab::ALL {
+            // ⌘, (Ctrl+, no Linux) e o item da lateral: a última aba usada.
+            for way in ["shortcut", "sidebar"] {
+                let mut app = app_with_unsaved_draft();
+                app.settings.tab = last;
+                app.api.error = Some("Falha ao conectar.".into());
+                let ctx = styled();
+                ctx.enable_accesskit();
+                let out = frame(&mut app, &ctx, size, vec![]);
+                assert!(!app.settings.open, "{way} {last:?}: precondition");
+                if way == "shortcut" {
+                    frame(&mut app, &ctx, size, vec![comma(SHORTCUT)]);
+                } else {
+                    let item = widget_rect(&out, Role::Button, "Ajustes");
+                    click_at(&mut app, &ctx, size, item.center());
+                }
+                let out = frame(&mut app, &ctx, size, vec![]);
+                assert!(app.settings.open, "{way} {last:?}");
+                assert_eq!(app.settings.tab, last, "{way}: the last tab");
+                shown(&out, last);
+            }
+            // "Abrir Ajustes" da faixa: Conexão, fechada ou aberta noutra aba.
+            for open in [false, true] {
+                let mut app = app_with_unsaved_draft();
+                app.settings.tab = last;
+                app.api.error = Some("Falha ao conectar.".into());
+                if open {
+                    app.open_settings();
+                }
+                let ctx = styled();
+                ctx.enable_accesskit();
+                frame(&mut app, &ctx, size, vec![]);
+                let out = frame(&mut app, &ctx, size, vec![]);
+                assert_eq!(settings_windows(&out), usize::from(open), "{last:?} {open}");
+                let strip = widget_rect(&out, Role::Button, "Abrir Ajustes");
+                click_at(&mut app, &ctx, size, strip.center());
+                let out = frame(&mut app, &ctx, size, vec![]);
+                assert!(app.settings.open, "{last:?} {open}");
+                assert_eq!(app.settings.tab, SettingsTab::Connection, "{last:?} {open}");
+                shown(&out, SettingsTab::Connection);
+                widget_rect(&out, Role::TextInput, "Servidor ai-memory");
+                assert_eq!(app.page, Page::Overview, "{last:?} {open}: the page stays");
+            }
+        }
+    }
+
+    #[test]
+    fn the_address_and_the_docker_path_are_mono_and_the_other_fields_are_not() {
+        use egui::accesskit::Role;
+        let mut app = app_with_unsaved_draft();
+        app.draft.token = "segredo".into();
+        app.draft.docker_binary = "/usr/local/bin/docker".into();
+        app.settings.tab = SettingsTab::Connection;
+        app.open_settings();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        frame(&mut app, &ctx, [1320., 860.], vec![]);
+        let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+        let fonts = |role: Role, name: &str| -> Vec<(String, egui::FontId)> {
+            let at = widget_rect(&out, role, name);
+            crate::widgets::tests::shapes(&out)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t)
+                        if at.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) =>
+                    {
+                        Some((
+                            t.galley.text().to_owned(),
+                            t.galley.job.sections.first()?.format.font_id.clone(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mono = egui::FontId::monospace(12.);
+        let plain = egui::FontId::proportional(12.);
+        for (role, name, want) in [
+            (
+                Role::TextInput,
+                "Servidor ai-memory",
+                ("https://draft.example", &mono),
+            ),
+            (
+                Role::TextInput,
+                "Executável Docker",
+                ("/usr/local/bin/docker", &mono),
+            ),
+            (Role::TextInput, "Contêiner ai-memory", ("draft-ai", &plain)),
+            (Role::PasswordInput, "Token", ("•••••••", &plain)),
+        ] {
+            assert_eq!(
+                fonts(role, name),
+                [(want.0.to_owned(), want.1.clone())],
+                "{name}"
+            );
+        }
     }
 
     #[test]

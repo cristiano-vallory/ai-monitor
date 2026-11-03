@@ -42,6 +42,9 @@
 //!   conteúdo da página; a direita é montada da direita para a esquerda (a
 //!   1ª chamada fica na borda), e cada componente mantém a ordem interna (um
 //!   `segmented` ali segue da esquerda para a direita).
+//! - `row(ui, |ui| …) -> R`: uma linha de controles que quebra quando falta
+//!   largura, em linhas de 28 px com os controles centrados nelas, a 8 entre
+//!   si.
 //!
 //! Controles (todos respeitam `ui.add_enabled` / `add_enabled_ui`)
 //! - `ui.add(Button::primary("Salvar"))`, `Button::secondary`,
@@ -58,6 +61,19 @@
 //!   e a `dica` em text2; `senha = true` mascara o texto; `limite` em
 //!   caracteres (o que passa de uma colagem é cortado). AccessKit:
 //!   `TextInput` (`PasswordInput` com senha).
+//! - `mono_field(ui, &mut texto, largura) -> Response`: o `text_field` com o
+//!   texto em mono 12 (endereço, caminho), sem dica, máscara nem limite.
+//! - `select(ui, rótulo, texto, largura_mín, |ui| menu) -> Option<R>`:
+//!   seletor de 26 px no estilo do Secundário (fundo surf, surf2 sob o
+//!   ponteiro, borda line, raio 6), com o `texto` em 12 e a seta à direita.
+//!   A largura é a do texto, entre `largura_mín` e a da linha; o texto
+//!   cortado vai à dica. O clique abre `menu` num popup logo abaixo, da
+//!   largura do seletor, que rola além de 300; uma opção ou um clique fora
+//!   fecha. Devolve o retorno de `menu` quando aberto. Desabilitado: bg e
+//!   line. AccessKit: `ComboBox` com o `rótulo`, o valor `texto` e
+//!   `expanded`.
+//!   `option(ui, selecionada, texto) -> Response`: uma opção do `menu`;
+//!   AccessKit: marcada = selecionada.
 //! - `checkbox(ui, &mut marcado, rótulo) -> Response`: caixa 14 × 14, raio 3,
 //!   rótulo 13 a 8; desmarcada, fundo field e borda text2; marcada, fundo acc
 //!   e o visto on_acc. A borda (ou o fundo) tem ≥ 3:1 sobre bg, surf e surf2
@@ -282,6 +298,18 @@ pub(crate) fn toolbar<R>(
     .inner
 }
 
+/// Uma linha de controles que quebra quando falta largura: linhas de 28 px
+/// com os controles centrados nelas, a 8 entre si.
+pub(crate) fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        // A altura de cada linha do `horizontal_wrapped` sai daqui.
+        ui.spacing_mut().interact_size.y = 28.;
+        ui.spacing_mut().item_spacing.x = space::S;
+        ui.horizontal_wrapped(add).inner
+    })
+    .inner
+}
+
 /// Traços num quadro de 24 unidades (os paths dos artboards), escalados a
 /// `rect`; um traço que termina no ponto inicial é fechado.
 pub(crate) fn strokes(
@@ -337,7 +365,6 @@ impl<'a> Button<'a> {
     pub(crate) fn secondary(text: &'a str) -> Self {
         Self::new(text, Kind::Secondary)
     }
-    #[allow(dead_code, reason = "Fase 4: confirmações")]
     pub(crate) fn destructive(text: &'a str) -> Self {
         Self::new(text, Kind::Destructive)
     }
@@ -582,10 +609,6 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     response
 }
 
-#[allow(
-    dead_code,
-    reason = "Fase 4: Ajustes, Revisão, Explorar e Administração"
-)]
 pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
     let p = theme::palette(ui.visuals());
     let galley = ui
@@ -1030,20 +1053,38 @@ pub(crate) fn text_field(
     limit: usize,
 ) -> Response {
     let p = theme::palette(ui.visuals());
-    // O fundo vem antes do texto, mas a cor da borda depende do foco.
-    let background = ui.painter().add(egui::Shape::Noop);
-    let response = ui.add(
+    field(
+        ui,
+        width,
         egui::TextEdit::singleline(text)
-            .frame(false)
             // Sem cor própria, a dica sairia em `text` (override_text_color).
             .hint_text(egui::RichText::new(hint).color(p.text2))
             .font(FontId::proportional(12.))
+            .password(password)
+            .char_limit(limit),
+    )
+}
+
+/// O `text_field` em mono 12 (endereço, caminho), sem dica, máscara nem limite.
+pub(crate) fn mono_field(ui: &mut Ui, text: &mut String, width: f32) -> Response {
+    field(
+        ui,
+        width,
+        egui::TextEdit::singleline(text).font(FontId::monospace(12.)),
+    )
+}
+
+/// A caixa de `text_field` e `mono_field` em volta de `edit`.
+fn field(ui: &mut Ui, width: f32, edit: egui::TextEdit<'_>) -> Response {
+    let p = theme::palette(ui.visuals());
+    // O fundo vem antes do texto, mas a cor da borda depende do foco.
+    let background = ui.painter().add(egui::Shape::Noop);
+    let response = ui.add(
+        edit.frame(false)
             .margin(egui::Margin::symmetric(8, 0))
             .min_size(vec2(width, 26.))
             .desired_width(width - 16.)
-            .vertical_align(Align::Center)
-            .password(password)
-            .char_limit(limit),
+            .vertical_align(Align::Center),
     );
     let border = if response.has_focus() { p.acc } else { p.line };
     ui.painter().set(
@@ -1056,6 +1097,105 @@ pub(crate) fn text_field(
             StrokeKind::Inside,
         ),
     );
+    response
+}
+
+/// Seletor de 26 px no estilo do Secundário (o do projeto no Review.dc.html):
+/// fundo surf (surf2 sob o ponteiro), raio 6, borda line, o texto em 12
+/// (text) e a seta de 10 à direita, a 6 dele. A largura é a do texto, não
+/// menos que `min_width` nem mais que a da linha; o texto cortado vai à
+/// dica. Um clique abre `menu` num popup logo abaixo, da largura do
+/// seletor e com rolagem além de 300; um clique numa opção ou fora fecha.
+/// Devolve o retorno de `menu` quando aberto. Desabilitado: bg e line, como o
+/// `Button`. AccessKit: `ComboBox` com o rótulo `label`, o valor `text` e
+/// `expanded`.
+pub(crate) fn select<R>(
+    ui: &mut Ui,
+    label: &str,
+    text: &str,
+    min_width: f32,
+    menu: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let p = theme::palette(ui.visuals());
+    let enabled = ui.is_enabled();
+    // Margens do artboard: 10 à esquerda, 8 à direita, seta de 10 a 6 do texto.
+    let chrome = 10. + 6. + 10. + 8.;
+    let natural = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), Type::Caption.font(), p.text)
+        .size()
+        .x
+        + chrome;
+    let width = natural
+        .max(min_width)
+        .min(ui.max_rect().width())
+        .max(chrome);
+    let (_, rect) = ui.allocate_space(vec2(width, 26.));
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id(("select", label)),
+        Sense::click(),
+    );
+    let galley = one_line(ui, text, Type::Caption.font(), p.text, width - chrome);
+    let elided = galley.elided;
+    let fill = if !enabled {
+        p.bg
+    } else if response.hovered() {
+        p.surf2
+    } else {
+        p.surf
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        6.,
+        fill,
+        Stroke::new(1.0_f32, p.line),
+        StrokeKind::Inside,
+    );
+    painter.galley(
+        pos2(rect.left() + 10., rect.center().y - galley.size().y / 2.),
+        galley,
+        p.text,
+    );
+    let icon = Rect::from_min_size(
+        pos2(rect.right() - 8. - 10., rect.center().y - 5.),
+        Vec2::splat(10.),
+    );
+    chevron(painter, icon, true, p.text);
+    let response = if elided {
+        response.on_hover_text(text)
+    } else {
+        response
+    };
+    let inner = egui::Popup::menu(&response).width(width).show(|ui| {
+        // O popup guarda o tamanho do frame anterior e a rolagem caberia
+        // nele: com o mínimo igual ao máximo, ela mede só o conteúdo (até
+        // 300) e o popup cresce quando as opções aumentam.
+        egui::ScrollArea::vertical()
+            .max_height(300.)
+            .min_scrolled_height(300.)
+            .show(ui, menu)
+            .inner
+    });
+    response.widget_info(|| {
+        let mut info = WidgetInfo::labeled(WidgetType::ComboBox, enabled, label);
+        info.current_text_value = Some(text.to_owned());
+        info
+    });
+    let open = inner.is_some();
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+    inner.map(|r| r.inner)
+}
+
+/// Uma opção no `menu` de `select`: o `selectable_label` do egui, que também
+/// diz ao AccessKit se está selecionada (o do egui 0.33 não diz).
+pub(crate) fn option(ui: &mut Ui, selected: bool, text: &str) -> Response {
+    let response = ui.selectable_label(selected, text);
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, ui.is_enabled(), selected, text)
+    });
     response
 }
 
@@ -2633,6 +2773,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_mono_field_is_the_text_field_with_its_text_in_mono_12() {
+        for (theme, p) in THEMES {
+            let ctx = context(theme);
+            let mut mono = "http://127.0.0.1:49374".to_owned();
+            let mut plain = "ai-memory".to_owned();
+            let out = run(&ctx, vec![], |ui| {
+                mono_field(ui, &mut mono, 220.);
+                text_field(ui, &mut plain, 220., "", false, 64);
+            });
+            let fields: Vec<Rect> = out
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .unwrap()
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == Role::TextInput)
+                .map(|(_, n)| rect_of(n))
+                .collect();
+            assert_eq!(fields.len(), 2, "{theme:?}");
+            for field in &fields {
+                assert_eq!(field.size(), vec2(220., 26.), "{theme:?}");
+                let frame: Vec<_> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect == *field)
+                    .map(|r| (r.fill, r.stroke, r.corner_radius))
+                    .collect();
+                assert_eq!(
+                    frame,
+                    vec![(p.field, Stroke::new(1.0_f32, p.line), CornerRadius::same(5))],
+                    "{theme:?}"
+                );
+            }
+            let painted: Vec<(String, FontId)> = shapes(&out)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) if !t.galley.text().is_empty() => Some((
+                        t.galley.text().to_owned(),
+                        t.galley.job.sections.first()?.format.font_id.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                painted,
+                [
+                    (mono.clone(), FontId::monospace(12.)),
+                    (plain.clone(), FontId::proportional(12.)),
+                ],
+                "{theme:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_focused_text_field_draws_its_border_in_acc() {
         for (theme, p) in THEMES {
             let ctx = context(theme);
@@ -3221,157 +3416,6 @@ pub(crate) mod tests {
             );
         }
     }
-}
-
-// Explorar e Administração (Fase 4): a borda de 3:1 dos controles e o seletor.
-
-/// A borda dos controles de Explorar e Administração: text2, que se vê
-/// (≥ 3:1) sobre bg, surf e surf2 nos dois temas; a `line` do
-/// `Button::secondary`, do `text_field` e do `segmented` fica entre 1,2 e
-/// 1,5:1. Pinta por cima da borda do componente, no retângulo de `response`
-/// e com o raio dele. Fora do controle desabilitado (sem exigência de
-/// contraste) e do campo com foco (que já tem a borda acc).
-pub(crate) fn edge(ui: &Ui, response: &Response, radius: f32) {
-    if response.enabled() && !response.has_focus() {
-        let p = theme::palette(ui.visuals());
-        ui.painter().rect_stroke(
-            response.rect,
-            radius,
-            Stroke::new(1.0_f32, p.text2),
-            StrokeKind::Inside,
-        );
-    }
-}
-
-/// Uma linha de controles que quebra quando falta largura: linhas de 28 px
-/// com os controles centrados nelas, a 8 entre si.
-pub(crate) fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    ui.scope(|ui| {
-        // A altura de cada linha do `horizontal_wrapped` sai daqui.
-        ui.spacing_mut().interact_size.y = 28.;
-        ui.spacing_mut().item_spacing.x = space::S;
-        ui.horizontal_wrapped(add).inner
-    })
-    .inner
-}
-
-/// `ui.add_enabled(enabled, widget)` com a borda de `edge` (raio `radius`).
-pub(crate) fn edged(
-    ui: &mut Ui,
-    enabled: bool,
-    widget: impl egui::Widget,
-    radius: f32,
-) -> Response {
-    let response = ui.add_enabled(enabled, widget);
-    edge(ui, &response, radius);
-    response
-}
-
-/// Seletor de 26 px no estilo do Secundário (o do projeto no Review.dc.html):
-/// fundo surf (surf2 sob o ponteiro), raio 6, a borda text2 de `edge`, o
-/// texto em 12 (text) e a seta de 10 à direita, a 6 dele. A largura é a do
-/// texto, não menos que `min_width` nem mais que a da linha; o texto cortado
-/// vai à dica. Um clique abre `menu` num popup logo abaixo, da largura do
-/// seletor e com rolagem além de 300; um clique numa opção ou fora fecha.
-/// Devolve o retorno de `menu` quando aberto. Desabilitado: bg e line, como o
-/// `Button`. AccessKit: `ComboBox` com o rótulo `label`, o valor `text` e
-/// `expanded`.
-pub(crate) fn select<R>(
-    ui: &mut Ui,
-    label: &str,
-    text: &str,
-    min_width: f32,
-    menu: impl FnOnce(&mut Ui) -> R,
-) -> Option<R> {
-    let p = theme::palette(ui.visuals());
-    let enabled = ui.is_enabled();
-    // Margens do artboard: 10 à esquerda, 8 à direita, seta de 10 a 6 do texto.
-    let chrome = 10. + 6. + 10. + 8.;
-    let natural = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), Type::Caption.font(), p.text)
-        .size()
-        .x
-        + chrome;
-    let width = natural
-        .max(min_width)
-        .min(ui.max_rect().width())
-        .max(chrome);
-    let (_, rect) = ui.allocate_space(vec2(width, 26.));
-    let response = ui.interact(
-        rect,
-        ui.make_persistent_id(("select", label)),
-        Sense::click(),
-    );
-    let galley = one_line(ui, text, Type::Caption.font(), p.text, width - chrome);
-    let elided = galley.elided;
-    let (fill, stroke) = if !enabled {
-        (p.bg, p.line)
-    } else if response.hovered() {
-        (p.surf2, p.text2)
-    } else {
-        (p.surf, p.text2)
-    };
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        6.,
-        fill,
-        Stroke::new(1.0_f32, stroke),
-        StrokeKind::Inside,
-    );
-    painter.galley(
-        pos2(rect.left() + 10., rect.center().y - galley.size().y / 2.),
-        galley,
-        p.text,
-    );
-    let icon = Rect::from_min_size(
-        pos2(rect.right() - 8. - 10., rect.center().y - 5.),
-        Vec2::splat(10.),
-    );
-    chevron(painter, icon, true, p.text);
-    let response = if elided {
-        response.on_hover_text(text)
-    } else {
-        response
-    };
-    let inner = egui::Popup::menu(&response).width(width).show(|ui| {
-        // O popup guarda o tamanho do frame anterior e a rolagem caberia
-        // nele: com o mínimo igual ao máximo, ela mede só o conteúdo (até
-        // 300) e o popup cresce quando as opções aumentam.
-        egui::ScrollArea::vertical()
-            .max_height(300.)
-            .min_scrolled_height(300.)
-            .show(ui, menu)
-            .inner
-    });
-    response.widget_info(|| {
-        let mut info = WidgetInfo::labeled(WidgetType::ComboBox, enabled, label);
-        info.current_text_value = Some(text.to_owned());
-        info
-    });
-    let open = inner.is_some();
-    ui.ctx()
-        .accesskit_node_builder(response.id, |node| node.set_expanded(open));
-    inner.map(|r| r.inner)
-}
-
-/// Uma opção no `menu` de `select`: o `selectable_label` do egui, que também
-/// diz ao AccessKit se está selecionada (o do egui 0.33 não diz).
-pub(crate) fn option(ui: &mut Ui, selected: bool, text: &str) -> Response {
-    let response = ui.selectable_label(selected, text);
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::SelectableLabel, ui.is_enabled(), selected, text)
-    });
-    response
-}
-
-#[cfg(test)]
-pub(crate) mod edge_tests {
-    use super::tests::{THEMES, click, context, node, nodes, rect_of, rects, run, shapes};
-    use super::*;
-    use crate::theme::tests::contrast;
-    use egui::accesskit::Role;
 
     /// O que `audit` mediu: os controles ("Papel nome") e as falhas.
     pub(crate) struct Audit {
@@ -3404,13 +3448,15 @@ pub(crate) mod edge_tests {
     }
 
     /// Mede os controles habilitados da saída (botão, seletor, campo, caixa e
-    /// interruptor), com as cores pintadas, que saem da Palette: a borda (o
-    /// traço mais forte pintado no retângulo do controle, ou o fundo dele)
-    /// tem ≥ 3:1 sobre o que está atrás, e todo texto dentro, ≥ 4,5:1 sobre o
-    /// fundo do controle. Num segmentado, a moldura mede a borda e cada item
-    /// mede o texto sobre ele. Caixa e interruptor: o quadrado de 14 ou o
-    /// trilho de 26 × 16, e o rótulo sobre o fundo atrás.
+    /// interruptor), com as cores pintadas, que saem da Palette. A borda é a
+    /// do artboard: um traço só no retângulo do controle, line (acc no campo
+    /// com foco); os preenchidos (acc, bad) não têm traço. Caixa e
+    /// interruptor: o quadrado de 14 ou o trilho de 26 × 16 tem ≥ 3:1 sobre o
+    /// fundo atrás. Todo texto dentro de um controle tem ≥ 4,5:1 sobre o
+    /// fundo dele; o rótulo da caixa, sobre o fundo atrás. Num segmentado, a
+    /// moldura tem a borda line e cada item mede o texto sobre ele.
     pub(crate) fn audit(out: &egui::FullOutput, p: &theme::Palette) -> Audit {
+        use crate::theme::tests::contrast;
         let update = out.platform_output.accesskit_update.as_ref().unwrap();
         // Sem as sombras (borradas e translúcidas).
         let painted: Vec<egui::epaint::RectShape> = rects(out)
@@ -3436,18 +3482,13 @@ pub(crate) mod edge_tests {
                 .find(|s| near(s.rect, r) && s.fill.a() == 255)
                 .map(|s| s.fill)
         };
-        let edge_at = |r: Rect, back: Color32| {
+        // Os traços pintados no retângulo `r`.
+        let borders = |r: Rect| -> Vec<Color32> {
             painted
                 .iter()
-                .filter(|s| near(s.rect, r))
-                .flat_map(|s| {
-                    [
-                        (s.stroke.width > 0.).then(|| contrast(s.stroke.color, back)),
-                        (s.fill.a() == 255).then(|| contrast(s.fill, back)),
-                    ]
-                })
-                .flatten()
-                .fold(0., f64::max)
+                .filter(|s| near(s.rect, r) && s.stroke.width > 0.)
+                .map(|s| s.stroke.color)
+                .collect()
         };
         let frames: Vec<Rect> = painted
             .iter()
@@ -3458,7 +3499,7 @@ pub(crate) mod edge_tests {
             checked: Vec::new(),
             failures: Vec::new(),
         };
-        for (_, n) in &update.nodes {
+        for (id, n) in &update.nodes {
             let role = n.role();
             if n.is_disabled()
                 || n.bounds().is_none()
@@ -3475,10 +3516,9 @@ pub(crate) mod edge_tests {
             }
             let r = rect_of(n);
             let name = format!("{role:?} {}", n.label().or(n.value()).unwrap_or_default());
-            let (fill, edge) = if role == Role::Button && frames.iter().any(|f| f.contains_rect(r))
-            {
+            let fill = if role == Role::Button && frames.iter().any(|f| f.contains_rect(r)) {
                 // Item de segmentado: surf se selecionado, senão a moldura.
-                (fill_at(r).unwrap_or(p.surf2), None)
+                fill_at(r).unwrap_or(p.surf2)
             } else if role == Role::Button && n.is_expanded().is_some() {
                 // Linha recolhível (`disclosure_row`): uma linha da lista,
                 // sem moldura; só o texto, sobre o fundo atrás.
@@ -3486,7 +3526,7 @@ pub(crate) mod edge_tests {
                     audit.failures.push(format!("{name}: no background"));
                     continue;
                 };
-                (back, None)
+                back
             } else if role == Role::CheckBox {
                 let mark = painted.iter().find(|s| {
                     r.expand(0.5).contains_rect(s.rect)
@@ -3503,21 +3543,31 @@ pub(crate) mod edge_tests {
                 } else {
                     mark.fill
                 };
-                (back, Some(contrast(edge, back)))
+                let ratio = contrast(edge, back);
+                if ratio < 3. {
+                    audit.failures.push(format!("{name}: edge {ratio:.2}:1"));
+                }
+                back
             } else {
-                let (Some(fill), Some(back)) = (fill_at(r), behind(r)) else {
-                    audit
-                        .failures
-                        .push(format!("{name}: no fill or no background"));
+                let Some(fill) = fill_at(r) else {
+                    audit.failures.push(format!("{name}: no fill"));
                     continue;
                 };
-                (fill, Some(edge_at(r, back)))
+                let found = borders(r);
+                let want: &[Color32] = if fill == p.acc || fill == p.bad {
+                    &[]
+                } else if update.focus == *id {
+                    &[p.acc]
+                } else {
+                    &[p.line]
+                };
+                if found != want {
+                    audit
+                        .failures
+                        .push(format!("{name}: borders {found:?}, want {want:?}"));
+                }
+                fill
             };
-            if let Some(edge) = edge
-                && edge < 3.
-            {
-                audit.failures.push(format!("{name}: edge {edge:.2}:1"));
-            }
             for (text, _, color) in texts
                 .iter()
                 .filter(|(_, t, _)| r.expand(1.).contains_rect(*t))
@@ -3532,79 +3582,15 @@ pub(crate) mod edge_tests {
             audit.checked.push(name);
         }
         for frame in frames {
-            let edge = behind(frame).map_or(0., |back| edge_at(frame, back));
-            if edge < 3. {
+            let found = borders(frame);
+            if found != [p.line] {
                 audit
                     .failures
-                    .push(format!("segmented at {frame:?}: edge {edge:.2}:1"));
+                    .push(format!("segmented at {frame:?}: borders {found:?}"));
             }
             audit.checked.push(format!("segmented at {frame:?}"));
         }
         audit
-    }
-
-    #[test]
-    fn the_edge_is_text2_at_3_to_1_unless_disabled_or_focused() {
-        for (theme, p) in THEMES {
-            for back in [p.bg, p.surf, p.surf2] {
-                let ratio = contrast(p.text2, back);
-                assert!(ratio >= 3., "{theme:?}: text2 on {back:?} {ratio:.2}:1");
-                // O que ele cobre: a line, que não chega a 3:1.
-                assert!(contrast(p.line, back) < 3., "{theme:?}: line on {back:?}");
-            }
-            let ctx = context(theme);
-            let mut text = String::new();
-            let focus = std::cell::Cell::new(false);
-            let mut add = |ui: &mut Ui| {
-                edged(ui, true, Button::secondary("Ligado"), 6.);
-                edged(ui, false, Button::secondary("Desligado"), 6.);
-                let field = text_field(ui, &mut text, 200., "", false, 10);
-                if focus.get() {
-                    field.request_focus();
-                }
-                edge(ui, &field, 5.);
-            };
-            let edges = |out: &egui::FullOutput, name: &str, role: Role| {
-                let r = rect_of(&node(out, role, name));
-                rects(out)
-                    .into_iter()
-                    .filter(|s| s.rect == r && s.stroke == Stroke::new(1.0_f32, p.text2))
-                    .count()
-            };
-            let out = run(&ctx, vec![], &mut add);
-            assert_eq!(edges(&out, "Ligado", Role::Button), 1, "{theme:?}");
-            assert_eq!(edges(&out, "Desligado", Role::Button), 0, "{theme:?}");
-            let field = |out: &egui::FullOutput| {
-                let update = out.platform_output.accesskit_update.as_ref().unwrap();
-                let (_, n) = update
-                    .nodes
-                    .iter()
-                    .find(|(_, n)| n.role() == Role::TextInput)
-                    .expect("the field");
-                rect_of(n)
-            };
-            let painted = |out: &egui::FullOutput, color: Color32| {
-                let r = field(out);
-                rects(out)
-                    .into_iter()
-                    .filter(|s| s.rect == r && s.stroke.color == color && s.stroke.width > 0.)
-                    .count()
-            };
-            assert_eq!(
-                painted(&out, p.text2),
-                1,
-                "{theme:?}: the field gets the edge"
-            );
-            focus.set(true);
-            run(&ctx, vec![], &mut add);
-            let out = run(&ctx, vec![], &mut add);
-            drop(add);
-            assert_eq!(
-                (painted(&out, p.text2), painted(&out, p.acc)),
-                (0, 1),
-                "{theme:?}: focused, only the acc border"
-            );
-        }
     }
 
     #[test]
@@ -3629,12 +3615,15 @@ pub(crate) mod edge_tests {
             );
             let at = rect_of(&combo);
             assert_eq!(at.size(), vec2(120., 26.), "{theme:?}: the minimum width");
-            assert!(
-                rects(&out).iter().any(|s| s.rect == at
-                    && s.fill == p.surf
-                    && s.stroke == Stroke::new(1.0_f32, p.text2)
-                    && s.corner_radius == CornerRadius::same(6)),
-                "{theme:?}: surf, text2 edge, radius 6"
+            let painted: Vec<_> = rects(&out)
+                .into_iter()
+                .filter(|s| s.rect == at)
+                .map(|s| (s.fill, s.stroke, s.corner_radius))
+                .collect();
+            assert_eq!(
+                painted,
+                [(p.surf, Stroke::new(1.0_f32, p.line), CornerRadius::same(6))],
+                "{theme:?}: surf, one line border, radius 6"
             );
             assert!(nodes(&out, Role::Button, "Dois").is_empty(), "closed");
             click(&ctx, at.center(), &mut add);
