@@ -29,10 +29,8 @@ pub struct Palette {
     /// Fundo dos campos de texto (Settings.dc.html).
     pub field: Color32,
     /// `acc` translúcido das linhas acrescentadas numa prévia (Review.dc.html).
-    #[allow(dead_code, reason = "Fase 4: prévia em diff")]
     pub add_bg: Color32,
     /// `bad` translúcido das linhas removidas numa prévia (Review.dc.html).
-    #[allow(dead_code, reason = "Fase 4: prévia em diff")]
     pub bad_bg: Color32,
 }
 

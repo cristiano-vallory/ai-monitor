@@ -657,8 +657,9 @@ impl MonitorApp {
                 // Sessões e Docker controlam a própria rolagem (listas,
                 // detalhe, inspetor) e cabem na largura.
                 if self.page == Page::Sessions {
-                    if self.sessions.show(ui, &self.api, Utc::now()) {
-                        self.management.open_handoffs();
+                    if let Some((scope, id)) = self.sessions.show(ui, &self.api, Utc::now()) {
+                        self.management
+                            .open_handoff(&self.api.projects, &scope, &id);
                         self.page = Page::Review;
                     }
                     return;
@@ -710,8 +711,9 @@ impl MonitorApp {
                                             self.management.show(
                                                 ui,
                                                 &self.shared,
-                                                &self.api.projects,
+                                                &self.api,
                                                 section,
+                                                Utc::now(),
                                             )
                                         },
                                     )
@@ -3121,18 +3123,30 @@ mod tests {
         use egui::accesskit::Role;
         let size = [1320., 860.];
         let held = "Operação em andamento em Manutenção e backup · Manutenção. Aguarde a resposta lá; esta página usa o mesmo painel.";
-        // (aba antes, ocupado?, aba depois, aviso na Revisão?)
-        for (tab, busy, want, warned) in [
-            (0, false, 1, false),
-            (1, false, 1, false),
-            (2, false, 1, false),
-            (3, false, 1, false),
-            (0, true, 0, false),
-            (2, true, 2, true),
+        // O handoff no detalhe de Sessões e o projeto dele.
+        let scope = "acme / api-pagamentos-com-um-nome-de-projeto-bem-longo";
+        let id = "01a19ebd-3267-4c1e-9a7e-0f31b6b46700";
+        // (aba antes, ocupado?, projeto na lista?, aba depois, aviso na
+        // Revisão?, projeto e handoff escolhidos depois)
+        for (tab, busy, listed, want, warned, picked) in [
+            (0, false, true, 1, false, (Some(scope), id)),
+            (1, false, true, 1, false, (Some(scope), id)),
+            (2, false, true, 1, false, (Some(scope), id)),
+            (3, false, true, 1, false, (Some(scope), id)),
+            (0, false, false, 1, false, (None, "")),
+            (0, true, true, 0, false, (None, "")),
+            (2, true, true, 2, true, (None, "")),
         ] {
             let mut app = app_with_unsaved_draft();
             app.page = Page::Sessions;
             app.api = sessions_data();
+            if listed {
+                app.api.projects.push(Project {
+                    workspace_name: "acme".into(),
+                    project_name: "api-pagamentos-com-um-nome-de-projeto-bem-longo".into(),
+                    ..Default::default()
+                });
+            }
             app.management.set_tab(tab);
             app.management.busy = busy;
             let ctx = styled();
@@ -3147,6 +3161,12 @@ mod tests {
                 widgets(&out, Role::Label, held).len(),
                 usize::from(warned),
                 "tab {tab} busy {busy}"
+            );
+            let (project, handoff) = app.management.picked();
+            assert_eq!(
+                (project.as_deref(), handoff),
+                picked,
+                "tab {tab} busy {busy} listed {listed}"
             );
         }
     }
