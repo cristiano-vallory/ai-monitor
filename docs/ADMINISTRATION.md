@@ -1,6 +1,7 @@
-# Central ai-memory
+# Páginas ai-memory
 
-A Central fica no painel aberto pela barra de menus. O contrato inicial foi
+As páginas do grupo ai-memory (Saúde, Explorar, Revisão, Manutenção e backup e
+Administração) ficam no painel aberto pela barra de menus ou pela bandeja. O contrato inicial foi
 validado contra o código e a documentação do
 [ai-memory v3.3.1](https://github.com/akitaonrails/ai-memory/tree/v3.3.1).
 O servidor deve expor a API de leitura (`--enable-api` ou `--enable-web`).
@@ -9,26 +10,32 @@ Nenhum servidor ai-memory, modelo, banco ou Docker é incluído no instalador.
 ## Saúde
 
 A coleta de saúde roda em segundo plano a cada 30 segundos após terminar a
-anterior, mesmo com a janela fechada. Usa `/identity`, `/admin/status`,
+anterior, mesmo com a janela fechada. **Atualizar agora**, na página **Saúde**,
+pede uma coleta fora desse ciclo: o coletor acorda na hora e coleta uma vez.
+Cliques feitos antes dessa coleta começar viram um só, e o botão mostra
+**Atualizando…** até ela chegar à tela; com a tela pausada, fica desabilitado.
+Uma reconexão nesse meio-tempo descarta a coleta da conexão anterior. Usa `/identity`, `/admin/status`,
 `/admin/metrics` e `/api/v1/docs/features/status`. Um `!` ao lado do indicador
 na barra sinaliza falhas de consolidação/provider, fila de escrita ocupada em
 80% ou mais, menos de 512 MiB de disco livre ou falha da consulta de saúde.
 A dica do indicador informa o motivo. Leituras com mais de 90 segundos são
 marcadas como atrasadas. Os limites são fixos nesta versão.
 
-A tela mostra contagens, fila, providers, tokens reportados/estimados por
-atividade, armazenamento e índices. São observações passivas do servidor:
+A página mostra o estado geral (saudável, com alertas, indisponível, leitura
+atrasada ou aguardando) e cartões de captura, consolidação, fila de escrita,
+providers com tokens reportados/estimados por atividade, armazenamento e
+índices; métricas acumuladas e os dados brutos do servidor ficam recolhidos. São observações passivas do servidor:
 abrir a tela não dispara testes pagos dos providers. Os contadores podem
 reiniciar quando o processo ai-memory reinicia. O botão de pausa do painel
 (`Pausar atualização da tela`) congela as medições; a barra continua
-atualizando. Consultas manuais da Central continuam disponíveis.
+atualizando. Consultas manuais em **Explorar** continuam disponíveis.
 
 As rotas administrativas podem exigir root/Admin. Uma chave pessoal `aim_`
 continua com nível User, mesmo se pertencer a um administrador. Sem permissão,
 a tela informa a recusa e mantém as funções de leitura autorizadas. Campos
 não fornecidos aparecem como `—`, sem presumir zero ou saúde comprovada.
 
-## Sessões e handoffs
+## Explorar: sessões detalhadas
 
 Selecione o workspace/projeto exato e carregue sessões. A paginação consulta
 50 registros por vez no servidor, incluindo opcionalmente sessões abertas.
@@ -46,7 +53,7 @@ O histórico de handoffs permite estados aberto, aceito e expirado. Usa somente
 A API limita a lista a 200 itens, sem paginação; isso não representa todo o
 histórico se houver mais registros. Resumos marcados `redacted` não são exibidos.
 
-## Conhecimento
+## Explorar: conhecimento
 
 - Páginas e referências: lista com paginação local de 100 itens; abrir conteúdo
   não executa Markdown, HTML, scripts nem comandos nele encontrados. A prévia
@@ -78,12 +85,17 @@ os testes usam somente dados sintéticos.
 Falhas de rede, rotas desabilitadas e permissões são mostradas; não são contornadas pelo aplicativo. A execução por fases está em [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 
-## Administrar memória (v0.4)
+## Revisão e Manutenção e backup (v0.4)
 
-As operações abaixo ficam em **Administrar memória**. Selecione o projeto exato,
+As operações abaixo ficam em **Revisão** (propostas e handoffs) e em
+**Manutenção e backup** (auditoria, curadoria, retenção, embeddings,
+reconsolidação, feedback, backup e checkpoints). Selecione o projeto exato,
 prepare a ação, examine a prévia/evidências e digite a confirmação solicitada.
 Os campos ficam bloqueados enquanto há uma prévia aguardando decisão; **Cancelar
-e editar** permite alterá-los. Trocar aba/projeto cancela a prévia. Uma confirmação
+e editar** permite alterá-los. Trocar aba/projeto cancela a prévia. As duas
+páginas usam o mesmo painel: com uma operação em andamento, uma prévia ou um
+resultado na tela de uma delas, a outra não descarta nada sozinha; avisa e
+oferece **Ir para** a página da operação ou **Descartar e abrir** a atual. Uma confirmação
 expira em cinco minutos e não pode ser reaproveitada após mudar a conexão.
 Salvar outra conexão fica indisponível durante uma operação administrativa.
 
@@ -146,9 +158,9 @@ Relatórios são apresentados como campos e listas navegáveis. Textos acima de
 fonte completa antes de aprovar conteúdo que exceda esses limites.
 
 
-## Administração avançada (v0.5)
+## Administração (v0.5)
 
-O catálogo fica na tela **Administração avançada**. Escolha a operação; os campos
+O catálogo fica na página **Administração**. Escolha a operação; os campos
 indicam exatamente os parâmetros aceitos. O seletor de projeto preenche nomes
 conhecidos, e campos editáveis permitem administrar instalações ainda sem projetos.
 Consultas usam **Consultar**. Escritas exigem **Preparar prévia**, revisão dos
@@ -188,11 +200,13 @@ ao trocar operação/conexão ou ao clicar **Limpar resultado privado**. Isso n�
 
 ### Menu e acompanhamento
 
-O menu tem atalhos para saúde, revisão e administração; mostra handoffs abertos.
+O menu tem os atalhos **Saúde**, **Revisão** e **Administração**; mostra handoffs abertos.
 Selecione um projeto em **Ajustes → Propostas na barra de menus** para acompanhar
 pendentes a cada ciclo de saúde, com a janela fechada. `P200+` significa que a
 listagem atingiu o limite; `—` significa indisponível/atrasado, nunca zero presumido.
-A contagem é do projeto e da identidade conectada, não um total global.
+A contagem é do projeto e da identidade conectada, não um total global. Na
+lateral do painel, o mesmo número aparece em âmbar ao lado de **Revisão** quando
+há pendentes; sem leitura válida ou com zero, não aparece.
 
 ### Operação local
 

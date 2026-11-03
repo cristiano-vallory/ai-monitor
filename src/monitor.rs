@@ -20,6 +20,11 @@ pub struct Shared {
     pub generation: AtomicU64,
     pub navigation: AtomicU8,
     pub stop: Arc<AtomicBool>,
+    /// Pedidos de "Atualizar agora" (`refresh_health`), em contagem.
+    pub health_asked: AtomicU64,
+    /// Até que pedido a última coleta de saúde publicada atende. Gravado sob
+    /// o lock de `health`, junto com a coleta.
+    pub health_served: AtomicU64,
 }
 
 impl Shared {
@@ -33,6 +38,8 @@ impl Shared {
             generation: AtomicU64::new(0),
             navigation: AtomicU8::new(0),
             stop: Arc::new(AtomicBool::new(false)),
+            health_asked: AtomicU64::new(0),
+            health_served: AtomicU64::new(0),
         })
     }
     pub fn start(config: Config) -> Arc<Self> {
@@ -127,7 +134,13 @@ impl Shared {
                         *target = snapshot;
                     }
                 }
-                wait(&resources, current, started, config.resource_seconds);
+                wait(
+                    &resources,
+                    current,
+                    started,
+                    config.resource_seconds,
+                    || false,
+                );
             }
         });
         let server = shared.clone();
@@ -150,33 +163,28 @@ impl Shared {
                         *target = snapshot;
                     }
                 }
-                wait(&server, generation, Instant::now(), config.api_seconds);
+                wait(
+                    &server,
+                    generation,
+                    Instant::now(),
+                    config.api_seconds,
+                    || false,
+                );
             }
         });
         let health = shared.clone();
         thread::spawn(move || {
-            loop {
-                if health.stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let (generation, config) = {
-                    let config = health.config.read().unwrap();
-                    (health.generation.load(Ordering::Acquire), config.clone())
-                };
-                let snapshot = crate::health::collect(&config, || {
-                    health.stop.load(Ordering::Relaxed)
-                        || health.generation.load(Ordering::Acquire) != generation
-                });
-                {
-                    let mut target = health.health.lock().unwrap();
-                    if health.generation.load(Ordering::Acquire) == generation {
-                        *target = snapshot;
-                    }
-                }
-                wait(&health, generation, Instant::now(), crate::health::INTERVAL);
-            }
+            health_loop(&health, |config, cancelled| {
+                crate::health::collect(config, cancelled)
+            })
         });
         shared
+    }
+    /// "Atualizar agora": pede uma coleta de saúde fora do ciclo. O coletor
+    /// acorda e coleta uma vez; os pedidos feitos até o início dessa coleta
+    /// são todos atendidos por ela.
+    pub fn refresh_health(&self) {
+        self.health_asked.fetch_add(1, Ordering::AcqRel);
     }
     pub fn apply(&self, config: Config) {
         let mut target = self.config.write().unwrap();
@@ -189,10 +197,55 @@ impl Shared {
     }
 }
 
-fn wait(shared: &Shared, generation: u64, started: Instant, seconds: u64) {
+/// Coletor de saúde: coleta, publica se a conexão é a mesma e espera o
+/// intervalo, ou até um pedido de "Atualizar agora" ainda não atendido. A
+/// config é relida a cada coleta, então um pedido seguido de reconexão
+/// coleta com a config nova.
+pub(crate) fn health_loop(
+    shared: &Shared,
+    collect: impl Fn(&Config, &dyn Fn() -> bool) -> crate::health::Snapshot,
+) {
+    let due = || {
+        shared.health_asked.load(Ordering::Acquire) > shared.health_served.load(Ordering::Acquire)
+    };
+    loop {
+        if shared.stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let (generation, config, asked) = {
+            let config = shared.config.read().unwrap();
+            (
+                shared.generation.load(Ordering::Acquire),
+                config.clone(),
+                shared.health_asked.load(Ordering::Acquire),
+            )
+        };
+        let snapshot = collect(&config, &|| {
+            shared.stop.load(Ordering::Relaxed)
+                || shared.generation.load(Ordering::Acquire) != generation
+        });
+        {
+            let mut target = shared.health.lock().unwrap();
+            if shared.generation.load(Ordering::Acquire) == generation {
+                *target = snapshot;
+                shared.health_served.store(asked, Ordering::Release);
+            }
+        }
+        wait(
+            shared,
+            generation,
+            Instant::now(),
+            crate::health::INTERVAL,
+            due,
+        );
+    }
+}
+
+fn wait(shared: &Shared, generation: u64, started: Instant, seconds: u64, wake: impl Fn() -> bool) {
     while started.elapsed() < Duration::from_secs(seconds)
         && !shared.stop.load(Ordering::Relaxed)
         && shared.generation.load(Ordering::Acquire) == generation
+        && !wake()
     {
         thread::sleep(Duration::from_millis(100));
     }
@@ -412,8 +465,189 @@ pub fn refresh_running_images(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::sync::{atomic::AtomicUsize, mpsc};
+
+    /// O coletor de saúde rodando numa thread, com uma coleta falsa (sem
+    /// rede): cada coleta avisa em `calls` com o endpoint da config usada e
+    /// espera `release` antes de devolver. A coleta devolvida traz o endpoint
+    /// em `status`, mesmo se cancelada: quem descarta é o laço.
+    pub(crate) struct HealthProbe {
+        pub shared: Arc<Shared>,
+        pub calls: mpsc::Receiver<String>,
+        release: Option<mpsc::Sender<()>>,
+        pub most_in_flight: Arc<AtomicUsize>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+    impl HealthProbe {
+        pub(crate) fn start(shared: Arc<Shared>) -> Self {
+            let (calls_tx, calls) = mpsc::channel();
+            let (release, gate) = mpsc::channel::<()>();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let most_in_flight = Arc::new(AtomicUsize::new(0));
+            let (now, most) = (in_flight.clone(), most_in_flight.clone());
+            let looping = shared.clone();
+            let thread = thread::spawn(move || {
+                health_loop(&looping, |config, _cancelled| {
+                    let running = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(running, Ordering::SeqCst);
+                    let _ = calls_tx.send(config.endpoint.clone());
+                    let _ = gate.recv();
+                    now.fetch_sub(1, Ordering::SeqCst);
+                    crate::health::Snapshot {
+                        at: Some(Utc::now()),
+                        status: Some(serde_json::json!({ "endpoint": config.endpoint })),
+                        ..Default::default()
+                    }
+                })
+            });
+            Self {
+                shared,
+                calls,
+                release: Some(release),
+                most_in_flight,
+                thread: Some(thread),
+            }
+        }
+        /// A próxima coleta (bem antes dos 30 s do ciclo).
+        pub(crate) fn next(&self) -> String {
+            self.calls
+                .recv_timeout(Duration::from_secs(3))
+                .expect("the collector must collect now, not after the 30 s cycle")
+        }
+        /// Nenhuma coleta nova por 400 ms (o laço reavalia a cada 100 ms).
+        pub(crate) fn quiet(&self) -> bool {
+            matches!(
+                self.calls.recv_timeout(Duration::from_millis(400)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            )
+        }
+        pub(crate) fn release(&self) {
+            self.release.as_ref().unwrap().send(()).unwrap();
+        }
+        /// Espera a publicação que atende `asked` (até 3 s).
+        pub(crate) fn served(&self, asked: u64) {
+            let until = Instant::now() + Duration::from_secs(3);
+            while self.shared.health_served.load(Ordering::Acquire) < asked {
+                assert!(Instant::now() < until, "request {asked} was never served");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        pub(crate) fn published(&self) -> Option<String> {
+            self.shared
+                .health
+                .lock()
+                .unwrap()
+                .status
+                .as_ref()
+                .and_then(|s| s["endpoint"].as_str().map(str::to_owned))
+        }
+    }
+    impl Drop for HealthProbe {
+        fn drop(&mut self) {
+            self.shared.stop.store(true, Ordering::Relaxed);
+            self.release.take();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+    fn endpoint(url: &str) -> Config {
+        Config {
+            endpoint: url.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn refresh_wakes_the_waiting_collector_once_even_after_a_double_click() {
+        let probe = HealthProbe::start(Shared::unstarted(endpoint("http://old.example")));
+        assert_eq!(probe.next(), "http://old.example", "startup collection");
+        probe.release();
+        probe.served(0);
+        while probe.published().is_none() {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(probe.quiet(), "precondition: waiting for the 30 s cycle");
+        let asked_at = Instant::now();
+        probe.shared.refresh_health();
+        probe.shared.refresh_health();
+        assert_eq!(probe.next(), "http://old.example");
+        assert!(
+            asked_at.elapsed() < Duration::from_secs(1),
+            "the collector must wake right away, not at the end of the interval: {:?}",
+            asked_at.elapsed()
+        );
+        probe.release();
+        probe.served(2);
+        assert!(probe.quiet(), "a double click is ONE extra collection");
+        assert_eq!(probe.most_in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn refresh_during_a_collection_runs_one_more_after_it_never_in_parallel() {
+        let probe = HealthProbe::start(Shared::unstarted(endpoint("http://old.example")));
+        assert_eq!(
+            probe.next(),
+            "http://old.example",
+            "cycle collection in flight"
+        );
+        probe.shared.refresh_health();
+        probe.shared.refresh_health();
+        assert!(probe.quiet(), "no second collection while one is in flight");
+        probe.release();
+        assert_eq!(probe.next(), "http://old.example", "the pending request");
+        assert_eq!(
+            probe.published().as_deref(),
+            Some("http://old.example"),
+            "the first collection was published before the second started"
+        );
+        assert_eq!(
+            probe.shared.health_served.load(Ordering::Acquire),
+            0,
+            "the collection that started before the click does not serve it"
+        );
+        probe.release();
+        probe.served(2);
+        assert!(probe.quiet(), "both clicks were served by one collection");
+        assert_eq!(
+            probe.most_in_flight.load(Ordering::SeqCst),
+            1,
+            "never in parallel"
+        );
+    }
+
+    #[test]
+    fn refresh_followed_by_reconnect_never_collects_or_publishes_the_old_config() {
+        let probe = HealthProbe::start(Shared::unstarted(endpoint("http://old.example")));
+        assert_eq!(
+            probe.next(),
+            "http://old.example",
+            "in flight with the old config"
+        );
+        probe.shared.refresh_health();
+        probe.shared.apply(endpoint("http://new.example"));
+        probe.release();
+        assert_eq!(
+            probe.next(),
+            "http://new.example",
+            "the request is served with the config read after the reconnection"
+        );
+        assert_eq!(
+            probe.published(),
+            None,
+            "the old collection finished after the reconnection: discarded, not published"
+        );
+        assert_eq!(probe.shared.health_served.load(Ordering::Acquire), 0);
+        probe.release();
+        probe.served(1);
+        assert_eq!(probe.published().as_deref(), Some("http://new.example"));
+        assert!(
+            probe.quiet(),
+            "the reconnection and the request share one collection"
+        );
+    }
 
     #[test]
     fn refreshing_running_state_between_inventory_polls_resorts_images_and_clears_uncommitted_ids()

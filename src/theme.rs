@@ -22,6 +22,10 @@ pub struct Palette {
     pub on_acc: Color32,
     /// `acc` translúcido: aplicado sobre qualquer fundo.
     pub sel: Color32,
+    /// Tom informativo (faixas de aviso `info`, Sessions.dc.html).
+    pub info: Color32,
+    /// Sombra leve dos cartões e das folhas (preto translúcido).
+    pub shadow: Color32,
 }
 
 pub const DARK: Palette = Palette {
@@ -39,6 +43,9 @@ pub const DARK: Palette = Palette {
     on_acc: Color32::from_rgb(0x06, 0x26, 0x1C),
     // 33/255 ≈ 13% de alfa.
     sel: Color32::from_rgba_unmultiplied_const(0x4F, 0xD1, 0xA5, 33),
+    info: Color32::from_rgb(0x8B, 0x93, 0xFF),
+    // 115/255 ≈ 45% de alfa.
+    shadow: Color32::from_black_alpha(115),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -56,6 +63,9 @@ pub const LIGHT: Palette = Palette {
     on_acc: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     // 26/255 ≈ 10% de alfa.
     sel: Color32::from_rgba_unmultiplied_const(0x0B, 0x7A, 0x5E, 26),
+    info: Color32::from_rgb(0x4F, 0x55, 0xD9),
+    // 15/255 ≈ 6% de alfa.
+    shadow: Color32::from_black_alpha(15),
 };
 
 /// Paleta do tema em uso, a partir dos `Visuals` ativos.
@@ -317,6 +327,7 @@ mod tests {
                 ("series2", p.series2),
                 ("warn", p.warn),
                 ("bad", p.bad),
+                ("info", p.info),
             ] {
                 for (bg, back) in [("bg", p.bg), ("surf", p.surf), ("surf2", p.surf2)] {
                     let ratio = contrast(color, back);

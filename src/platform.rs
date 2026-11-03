@@ -43,3 +43,9 @@ pub const PROPOSAL_WATCH_LABEL: &str =
 #[cfg(not(target_os = "macos"))]
 pub const PROPOSAL_WATCH_LABEL: &str =
     "Propostas no menu da bandeja (um projeto, até 200 pendentes)";
+
+/// Onde os alertas de saúde aparecem fora da janela (página Saúde).
+#[cfg(target_os = "macos")]
+pub const HEALTH_ALERT_HINT: &str = "Alertas também aparecem como ! na barra de menus.";
+#[cfg(not(target_os = "macos"))]
+pub const HEALTH_ALERT_HINT: &str = "Alertas também aparecem como ponto âmbar no ícone da bandeja.";

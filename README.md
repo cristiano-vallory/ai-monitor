@@ -10,7 +10,7 @@ Linux (Ubuntu ≥ 22.04 e Omarchy 4): consulte a [seção Linux do guia de insta
 
 ## Instalar sem compilar Rust
 
-A versão **0.6.2** passa o intervalo padrão de sessões/handoffs para 60 s, reduzindo a carga constante no servidor ai-memory. Desde a 0.6.0 há suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD`. Veja as [notas da atualização](docs/releases/v0.6.2.md) e o [guia da Central ai-memory](docs/ADMINISTRATION.md).
+A versão **0.6.2** passa o intervalo padrão de sessões/handoffs para 60 s, reduzindo a carga constante no servidor ai-memory. Desde a 0.6.0 há suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD`. Veja as [notas da atualização](docs/releases/v0.6.2.md) e o [guia das páginas ai-memory](docs/ADMINISTRATION.md).
 
 1. Baixe **AI-Monitor-0.6.2-macos-universal.dmg** na [release v0.6.2](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.2).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
@@ -59,7 +59,7 @@ Ao iniciar, o app fica na barra de menus, sem abrir o painel nem ocupar o Dock. 
 
 O indicador AI prioriza o contêiner configurado. Quando ele não está disponível, o coletor pode usar processos nativos identificados como ai-memory. Os números dos processos Docker Desktop no macOS ficam separados no painel.
 
-- **Saúde e sessões / Revisar propostas e handoffs / Administração avançada:** atalhos diretos. O menu mostra handoffs abertos e propostas pendentes do projeto escolhido em Ajustes (`P200+` sinaliza o limite da lista).
+- **Saúde / Revisão / Administração:** atalhos diretos para essas páginas. O menu mostra handoffs abertos e propostas pendentes do projeto escolhido em Ajustes (`P200+` sinaliza o limite da lista).
 - **Abrir painel:** mostra a janela e restaura uma janela minimizada.
 - **Ocultar painel:** recolhe a janela e mantém a coleta ativa. O botão vermelho de fechar tem o mesmo comportamento.
 - **Sair do AI Monitor:** encerra o monitor e remove o indicador da barra.
@@ -73,9 +73,11 @@ Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repo
 - **Visão geral:** CPU, memória, tarefas do ai-memory, handoffs abertos, contêineres, sessões e histórico de até dez minutos mantido em memória.
 - **Sessões e handoffs:** handoffs abertos, resumos e próximos passos; sessões com agente, projeto, eventos, início e estado; projetos com contagens e última atividade. Pesquisa e filtro por projeto.
 - **Docker:** CPU/memória/tarefas por contêiner, estado, imagem, portas e I/O acumulado; imagens agrupadas por ID e associação aos contêineres; processos do Docker Desktop e ai-memory no Mac.
-- **Central ai-memory:** saúde interna, alertas, tokens, eventos pesquisáveis, wiki, histórico/diff e grafos de relações.
-- **Administrar memória:** propostas e evidências, handoffs, auditoria/curadoria/retenção/embeddings, reconsolidação, feedback, backup/OKF, checkpoints e restauração, com prévia e confirmação.
-- **Administração avançada:** projetos/workspaces, perfil, usuários/grants/chaves, inbox/workstreams e serviço local Docker/LaunchAgent.
+- **Saúde:** estado geral, alertas, captura, consolidação, fila de escrita, providers e tokens por atividade, armazenamento, índices, métricas e dados brutos do servidor. **Atualizar agora** pede uma coleta fora do ciclo de 30 s.
+- **Explorar:** sessões detalhadas com eventos pesquisáveis e tokens; conhecimento com wiki, busca, histórico/diff e grafos de relações.
+- **Revisão:** propostas e evidências; handoffs (histórico, cancelamento e expiração), com prévia e confirmação. A lateral mostra, em âmbar, as propostas pendentes do projeto escolhido em Ajustes.
+- **Manutenção e backup:** auditoria/curadoria/retenção/embeddings, reconsolidação, feedback, backup/OKF, checkpoints e restauração, com prévia e confirmação. Revisão e Manutenção e backup usam o mesmo painel: com uma operação, prévia ou resultado na tela de uma, a outra avisa e oferece voltar ou descartar.
+- **Administração:** projetos/workspaces, perfil, usuários/grants/chaves, inbox/workstreams e serviço local Docker/LaunchAgent.
 - **Ajustes:** servidor, Bearer/Keychain opcional, login humano, projeto monitorado na barra, contêiner, Docker CLI e intervalos.
 
 ## Conexão e coleta
@@ -103,7 +105,7 @@ Configurações são salvas em `~/Library/Application Support/AI Monitor/config.
 
 Os nomes das variáveis são públicos; **seus valores reais não devem ser versionados**. O app não carrega `.env`. Prefira o campo protegido da interface para informar o token. Aplicativos iniciados pelo Finder não herdam automaticamente variáveis do terminal. Veja [autenticação sem salvar segredos](INSTALL.md#autenticação-sem-salvar-segredos).
 
-A coleta automática usa apenas leituras: `docker ps`, `stats --no-stream`, `image ls`, `container inspect --format '{{.Id}} {{.Image}}'`, `top` e rotas GET da API/saúde. Não solicita o ambiente dos contêineres, não aceita handoffs nem chama LLM para monitorar. As consultas manuais da Central incluem busca (que pode usar embeddings/reranking do servidor). **Administrar memória** oferece escritas HTTP/MCP somente após preparar e confirmar uma operação específica; embeddings e reconsolidação podem consumir providers. Veja o [guia administrativo](docs/ADMINISTRATION.md).
+A coleta automática usa apenas leituras: `docker ps`, `stats --no-stream`, `image ls`, `container inspect --format '{{.Id}} {{.Image}}'`, `top` e rotas GET da API/saúde. Não solicita o ambiente dos contêineres, não aceita handoffs nem chama LLM para monitorar. As consultas manuais de **Explorar** incluem busca (que pode usar embeddings/reranking do servidor). **Revisão** e **Manutenção e backup** oferecem escritas HTTP/MCP somente após preparar e confirmar uma operação específica; embeddings e reconsolidação podem consumir providers. Veja o [guia administrativo](docs/ADMINISTRATION.md).
 
 Cada comando Docker da coleta tem timeout de 6 s e saída limitada a 16 MiB. Cada requisição HTTP tem timeout de 8 s, conexão de até 2 s e resposta limitada a 8 MiB, sem proxy. Após descobrir projetos e identidade, o coletor distribui projetos entre até quatro trabalhadores, com orçamento de 30 s; requisições em andamento podem terminar depois desse orçamento. Dados parciais e erros são sinalizados; falhas não viram medições zero. Trocar a conexão descarta respostas da configuração anterior.
 

@@ -8,6 +8,7 @@ mod commands;
 mod console;
 mod docker;
 mod health;
+mod health_ui;
 mod keychain;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -28,6 +29,7 @@ mod test_support;
 mod theme;
 #[cfg(target_os = "linux")]
 mod tray;
+mod widgets;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--version") {

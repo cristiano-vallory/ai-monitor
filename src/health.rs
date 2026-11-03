@@ -77,6 +77,20 @@ impl Snapshot {
         }
         alerts
     }
+    /// Propostas pendentes de `watch`, como a barra de menus, a bandeja e a
+    /// lateral mostram: só de uma leitura em dia desse mesmo projeto; `None`
+    /// = desconhecido (atrasada, de outro projeto, recusada ou sem leitura).
+    pub fn watched_pending(
+        &self,
+        watch: &crate::client::Scope,
+        now: DateTime<Utc>,
+    ) -> Option<usize> {
+        if self.fresh(now) && self.pending_scope.as_ref() == Some(watch) {
+            self.pending
+        } else {
+            None
+        }
+    }
     pub fn menu_summary(&self, now: DateTime<Utc>) -> String {
         if self.at.is_none() {
             return "Saúde: aguardando".into();
@@ -93,6 +107,15 @@ impl Snapshot {
         } else {
             format!("Saúde: {}", alerts.join(" · "))
         }
+    }
+}
+/// Contagem de propostas pendentes: a consulta lista até 200, então 200 ou
+/// mais vira "200+".
+pub fn pending_text(n: usize) -> String {
+    if n >= 200 {
+        "200+".into()
+    } else {
+        n.to_string()
     }
 }
 pub fn collect(config: &Config, cancelled: impl Fn() -> bool) -> Snapshot {
@@ -277,6 +300,76 @@ mod tests {
         s.at = Some(Utc::now() - chrono::Duration::seconds(91));
         assert!(!s.fresh(Utc::now()));
         assert!(s.menu_summary(Utc::now()).contains("atrasada"));
+    }
+    #[test]
+    fn watched_pending_only_from_a_fresh_reading_of_the_same_project() {
+        use crate::client::Scope;
+        let now = Utc::now();
+        let watch = Scope {
+            workspace: "ws".into(),
+            project: "proj".into(),
+        };
+        let other = Scope {
+            workspace: "ws".into(),
+            project: "outro".into(),
+        };
+        let reading = |age: Option<i64>, scope: Option<&Scope>, pending| Snapshot {
+            at: age.map(|secs| now - chrono::Duration::seconds(secs)),
+            pending_scope: scope.cloned(),
+            pending,
+            ..Default::default()
+        };
+        for (case, snapshot, want) in [
+            (
+                "fresh, same project",
+                reading(Some(0), Some(&watch), Some(3)),
+                Some(3),
+            ),
+            (
+                "zero is a reading",
+                reading(Some(0), Some(&watch), Some(0)),
+                Some(0),
+            ),
+            (
+                "limit of the list",
+                reading(Some(0), Some(&watch), Some(200)),
+                Some(200),
+            ),
+            (
+                "denied or incompatible",
+                reading(Some(0), Some(&watch), None),
+                None,
+            ),
+            (
+                "another project",
+                reading(Some(0), Some(&other), Some(3)),
+                None,
+            ),
+            ("no project recorded", reading(Some(0), None, Some(3)), None),
+            ("no reading yet", reading(None, Some(&watch), Some(3)), None),
+            (
+                "90 s is still fresh",
+                reading(Some(90), Some(&watch), Some(3)),
+                Some(3),
+            ),
+            (
+                "91 s is stale",
+                reading(Some(91), Some(&watch), Some(3)),
+                None,
+            ),
+        ] {
+            assert_eq!(snapshot.watched_pending(&watch, now), want, "{case}");
+        }
+        for (n, want) in [
+            (0, "0"),
+            (1, "1"),
+            (199, "199"),
+            (200, "200+"),
+            (201, "200+"),
+            (usize::MAX, "200+"),
+        ] {
+            assert_eq!(pending_text(n), want, "{n}");
+        }
     }
     #[test]
     fn generation_change_stops_followup_requests() {
