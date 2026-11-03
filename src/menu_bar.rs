@@ -88,7 +88,7 @@ impl MenuReading {
                 self.title.push_str(&format!(" P{n}"));
                 format!("Propostas {n} · {}", scope.label())
             } else {
-                "Propostas: selecione um projeto em Conexão".into()
+                "Propostas: selecione um projeto em Ajustes".into()
             }
         } else {
             "Propostas: aguardando".into()

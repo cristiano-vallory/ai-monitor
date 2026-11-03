@@ -69,9 +69,14 @@ fn main() -> eframe::Result {
         let show_dashboard = std::env::args().any(|a| a == "--show-dashboard");
         let options = eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([1320., 860.])
-                .with_min_inner_size([960., 680.])
+                .with_inner_size(app::WINDOW_SIZE)
+                .with_min_inner_size(app::MIN_WINDOW_SIZE)
                 .with_title("AI Monitor")
+                // Barra de título transparente, com o conteúdo por baixo; os
+                // botões da janela ficam na posição padrão do AppKit.
+                .with_fullsize_content_view(true)
+                .with_titlebar_shown(false)
+                .with_title_shown(false)
                 .with_visible(show_dashboard)
                 .with_active(show_dashboard),
             ..Default::default()

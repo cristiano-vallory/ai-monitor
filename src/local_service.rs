@@ -178,7 +178,7 @@ impl Operation {
             Backend::Docker => {
                 if !Path::new(&c.docker_binary).is_absolute() {
                     return Err(Error::Invalid(
-                        "Configure o caminho absoluto do Docker em Conexão.".into(),
+                        "Configure o caminho absoluto do Docker em Ajustes.".into(),
                     ));
                 }
                 let host = self.docker(

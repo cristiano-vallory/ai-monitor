@@ -191,8 +191,8 @@ fn open_window(
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1320., 860.])
-            .with_min_inner_size([960., 680.])
+            .with_inner_size(crate::app::WINDOW_SIZE)
+            .with_min_inner_size(crate::app::MIN_WINDOW_SIZE)
             .with_title("AI Monitor")
             .with_app_id("ai-monitor"),
         ..Default::default()

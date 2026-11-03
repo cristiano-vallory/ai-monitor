@@ -19,7 +19,7 @@ pub struct Config {
     pub theme: Appearance,
 }
 
-/// Aparência escolhida em Conexão. Um valor desconhecido ou de tipo errado
+/// Aparência escolhida em Ajustes. Um valor desconhecido ou de tipo errado
 /// no disco vira `System` sem derrubar a leitura do resto da configuração.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

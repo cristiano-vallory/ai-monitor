@@ -89,7 +89,7 @@ fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|_| "Docker CLI não encontrado. Confira o caminho em Conexão.".to_owned())?;
+        .map_err(|_| "Docker CLI não encontrado. Confira o caminho em Ajustes.".to_owned())?;
     #[cfg(unix)]
     let pgid = child.id() as i32;
     let stdout = child.stdout.take().unwrap();

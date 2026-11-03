@@ -59,12 +59,12 @@ Ao iniciar, o app fica na barra de menus, sem abrir o painel nem ocupar o Dock. 
 
 O indicador AI prioriza o contêiner configurado. Quando ele não está disponível, o coletor pode usar processos nativos identificados como ai-memory. Os números dos processos Docker Desktop no macOS ficam separados no painel.
 
-- **Saúde e sessões / Revisar propostas e handoffs / Administração avançada:** atalhos diretos. O menu mostra handoffs abertos e propostas pendentes do projeto escolhido em Conexão (`P200+` sinaliza o limite da lista).
+- **Saúde e sessões / Revisar propostas e handoffs / Administração avançada:** atalhos diretos. O menu mostra handoffs abertos e propostas pendentes do projeto escolhido em Ajustes (`P200+` sinaliza o limite da lista).
 - **Abrir painel:** mostra a janela e restaura uma janela minimizada.
 - **Ocultar painel:** recolhe a janela e mantém a coleta ativa. O botão vermelho de fechar tem o mesmo comportamento.
 - **Sair do AI Monitor:** encerra o monitor e remove o indicador da barra.
 
-A barra é atualizada por um timer AppKit no loop principal, independente da renderização do painel, inclusive durante a abertura do menu. `Pausar tela` congela somente o painel; a barra continua acompanhando as fontes. O histórico de dez minutos é coletado em segundo plano e aparece ao reabrir a janela. Amostras atrasadas por mais de três intervalos (mínimo de dez segundos) são substituídas por `—`, sem aparentar uma medição atual. Falhas do Docker também aparecem como indisponíveis, sem virar zero.
+A barra é atualizada por um timer AppKit no loop principal, independente da renderização do painel, inclusive durante a abertura do menu. O botão de pausa do painel (`Pausar atualização da tela`) congela somente o painel; a barra continua acompanhando as fontes. O histórico de dez minutos é coletado em segundo plano e aparece ao reabrir a janela. Amostras atrasadas por mais de três intervalos (mínimo de dez segundos) são substituídas por `—`, sem aparentar uma medição atual. Falhas do Docker também aparecem como indisponíveis, sem virar zero.
 
 Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repouso normal do Mac. Durante o repouso não há coleta. A inicialização automática ao entrar no macOS não é configurada pelo app; ele pode ser adicionado manualmente aos Itens de Início após a instalação.
 
@@ -76,13 +76,13 @@ Uma atividade nativa evita a suspensão da coleta por App Nap sem impedir o repo
 - **Central ai-memory:** saúde interna, alertas, tokens, eventos pesquisáveis, wiki, histórico/diff e grafos de relações.
 - **Administrar memória:** propostas e evidências, handoffs, auditoria/curadoria/retenção/embeddings, reconsolidação, feedback, backup/OKF, checkpoints e restauração, com prévia e confirmação.
 - **Administração avançada:** projetos/workspaces, perfil, usuários/grants/chaves, inbox/workstreams e serviço local Docker/LaunchAgent.
-- **Conexão:** servidor, Bearer/Keychain opcional, login humano, projeto monitorado na barra, contêiner, Docker CLI e intervalos.
+- **Ajustes:** servidor, Bearer/Keychain opcional, login humano, projeto monitorado na barra, contêiner, Docker CLI e intervalos.
 
 ## Conexão e coleta
 
-Padrões: `http://127.0.0.1:49374`, contêiner `ai-memory`, recursos a cada 2 s, API a cada 60 s e inventário de imagens a cada 15 s. O intervalo da API é contado após cada varredura para evitar sobrecarregar o servidor. A execução de uma consulta pode alongar o intervalo; a interface informa a idade de cada coleta. O app reconecta automaticamente. `Pausar tela` congela a visualização; os coletores continuam trabalhando.
+Padrões: `http://127.0.0.1:49374`, contêiner `ai-memory`, recursos a cada 2 s, API a cada 60 s e inventário de imagens a cada 15 s. O intervalo da API é contado após cada varredura para evitar sobrecarregar o servidor. A execução de uma consulta pode alongar o intervalo; a interface informa a idade de cada coleta. O app reconecta automaticamente. No alto do painel, o chip de atualização mostra `Conectando…` antes da primeira coleta, `Ao vivo · atualizado há N s`, `Atrasado` (ou `API atrasada` / `Recursos atrasados`, quando a última coleta passa de três intervalos) ou `Pausado`. O botão de pausa ao lado, com o tooltip `Pausar atualização da tela`, congela a visualização; os coletores continuam trabalhando.
 
-Abra **Conexão**, ajuste os campos e clique em **Salvar e conectar**.
+Abra **Ajustes**, ajuste os campos e clique em **Salvar e conectar**.
 
 | Campo | Padrão | Limites ou comportamento |
 | --- | --- | --- |

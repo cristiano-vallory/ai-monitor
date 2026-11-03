@@ -36,7 +36,7 @@ fn keychain_change<'a>(current: &'a Config, draft: &'a Config) -> KeychainChange
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Page {
     Overview,
     Central,
@@ -46,7 +46,36 @@ enum Page {
     Docker,
     Settings,
 }
+impl Page {
+    /// Nome da página na lateral e na barra superior.
+    fn label(self) -> &'static str {
+        match self {
+            Page::Overview => "Visão geral",
+            Page::Central => "Central ai-memory",
+            Page::Management => "Administrar memória",
+            Page::Advanced => "Administração avançada",
+            Page::Sessions => "Sessões e handoffs",
+            Page::Docker => "Docker",
+            Page::Settings => "Ajustes",
+        }
+    }
+}
 type Sample = ResourceSample;
+
+/// Tamanho inicial e mínimo da janela, em pontos (macOS e Linux).
+pub const WINDOW_SIZE: [f32; 2] = [1320., 860.];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [720., 560.];
+/// Abaixo desta largura de janela a lateral fica compacta (só ícones).
+const COMPACT_BELOW: f32 = 1000.;
+const SIDEBAR_WIDTH: f32 = 232.;
+/// No macOS os botões da janela vão até x = 70, acima da lateral compacta.
+#[cfg(target_os = "macos")]
+const COMPACT_SIDEBAR_WIDTH: f32 = 78.;
+#[cfg(not(target_os = "macos"))]
+const COMPACT_SIDEBAR_WIDTH: f32 = 64.;
+fn compact(width: f32) -> bool {
+    width < COMPACT_BELOW
+}
 
 pub struct MonitorApp {
     #[cfg(target_os = "macos")]
@@ -204,17 +233,50 @@ impl MonitorApp {
         }
     }
 
-    fn sidebar(&mut self, ctx: &egui::Context) {
+    fn sidebar(&mut self, ctx: &egui::Context, compact: bool) {
         let p = theme::palette(&ctx.style().visuals);
         egui::SidePanel::left("sidebar")
-            .exact_width(198.)
+            .exact_width(if compact {
+                COMPACT_SIDEBAR_WIDTH
+            } else {
+                SIDEBAR_WIDTH
+            })
             .resizable(false)
-            .frame(egui::Frame::new().fill(p.side).inner_margin(20))
+            .frame(egui::Frame::new().fill(p.side).inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: 0,
+                bottom: 12,
+            }))
             .show(ctx, |ui| {
-                ui.add_space(12.);
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(30.), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 8., p.acc);
+                ui.spacing_mut().item_spacing = Vec2::new(0., 1.);
+                let (top, strip) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), 52.),
+                    egui::Sense::hover(),
+                );
+                // macOS: a faixa inteira, sob os botões da janela, arrasta a janela.
+                #[cfg(target_os = "macos")]
+                drag_window(&ui.interact(
+                    top.expand2(Vec2::new(10., 0.)),
+                    strip.id.with("drag"),
+                    egui::Sense::click_and_drag(),
+                ));
+                #[cfg(not(target_os = "macos"))]
+                {
+                    strip.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "AI Monitor")
+                    });
+                    let logo = if compact {
+                        egui::Rect::from_center_size(top.center(), Vec2::splat(22.))
+                    } else {
+                        egui::Rect::from_min_size(
+                            egui::pos2(top.left() + 10., top.center().y - 11.),
+                            Vec2::splat(22.),
+                        )
+                    };
+                    let painter = ui.painter();
+                    painter.rect_filled(logo, 6., p.acc);
+                    let scale = logo.width() / 30.;
                     let pts = [
                         (4., 16.),
                         (10., 16.),
@@ -223,156 +285,196 @@ impl MonitorApp {
                         (22., 13.),
                         (27., 13.),
                     ]
-                    .map(|(x, y)| r.min + Vec2::new(x, y));
-                    ui.painter().add(egui::Shape::line(
+                    .map(|(x, y)| logo.min + Vec2::new(x, y) * scale);
+                    painter.add(egui::Shape::line(
                         pts.to_vec(),
-                        Stroke::new(2.0_f32, p.on_acc),
+                        Stroke::new(2.0 * scale, p.on_acc),
                     ));
-                    ui.label(RichText::new("AI Monitor").size(21.).strong());
-                });
-                ui.add_space(6.);
-                ui.label(
-                    RichText::new("LOCAL OBSERVABILITY")
-                        .size(9.5)
-                        .color(p.text2),
-                );
-                ui.add_space(38.);
-                ui.label(RichText::new("MONITORAMENTO").size(10.).color(p.text2));
-                ui.add_space(8.);
-                for (page, label) in [
-                    (Page::Overview, "Visão geral"),
-                    (Page::Central, "Central ai-memory"),
-                    (Page::Management, "Administrar memória"),
-                    (Page::Advanced, "Administração avançada"),
-                    (Page::Sessions, "Sessões e handoffs"),
-                    (Page::Docker, "Docker"),
-                    (Page::Settings, "Conexão"),
-                ] {
-                    let selected = self.page == page;
-                    let button = egui::Button::new(RichText::new(label).color(if selected {
-                        p.acc
-                    } else {
-                        p.text2
-                    }))
-                    .fill(if selected {
-                        p.sel
-                    } else {
-                        Color32::TRANSPARENT
-                    })
-                    .stroke(Stroke::NONE)
-                    .corner_radius(7.);
-                    if ui.add_sized([158., 42.], button).clicked() {
-                        self.page = page;
-                        self.filter.clear();
+                    if !compact {
+                        painter.text(
+                            egui::pos2(logo.right() + 8., logo.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "AI Monitor",
+                            egui::FontId::new(13., theme::semibold()),
+                            p.text,
+                        );
                     }
                 }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "v{}  ·  Rust / {}",
-                            env!("CARGO_PKG_VERSION"),
-                            crate::platform::OS
-                        ))
-                        .size(11.)
-                        .color(p.text2),
+                let badge = handoff_badge(&self.api);
+                for (title, pages) in [
+                    ("Monitorar", [Page::Overview, Page::Sessions, Page::Docker]),
+                    (
+                        "ai-memory",
+                        [Page::Central, Page::Management, Page::Advanced],
+                    ),
+                ] {
+                    if !compact {
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin {
+                                left: 10,
+                                right: 10,
+                                top: 8,
+                                bottom: 4,
+                            })
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(title)
+                                        .size(11.)
+                                        .family(theme::semibold())
+                                        .color(p.text2),
+                                );
+                            });
+                    }
+                    for page in pages {
+                        let aside = match page {
+                            Page::Sessions => badge.clone().map(Aside::Count),
+                            _ => None,
+                        };
+                        if nav_item(ui, page, self.page == page, compact, aside).clicked() {
+                            self.page = page;
+                            self.filter.clear();
+                        }
+                    }
+                    ui.add_space(10.);
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    let settings = nav_item(
+                        ui,
+                        Page::Settings,
+                        self.page == Page::Settings,
+                        compact,
+                        Some(Aside::Shortcut(crate::platform::SETTINGS_SHORTCUT)),
                     );
-                    ui.add_space(8.);
-                    ui.separator();
-                    ui.add_space(6.);
-                    status(
+                    if settings.clicked() {
+                        self.page = Page::Settings;
+                        self.filter.clear();
+                    }
+                    // Fontes, de baixo para cima, entre bordas de 10 px e a linha.
+                    ui.add_space(16.);
+                    source(
                         ui,
                         "Docker",
-                        self.resources.at.is_some() && self.resources.docker_error.is_none(),
+                        "Docker",
+                        self.resources.at.is_some(),
+                        self.resources.docker_error.as_deref(),
+                        compact,
                     );
-                    status(
+                    ui.add_space(5.);
+                    let version = server_version(&self.api, &self.health);
+                    source(
                         ui,
-                        "ai-memory API",
-                        self.api.at.is_some() && self.api.error.is_none(),
+                        "ai-memory",
+                        &if version.is_empty() {
+                            "ai-memory API".to_owned()
+                        } else {
+                            format!("ai-memory {version}")
+                        },
+                        self.api.at.is_some(),
+                        self.api.error.as_deref(),
+                        compact,
                     );
-                    ui.add_space(6.);
-                    ui.label(RichText::new("FONTES CONECTADAS").size(10.).color(p.text2));
+                    ui.add_space(10.);
+                    let (line, _) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 1.),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().hline(
+                        line.x_range(),
+                        line.center().y,
+                        Stroke::new(1.0_f32, p.line),
+                    );
                 });
             });
     }
 
-    fn header(&mut self, ui: &mut egui::Ui) {
+    fn top_bar(&mut self, ctx: &egui::Context) {
+        let p = theme::palette(&ctx.style().visuals);
+        egui::TopBottomPanel::top("top-bar")
+            .exact_height(52.)
+            .frame(egui::Frame::new().fill(p.bg))
+            .show(ctx, |ui| {
+                let bar = ui.max_rect();
+                // macOS: o fundo arrasta a janela. Vem antes dos widgets, que
+                // ficam por cima dele.
+                #[cfg(target_os = "macos")]
+                drag_window(&ui.interact(bar, ui.id().with("drag"), egui::Sense::click_and_drag()));
+                let inner = egui::Rect::from_x_y_ranges(
+                    bar.left() + 24.0..=bar.right() - 20.,
+                    bar.y_range(),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(inner)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 12.;
+                        if pause_button(ui, self.paused).clicked() {
+                            self.paused = !self.paused;
+                            if !self.paused {
+                                self.last_sync = Instant::now() - Duration::from_secs(1);
+                            }
+                        }
+                        freshness_chip(
+                            ui,
+                            freshness(
+                                Utc::now(),
+                                self.resources.at,
+                                self.api.at,
+                                self.config.resource_seconds,
+                                self.config.api_seconds,
+                                self.paused,
+                            ),
+                        );
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(self.page.label())
+                                        .size(15.)
+                                        .family(theme::semibold()),
+                                )
+                                .selectable(false)
+                                .truncate(),
+                            );
+                        });
+                    },
+                );
+            });
+    }
+
+    fn status_bar(&self, ctx: &egui::Context) {
+        let p = theme::palette(&ctx.style().visuals);
+        egui::TopBottomPanel::bottom("status-bar")
+            .exact_height(28.)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(24, 0)),
+            )
+            .show(ctx, |ui| {
+                let small = |text: String| RichText::new(text).size(11.).color(p.text2);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 14.;
+                    ui.add(
+                        egui::Label::new(small(format!(
+                            "Recursos a cada {} s · API a cada {} s · v{}",
+                            self.config.resource_seconds,
+                            self.config.api_seconds,
+                            env!("CARGO_PKG_VERSION")
+                        )))
+                        .extend(),
+                    );
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(small(host_status(&self.resources, &self.api)))
+                                .truncate(),
+                        );
+                    });
+                });
+            });
+    }
+
+    fn notices(&self, ui: &mut egui::Ui) {
         let p = theme::palette(ui.visuals());
-        let (title, subtitle) = match self.page {
-            Page::Overview => (
-                "Visão geral",
-                "Recursos, sessões e continuidade do seu ambiente.",
-            ),
-            Page::Sessions => (
-                "Sessões e handoffs",
-                "Acompanhe sessões e trabalho aguardando continuidade.",
-            ),
-            Page::Docker => (
-                "Docker",
-                "Consumo, contêineres e imagens do contexto Docker ativo.",
-            ),
-            Page::Advanced => (
-                "Administração avançada",
-                "Projetos, identidade, mensagens e operação local.",
-            ),
-            Page::Settings => ("Conexão", "Ajuste as fontes e a frequência de atualização."),
-            Page::Management => (
-                "Administrar memória",
-                "Revisão, manutenção e recuperação do conhecimento.",
-            ),
-            Page::Central => (
-                "Central ai-memory",
-                "Saúde, sessões e conhecimento do servidor conectado.",
-            ),
-        };
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading(RichText::new(title).size(29.).strong());
-                ui.label(RichText::new(subtitle).color(p.text2));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(if self.paused {
-                        "Retomar"
-                    } else {
-                        "Pausar tela"
-                    })
-                    .clicked()
-                {
-                    self.paused = !self.paused;
-                    if !self.paused {
-                        self.last_sync = Instant::now() - Duration::from_secs(1);
-                    }
-                }
-                badge(
-                    ui,
-                    if self.paused { "PAUSADO" } else { "AO VIVO" },
-                    if self.paused { p.warn } else { p.acc },
-                );
-            });
-        });
-        ui.add_space(8.);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Recursos {}  ·  API {}",
-                    age(self.resources.at),
-                    age(self.api.at)
-                ))
-                .small()
-                .color(p.text2),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{} s / {} s",
-                        self.config.resource_seconds, self.config.api_seconds
-                    ))
-                    .small()
-                    .color(p.text2),
-                );
-            });
-        });
-        ui.add_space(8.);
         if let Some(e) = &self.resources.docker_error {
             notice(ui, e, p.warn);
         }
@@ -383,19 +485,9 @@ impl MonitorApp {
             notice(
                 ui,
                 &format!(
-                    "Dados parciais: {} aviso(s). Consulte Conexão.",
+                    "Dados parciais: {} aviso(s). Consulte Ajustes.",
                     self.api.errors.len()
                 ),
-                p.warn,
-            );
-        }
-        if let Some(at) = self.api.at
-            && (Utc::now() - at).num_seconds() > self.config.api_seconds as i64 * 3
-            && !self.paused
-        {
-            notice(
-                ui,
-                "A atualização da API está atrasada. Os horários indicam a última coleta concluída.",
                 p.warn,
             );
         }
@@ -1179,47 +1271,26 @@ impl MonitorApp {
             if let Some(e)=&self.resources.inventory_error{ui.label(RichText::new(e).color(p.warn));}
         });
     }
-}
-
-impl eframe::App for MonitorApp {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.apply_theme(ctx);
-        if let Some(config) = self.authentication.poll(&self.shared) {
-            self.reconnect(config);
+    /// Um frame da janela: lateral, barras e a página. Sem coleta nem
+    /// navegação externa, para rodar sem janela nos testes.
+    fn ui(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            self.page = Page::Settings;
         }
-        self.central.poll(&self.shared);
-        self.management.poll(&self.shared);
-        self.operations.poll(&self.shared);
-        ctx.request_repaint_after(Duration::from_secs(1));
-        match self.shared.navigation.swap(0, Ordering::AcqRel) {
-            1 => self.page = Page::Central,
-            2 => self.page = Page::Management,
-            3 => self.page = Page::Advanced,
-            _ => {}
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(menu_bar) = &self.menu_bar {
-            if ctx.input(|i| i.viewport().close_requested()) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                menu_bar.hide();
-            }
-            if !menu_bar.is_visible() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                return;
-            }
-        }
-        self.sync();
-        ctx.request_repaint_after(Duration::from_millis(500));
-        self.sidebar(ctx);
+        self.sidebar(ctx, compact(ctx.content_rect().width()));
+        self.top_bar(ctx);
+        self.status_bar(ctx);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(theme::palette(&ctx.style().visuals).bg)
-                    .inner_margin(26),
+                    .inner_margin(egui::Margin::symmetric(24, 20)),
             )
             .show(ctx, |ui| {
-                self.header(ui);
-                egui::ScrollArea::vertical()
+                self.notices(ui);
+                // Na largura mínima, tabelas e linhas de Sessões e Docker
+                // passam da área: rolam na horizontal em vez de cortar.
+                egui::ScrollArea::both()
                     .id_salt("main-scroll")
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -1251,6 +1322,39 @@ impl eframe::App for MonitorApp {
                         }
                     });
             });
+    }
+}
+
+impl eframe::App for MonitorApp {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.apply_theme(ctx);
+        if let Some(config) = self.authentication.poll(&self.shared) {
+            self.reconnect(config);
+        }
+        self.central.poll(&self.shared);
+        self.management.poll(&self.shared);
+        self.operations.poll(&self.shared);
+        ctx.request_repaint_after(Duration::from_secs(1));
+        match self.shared.navigation.swap(0, Ordering::AcqRel) {
+            1 => self.page = Page::Central,
+            2 => self.page = Page::Management,
+            3 => self.page = Page::Advanced,
+            _ => {}
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(menu_bar) = &self.menu_bar {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                menu_bar.hide();
+            }
+            if !menu_bar.is_visible() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                return;
+            }
+        }
+        self.sync();
+        ctx.request_repaint_after(Duration::from_millis(500));
+        self.ui(ctx);
     }
 }
 impl Drop for MonitorApp {
@@ -1291,14 +1395,343 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     ui.painter()
         .galley(rect.min + Vec2::new(7.0, 4.0), galley, color);
 }
-fn status(ui: &mut egui::Ui, text: &str, ok: bool) {
+/// Texto em uma linha só, com reticências se passar de `width`.
+fn one_line(
+    ui: &egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
+    ui.painter().layout_job(job)
+}
+/// O que fica à direita do rótulo de um item da lateral.
+enum Aside {
+    Count(String),
+    Shortcut(&'static str),
+}
+/// Item da lateral: ícone, rótulo numa linha só e, à direita, o contador ou o
+/// atalho. No compacto, só o ícone; o rótulo vai ao tooltip no compacto e
+/// sempre que for cortado.
+fn nav_item(
+    ui: &mut egui::Ui,
+    page: Page,
+    selected: bool,
+    compact: bool,
+    aside: Option<Aside>,
+) -> egui::Response {
     let p = theme::palette(ui.visuals());
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 14.0), egui::Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), 3.0, if ok { p.acc } else { p.text2 });
-        ui.label(RichText::new(text).size(12.0).color(p.text2));
+    let label = page.label();
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
     });
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 7., p.sel);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 7., p.surf2.gamma_multiply(0.5));
+    }
+    let color = if selected { p.acc } else { p.text };
+    let icon = if compact {
+        egui::Rect::from_center_size(rect.center(), Vec2::splat(16.))
+    } else {
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 10., rect.center().y - 8.),
+            Vec2::splat(16.),
+        )
+    };
+    paint_icon(painter, icon, page, color);
+    if compact {
+        return response.on_hover_text(label);
+    }
+    let mut right = rect.right() - 10.;
+    match aside {
+        Some(Aside::Count(count)) => {
+            let galley =
+                painter.layout_no_wrap(count, egui::FontId::new(11., theme::semibold()), p.text2);
+            let size = Vec2::new((galley.size().x + 12.).max(18.), galley.size().y + 2.);
+            let pill = egui::Rect::from_min_size(
+                egui::pos2(right - size.x, rect.center().y - size.y / 2.),
+                size,
+            );
+            painter.rect_filled(pill, 9., p.line);
+            painter.galley(pill.center() - galley.size() / 2., galley, p.text2);
+            right = pill.left() - 8.;
+        }
+        Some(Aside::Shortcut(keys)) => {
+            let galley =
+                painter.layout_no_wrap(keys.to_owned(), egui::FontId::proportional(11.), p.text2);
+            let at = egui::pos2(
+                right - galley.size().x,
+                rect.center().y - galley.size().y / 2.,
+            );
+            right = at.x - 8.;
+            painter.galley(at, galley, p.text2);
+        }
+        None => {}
+    }
+    let family = if selected {
+        theme::semibold()
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let left = icon.right() + 10.;
+    let galley = one_line(
+        ui,
+        label,
+        egui::FontId::new(13., family),
+        color,
+        right - left,
+    );
+    let elided = galley.elided;
+    ui.painter().galley(
+        egui::pos2(left, rect.center().y - galley.size().y / 2.),
+        galley,
+        color,
+    );
+    if elided {
+        response.on_hover_text(label)
+    } else {
+        response
+    }
+}
+/// Ícones de 16 px da lateral, a partir dos paths de 24 unidades do artboard
+/// (Sidebar.dc.html), em traço de 1,8 na mesma escala.
+fn paint_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: Color32) {
+    let scale = rect.width() / 24.;
+    let at = |(x, y): (f32, f32)| rect.min + Vec2::new(x, y) * scale;
+    let stroke = Stroke::new(1.8 * scale, color);
+    let line = |points: &[(f32, f32)]| {
+        painter.add(egui::Shape::line(
+            points.iter().copied().map(at).collect(),
+            stroke,
+        ));
+    };
+    let closed = |points: &[(f32, f32)]| {
+        painter.add(egui::Shape::closed_line(
+            points.iter().copied().map(at).collect(),
+            stroke,
+        ));
+    };
+    match page {
+        Page::Overview => {
+            for (x, y) in [(4., 4.), (13., 4.), (4., 13.), (13., 13.)] {
+                closed(&[(x, y), (x + 7., y), (x + 7., y + 7.), (x, y + 7.)]);
+            }
+        }
+        Page::Sessions => {
+            painter.circle_stroke(at((12., 12.)), 9. * scale, stroke);
+            line(&[(12., 7.), (12., 12.), (15., 14.)]);
+        }
+        Page::Docker => {
+            closed(&[(3., 7.5), (12., 3.), (21., 7.5), (12., 12.)]);
+            line(&[(3., 7.5), (3., 16.5), (12., 21.), (21., 16.5), (21., 7.5)]);
+            line(&[(12., 12.), (12., 21.)]);
+        }
+        Page::Central => line(&[
+            (2., 13.),
+            (6., 13.),
+            (8.5, 7.),
+            (12.5, 18.),
+            (15.5, 11.),
+            (22., 11.),
+        ]),
+        Page::Management => {
+            closed(&[(4., 8.), (20., 8.), (20., 20.), (4., 20.)]);
+            closed(&[(3., 4.), (21., 4.), (21., 8.), (3., 8.)]);
+            line(&[(10., 12.), (14., 12.)]);
+        }
+        Page::Advanced => {
+            // Escudo: as duas curvas do path amostradas em quartos.
+            closed(&[
+                (12., 3.),
+                (20., 6.),
+                (20., 12.),
+                (19.4, 15.2),
+                (17.7, 17.85),
+                (15.2, 19.8),
+                (12., 21.),
+                (8.8, 19.8),
+                (6.3, 17.85),
+                (4.6, 15.2),
+                (4., 12.),
+                (4., 6.),
+            ]);
+            line(&[(9.5, 12.), (11.5, 14.), (15., 10.5)]);
+        }
+        Page::Settings => {
+            for segment in [
+                [(4., 6.), (13., 6.)],
+                [(17., 6.), (20., 6.)],
+                [(15., 4.), (15., 8.)],
+                [(4., 12.), (7., 12.)],
+                [(11., 12.), (20., 12.)],
+                [(9., 10.), (9., 14.)],
+                [(4., 18.), (15., 18.)],
+                [(19., 18.), (20., 18.)],
+                [(17., 16.), (17., 20.)],
+            ] {
+                line(&segment);
+            }
+        }
+    }
+}
+/// Uma fonte de dados no rodapé da lateral: ponto de estado e `label`. O
+/// tooltip e o AccessKit dizem "`name`: estado" (conectado, o erro ou a
+/// espera). No compacto, só o ponto.
+fn source(
+    ui: &mut egui::Ui,
+    name: &str,
+    label: &str,
+    collected: bool,
+    error: Option<&str>,
+    compact: bool,
+) {
+    let p = theme::palette(ui.visuals());
+    let (color, state) = match (error, collected) {
+        (Some(e), _) => (p.bad, e),
+        (None, true) => (p.acc, "conectado"),
+        (None, false) => (p.text2, "aguardando primeira coleta"),
+    };
+    let state = format!("{name}: {state}");
+    let font = egui::FontId::proportional(12.);
+    let height = ui.fonts_mut(|f| f.row_height(&font));
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &state));
+    let dot = if compact {
+        rect.center()
+    } else {
+        egui::pos2(rect.left() + 3.5, rect.center().y)
+    };
+    ui.painter().circle_filled(dot, 3.5, color);
+    if !compact {
+        let left = dot.x + 3.5 + 8.;
+        let galley = one_line(ui, label, font, p.text2, rect.right() - left);
+        ui.painter().galley(
+            egui::pos2(left, rect.center().y - galley.size().y / 2.),
+            galley,
+            p.text2,
+        );
+    }
+    response.on_hover_text(state);
+}
+/// Chip de atualização da barra superior.
+fn freshness_chip(ui: &mut egui::Ui, state: Freshness) {
+    let p = theme::palette(ui.visuals());
+    let (fill, color) = match state {
+        Freshness::Paused => (p.surf2, p.text),
+        Freshness::Connecting => (p.surf2, p.text2),
+        Freshness::Live(_) => (p.sel, p.acc),
+        Freshness::ApiLate(_) | Freshness::ResourcesLate(_) | Freshness::BothLate(_) => {
+            (p.warn.gamma_multiply(0.14), p.warn)
+        }
+    };
+    let font = egui::FontId::proportional(12.);
+    let mut job = egui::text::LayoutJob::default();
+    if let Freshness::Live(age) = state {
+        job.append(
+            "Ao vivo",
+            0.,
+            egui::TextFormat::simple(egui::FontId::new(12., theme::semibold()), p.acc),
+        );
+        job.append(
+            &format!(" · atualizado {}", ago(age)),
+            0.,
+            egui::TextFormat::simple(font, p.text2),
+        );
+    } else {
+        job.append(&state.text(), 0., egui::TextFormat::simple(font, color));
+    }
+    let galley = ui.painter().layout_job(job);
+    let mark = if state == Freshness::Paused { 10. } else { 7. };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(10. + mark + 8. + galley.size().x + 10., 28.),
+        egui::Sense::hover(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, state.text()));
+    let painter = ui.painter();
+    painter.rect_filled(rect, 14., fill);
+    let mark = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 10., rect.center().y - mark / 2.),
+        Vec2::splat(mark),
+    );
+    if state == Freshness::Paused {
+        pause_icon(painter, mark, color, 3.);
+    } else {
+        painter.circle_filled(mark.center(), 3.5, color);
+    }
+    painter.galley(
+        egui::pos2(mark.right() + 8., rect.center().y - galley.size().y / 2.),
+        galley,
+        color,
+    );
+}
+/// Duas barras verticais (viewBox 24, `M9 5v14M15 5v14`).
+fn pause_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32, width: f32) {
+    let scale = rect.width() / 24.;
+    for x in [9., 15.] {
+        painter.line_segment(
+            [
+                rect.min + Vec2::new(x, 5.) * scale,
+                rect.min + Vec2::new(x, 19.) * scale,
+            ],
+            Stroke::new(width * scale, color),
+        );
+    }
+}
+/// Botão de pausa da barra superior. Também sente arrasto: senão o arrasto
+/// do fundo da barra (macOS) começaria por baixo dele.
+fn pause_button(ui: &mut egui::Ui, paused: bool) -> egui::Response {
+    let p = theme::palette(ui.visuals());
+    let label = if paused {
+        "Retomar atualização da tela"
+    } else {
+        "Pausar atualização da tela"
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(30., 28.), egui::Sense::click_and_drag());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        6.,
+        if response.hovered() { p.surf2 } else { p.surf },
+        Stroke::new(1.0_f32, p.line),
+        egui::StrokeKind::Inside,
+    );
+    let icon = egui::Rect::from_center_size(rect.center(), Vec2::splat(14.));
+    if paused {
+        let scale = icon.width() / 24.;
+        painter.add(egui::Shape::closed_line(
+            [(7., 5.), (18., 12.), (7., 19.)]
+                .map(|(x, y)| icon.min + Vec2::new(x, y) * scale)
+                .to_vec(),
+            Stroke::new(2. * scale, p.text2),
+        ));
+    } else {
+        pause_icon(painter, icon, p.text2, 2.);
+    }
+    response.on_hover_text(label)
+}
+/// macOS, sem barra de título: arrastar com o botão principal move a janela
+/// e o duplo clique maximiza ou restaura.
+#[cfg(target_os = "macos")]
+fn drag_window(response: &egui::Response) {
+    let ctx = &response.ctx;
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if response.double_clicked() {
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
 }
 fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
@@ -1341,8 +1774,108 @@ fn number_u64(n: u64) -> String {
     number(n as usize)
 }
 fn age(at: Option<DateTime<Utc>>) -> String {
-    at.map(|a| format!("há {} s", (Utc::now() - a).num_seconds().max(0)))
+    at.map(|a| ago((Utc::now() - a).num_seconds()))
         .unwrap_or("aguardando".into())
+}
+/// Idade de uma coleta em texto; negativa (relógio ajustado) conta como 0.
+fn ago(secs: i64) -> String {
+    let secs = secs.max(0) as usize;
+    if secs < 60 {
+        format!("há {} s", number(secs))
+    } else if secs < 3600 {
+        format!("há {} min", number(secs / 60))
+    } else {
+        format!("há {} h", number(secs / 3600))
+    }
+}
+
+/// Estado do chip de atualização da barra superior. A idade é a da fonte mais
+/// nova (ao vivo) ou da mais velha entre as atrasadas, em segundos.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Freshness {
+    Paused,
+    Connecting,
+    Live(i64),
+    ApiLate(i64),
+    ResourcesLate(i64),
+    BothLate(i64),
+}
+impl Freshness {
+    fn text(self) -> String {
+        match self {
+            Freshness::Paused => "Pausado".into(),
+            Freshness::Connecting => "Conectando…".into(),
+            Freshness::Live(age) => format!("Ao vivo · atualizado {}", ago(age)),
+            Freshness::ApiLate(age) => format!("API atrasada · {}", ago(age)),
+            Freshness::ResourcesLate(age) => format!("Recursos atrasados · {}", ago(age)),
+            Freshness::BothLate(age) => format!("Atrasado · {}", ago(age)),
+        }
+    }
+}
+/// Uma fonte atrasa quando a última coleta tem mais de três intervalos; só
+/// conta a fonte que já coletou. Pausado vence qualquer outro estado.
+fn freshness(
+    now: DateTime<Utc>,
+    resources_at: Option<DateTime<Utc>>,
+    api_at: Option<DateTime<Utc>>,
+    resource_seconds: u64,
+    api_seconds: u64,
+    paused: bool,
+) -> Freshness {
+    if paused {
+        return Freshness::Paused;
+    }
+    let age = |at: Option<DateTime<Utc>>| at.map(|at| (now - at).num_seconds().max(0));
+    let late = |age: Option<i64>, seconds: u64| age.filter(|&age| age > seconds as i64 * 3);
+    let (resources, api) = (age(resources_at), age(api_at));
+    match (
+        late(resources, resource_seconds),
+        late(api, api_seconds),
+        resources.into_iter().chain(api).min(),
+    ) {
+        (Some(r), Some(a), _) => Freshness::BothLate(r.max(a)),
+        (Some(r), None, _) => Freshness::ResourcesLate(r),
+        (None, Some(a), _) => Freshness::ApiLate(a),
+        (None, None, Some(youngest)) => Freshness::Live(youngest),
+        (None, None, None) => Freshness::Connecting,
+    }
+}
+
+/// Contador do item Sessões e handoffs: só com a API coletada e handoffs
+/// abertos; sem o total do servidor, a lista pode estar cortada ("+").
+fn handoff_badge(api: &ApiSnapshot) -> Option<String> {
+    api.at?;
+    let open = api.handoff_total.unwrap_or(api.handoffs.len());
+    (open > 0).then(|| {
+        format!(
+            "{}{}",
+            number(open),
+            if api.handoff_total.is_some() { "" } else { "+" }
+        )
+    })
+}
+
+/// Texto à esquerda da barra de status.
+fn host_status(resources: &ResourceSnapshot, api: &ApiSnapshot) -> String {
+    let host = format!("Este {}", crate::platform::HOST);
+    if resources.at.is_none() {
+        return host;
+    }
+    let mut text = format!(
+        "{host} · CPU {}% · Memória {} de {}",
+        decimal(resources.host_cpu.into(), 0),
+        bytes(resources.host_memory),
+        bytes(resources.host_total)
+    );
+    if api.at.is_some() {
+        let projects = api.projects.len();
+        text.push_str(&format!(
+            " · {} {}",
+            number(projects),
+            if projects == 1 { "projeto" } else { "projetos" }
+        ));
+    }
+    text
 }
 fn date(at: &str) -> String {
     DateTime::parse_from_rfc3339(at)
@@ -1928,5 +2461,674 @@ mod tests {
         assert_eq!(app.draft.theme, Appearance::Light);
         assert_eq!(app.shared.config.read().unwrap().theme, Appearance::Light);
         assert_eq!(app.shared.generation.load(Ordering::Acquire), 1);
+    }
+
+    /// Contexto com as fontes e os estilos do app, como numa janela nova.
+    fn styled() -> egui::Context {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx
+    }
+    /// Um frame de `ui` numa janela de `size` pontos.
+    fn frame(
+        app: &mut MonitorApp,
+        ctx: &egui::Context,
+        size: [f32; 2],
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size.into())),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.ui(ctx),
+        )
+    }
+    fn sidebar_width(ctx: &egui::Context) -> f32 {
+        egui::containers::panel::PanelState::load(ctx, egui::Id::new("sidebar"))
+            .expect("the sidebar must have been shown")
+            .rect
+            .width()
+    }
+
+    #[test]
+    fn compact_below_1000_points_of_window_width() {
+        for width in [0., 720., 999.9] {
+            assert!(compact(width), "{width} must be compact");
+        }
+        for width in [1000., 1000.1, 1320.] {
+            assert!(!compact(width), "{width} must show the full sidebar");
+        }
+    }
+
+    #[test]
+    fn minimum_window_reaches_the_compact_sidebar_and_the_default_does_not() {
+        assert!(
+            compact(MIN_WINDOW_SIZE[0]),
+            "the minimum window width {} must be below the cut, or compact is unreachable",
+            MIN_WINDOW_SIZE[0]
+        );
+        assert!(
+            !compact(WINDOW_SIZE[0]),
+            "the default window must open with the full sidebar"
+        );
+    }
+
+    #[test]
+    fn sidebar_is_compact_at_720_and_232_wide_at_1320() {
+        // macOS: 78 px, para os botões da janela (até x = 70); Linux: 64 px.
+        let compact = if cfg!(target_os = "macos") { 78. } else { 64. };
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        frame(&mut app, &ctx, [720., 560.], vec![]);
+        assert_eq!(
+            sidebar_width(&ctx),
+            compact,
+            "720 × 560 must use this platform's compact sidebar"
+        );
+        frame(&mut app, &ctx, [1320., 860.], vec![]);
+        assert_eq!(
+            sidebar_width(&ctx),
+            232.,
+            "1320 × 860 must use the full sidebar"
+        );
+        frame(&mut app, &ctx, [720., 560.], vec![]);
+        assert_eq!(
+            sidebar_width(&ctx),
+            compact,
+            "shrinking the window compacts it again"
+        );
+    }
+
+    const PAGES: [Page; 7] = [
+        Page::Overview,
+        Page::Sessions,
+        Page::Docker,
+        Page::Central,
+        Page::Management,
+        Page::Advanced,
+        Page::Settings,
+    ];
+
+    /// Textos pintados na lateral, com a marca de corte.
+    fn sidebar_texts(ctx: &egui::Context, out: &egui::FullOutput) -> Vec<(String, bool)> {
+        let width = sidebar_width(ctx);
+        out.shapes
+            .iter()
+            .filter(|clipped| clipped.clip_rect.max.x <= width + 0.5)
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.galley.elided)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_sidebar_label_fits_at_232_selected_or_not() {
+        for page in PAGES {
+            // Uma página nova tem de entrar em PAGES.
+            match page {
+                Page::Overview
+                | Page::Sessions
+                | Page::Docker
+                | Page::Central
+                | Page::Management
+                | Page::Advanced
+                | Page::Settings => {}
+            }
+        }
+        let at = Some(Utc::now());
+        let open = |total, listed| ApiSnapshot {
+            at,
+            handoff_total: total,
+            handoffs: vec![Handoff::default(); listed],
+            ..Default::default()
+        };
+        // "999+" (sem total do servidor) deixa 117,6 px ao rótulo, menos que os
+        // 120,9 px (regular) e 124,2 px (semibold) de "Sessões e handoffs":
+        // corta, e o nome vai ao tooltip.
+        for (counter, api, sessions_fit) in [
+            (None, ApiSnapshot::default(), true),
+            (Some("999"), open(Some(999), 0), true),
+            (Some("999+"), open(None, 999), false),
+        ] {
+            for selected in PAGES {
+                let mut app = app_with_unsaved_draft();
+                app.api = api.clone();
+                app.page = selected;
+                let ctx = styled();
+                let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+                let texts = sidebar_texts(&ctx, &out);
+                if let Some(counter) = counter {
+                    assert!(
+                        texts.contains(&(counter.to_owned(), false)),
+                        "the {counter} counter must be painted whole"
+                    );
+                }
+                for page in PAGES {
+                    let painted: Vec<bool> = texts
+                        .iter()
+                        .filter(|(text, _)| text == page.label())
+                        .map(|&(_, elided)| elided)
+                        .collect();
+                    assert!(!painted.is_empty(), "{page:?} must be painted");
+                    let fits = page != Page::Sessions || sessions_fit;
+                    assert_eq!(
+                        painted.iter().any(|&elided| elided),
+                        !fits,
+                        "{page:?} cut = {} at {} px, {selected:?} selected, counter {counter:?}",
+                        !fits,
+                        sidebar_width(&ctx)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn freshness_matrix() {
+        use Freshness::*;
+        let now = Utc::now();
+        let at = |secs: i64| Some(now - chrono::Duration::seconds(secs));
+        // resource_seconds = 2 (atrasa acima de 6 s); api_seconds = 60 (acima de 180 s).
+        for (case, resources, api, paused, want) in [
+            ("paused", at(1), at(1), true, Paused),
+            (
+                "paused wins over both late",
+                at(100),
+                at(1000),
+                true,
+                Paused,
+            ),
+            ("paused wins over connecting", None, None, true, Paused),
+            ("connecting", None, None, false, Connecting),
+            ("live: youngest source", at(6), at(3), false, Live(3)),
+            ("live: youngest is resources", at(2), at(45), false, Live(2)),
+            ("resources exactly 3x", at(6), at(1), false, Live(1)),
+            ("resources 3x + 1 s", at(7), at(1), false, ResourcesLate(7)),
+            ("api exactly 3x", at(1), at(180), false, Live(1)),
+            ("api 3x + 1 s", at(1), at(181), false, ApiLate(181)),
+            ("only api late", at(2), at(600), false, ApiLate(600)),
+            (
+                "only resources late",
+                at(30),
+                at(10),
+                false,
+                ResourcesLate(30),
+            ),
+            (
+                "both late: api older",
+                at(30),
+                at(600),
+                false,
+                BothLate(600),
+            ),
+            (
+                "both late: resources older",
+                at(4000),
+                at(200),
+                false,
+                BothLate(4000),
+            ),
+            ("api absent, resources live", at(3), None, false, Live(3)),
+            (
+                "api absent, resources late",
+                at(10),
+                None,
+                false,
+                ResourcesLate(10),
+            ),
+            ("resources absent, api live", None, at(30), false, Live(30)),
+            (
+                "resources absent, api late",
+                None,
+                at(200),
+                false,
+                ApiLate(200),
+            ),
+            ("negative ages count as 0", at(-5), at(-90), false, Live(0)),
+            (
+                "negative age is never late",
+                at(-1000),
+                None,
+                false,
+                Live(0),
+            ),
+        ] {
+            assert_eq!(
+                freshness(now, resources, api, 2, 60, paused),
+                want,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_text_for_every_state() {
+        use Freshness::*;
+        for state in [
+            Paused,
+            Connecting,
+            Live(3),
+            ApiLate(181),
+            ResourcesLate(7),
+            BothLate(3600),
+        ] {
+            let want = match state {
+                Paused => "Pausado",
+                Connecting => "Conectando…",
+                Live(_) => "Ao vivo · atualizado há 3 s",
+                ApiLate(_) => "API atrasada · há 3 min",
+                ResourcesLate(_) => "Recursos atrasados · há 7 s",
+                BothLate(_) => "Atrasado · há 1 h",
+            };
+            assert_eq!(state.text(), want, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn ago_switches_units_at_60_s_and_3600_s() {
+        for (secs, want) in [
+            (-30, "há 0 s"),
+            (0, "há 0 s"),
+            (59, "há 59 s"),
+            (60, "há 1 min"),
+            (3599, "há 59 min"),
+            (3600, "há 1 h"),
+            (7_200_000, "há 2.000 h"),
+        ] {
+            assert_eq!(ago(secs), want, "{secs} s");
+        }
+        assert_eq!(
+            age(Some(Utc::now() - chrono::Duration::seconds(90))),
+            "há 1 min",
+            "age() must use the same formatter"
+        );
+        assert_eq!(age(None), "aguardando");
+    }
+
+    #[test]
+    fn handoff_badge_only_with_open_handoffs_after_a_collection() {
+        let handoffs = vec![Handoff::default(); 3];
+        for (case, api, want) in [
+            (
+                "no collection yet",
+                ApiSnapshot {
+                    handoff_total: Some(75),
+                    handoffs: handoffs.clone(),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "server total",
+                ApiSnapshot {
+                    at: Some(Utc::now()),
+                    handoff_total: Some(1234),
+                    handoffs: handoffs.clone(),
+                    ..Default::default()
+                },
+                Some("1.234"),
+            ),
+            (
+                "list only, may be cut",
+                ApiSnapshot {
+                    at: Some(Utc::now()),
+                    handoffs: handoffs.clone(),
+                    ..Default::default()
+                },
+                Some("3+"),
+            ),
+            (
+                "server total zero",
+                ApiSnapshot {
+                    at: Some(Utc::now()),
+                    handoff_total: Some(0),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "empty list without total",
+                ApiSnapshot {
+                    at: Some(Utc::now()),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(handoff_badge(&api).as_deref(), want, "{case}");
+        }
+    }
+
+    #[test]
+    fn host_status_without_and_with_each_collection() {
+        let host = format!("Este {}", crate::platform::HOST);
+        let mut resources = ResourceSnapshot {
+            host_cpu: 23.4,
+            host_memory: 3 << 30,
+            host_total: 8 << 30,
+            ..Default::default()
+        };
+        let mut api = ApiSnapshot {
+            projects: vec![Project::default(); 14],
+            ..Default::default()
+        };
+        assert_eq!(
+            host_status(&resources, &api),
+            host,
+            "no resource collection"
+        );
+        api.at = Some(Utc::now());
+        assert_eq!(
+            host_status(&resources, &api),
+            host,
+            "no resource collection, even with the API"
+        );
+        resources.at = Some(Utc::now());
+        api.at = None;
+        assert_eq!(
+            host_status(&resources, &api),
+            format!("{host} · CPU 23% · Memória 3,0 GiB de 8,0 GiB")
+        );
+        api.at = Some(Utc::now());
+        assert_eq!(
+            host_status(&resources, &api),
+            format!("{host} · CPU 23% · Memória 3,0 GiB de 8,0 GiB · 14 projetos")
+        );
+        for (count, want) in [(0, "0 projetos"), (1, "1 projeto"), (2, "2 projetos")] {
+            api.projects = vec![Project::default(); count];
+            assert_eq!(
+                host_status(&resources, &api),
+                format!("{host} · CPU 23% · Memória 3,0 GiB de 8,0 GiB · {want}"),
+                "{count} projects"
+            );
+        }
+    }
+
+    #[test]
+    fn command_comma_opens_settings() {
+        let comma = |modifiers| egui::Event::Key {
+            key: egui::Key::Comma,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        assert_eq!(app.page, Page::Overview);
+        frame(
+            &mut app,
+            &ctx,
+            [1320., 860.],
+            vec![comma(egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.page, Page::Overview, "a bare comma must not navigate");
+        frame(
+            &mut app,
+            &ctx,
+            [1320., 860.],
+            vec![comma(egui::Modifiers::COMMAND)],
+        );
+        assert_eq!(app.page, Page::Settings, "Cmd/Ctrl + , must open Ajustes");
+    }
+
+    /// Nós do AccessKit com este papel e texto (o rótulo, ou o valor nos de
+    /// papel `Label`), com os retângulos.
+    fn widgets(out: &egui::FullOutput, role: egui::accesskit::Role, text: &str) -> Vec<egui::Rect> {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.role() == role && (node.label() == Some(text) || node.value() == Some(text))
+            })
+            .filter_map(|(_, node)| node.bounds())
+            .map(|b| {
+                egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                )
+            })
+            .collect()
+    }
+    fn widget_rect(out: &egui::FullOutput, role: egui::accesskit::Role, text: &str) -> egui::Rect {
+        match widgets(out, role, text)[..] {
+            [rect] => rect,
+            ref found => panic!("expected one {role:?} {text:?}, found {}", found.len()),
+        }
+    }
+    /// Repousa o ponteiro em `pos` além do atraso do tooltip (0,5 s; sem
+    /// relógio, cada frame avança 1/60 s) e devolve o último frame.
+    fn rest_pointer(
+        app: &mut MonitorApp,
+        ctx: &egui::Context,
+        size: [f32; 2],
+        pos: egui::Pos2,
+    ) -> egui::FullOutput {
+        let mut out = frame(app, ctx, size, vec![egui::Event::PointerMoved(pos)]);
+        for _ in 0..45 {
+            out = frame(app, ctx, size, vec![]);
+        }
+        out
+    }
+
+    #[test]
+    fn a_cut_sidebar_label_shows_its_whole_name_on_hover() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        // Sem o total do servidor, o contador "999+" corta "Sessões e handoffs".
+        app.api = ApiSnapshot {
+            at: Some(Utc::now()),
+            handoffs: vec![Handoff::default(); 999],
+            ..Default::default()
+        };
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            sidebar_texts(&ctx, &out).contains(&("Sessões e handoffs".to_owned(), true)),
+            "precondition: the label is cut"
+        );
+        let sessions = widget_rect(&out, Role::Button, "Sessões e handoffs");
+        let docker = widget_rect(&out, Role::Button, "Docker");
+        let tooltips = |out: &egui::FullOutput, text| widgets(out, Role::Label, text).len();
+        let before = tooltips(&out, "Sessões e handoffs");
+        let out = rest_pointer(&mut app, &ctx, size, sessions.center());
+        assert_eq!(
+            tooltips(&out, "Sessões e handoffs"),
+            before + 1,
+            "hovering a cut label must show the whole name"
+        );
+        // Um rótulo inteiro não ganha tooltip.
+        let before = tooltips(&out, "Docker");
+        let out = rest_pointer(&mut app, &ctx, size, docker.center());
+        assert_eq!(
+            tooltips(&out, "Docker"),
+            before,
+            "a label that fits needs no tooltip"
+        );
+    }
+
+    #[test]
+    fn source_rows_name_the_source_in_tooltip_and_accesskit() {
+        use egui::accesskit::Role;
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let shows = |out: &egui::FullOutput, text: &str| widgets(out, Role::Label, text).len();
+        let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+        for text in [
+            "ai-memory: aguardando primeira coleta",
+            "Docker: aguardando primeira coleta",
+        ] {
+            assert_eq!(shows(&out, text), 1, "{text}");
+        }
+        app.api.at = Some(Utc::now());
+        app.api.version = "3.3.1".into();
+        app.resources.at = Some(Utc::now());
+        app.resources.docker_error = Some("Docker CLI não encontrado.".into());
+        let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+        for text in ["ai-memory: conectado", "Docker: Docker CLI não encontrado."] {
+            assert_eq!(shows(&out, text), 1, "{text}");
+        }
+        assert!(
+            sidebar_texts(&ctx, &out).contains(&("ai-memory 3.3.1".to_owned(), false)),
+            "the row still shows the version"
+        );
+        // Erro com coleta anterior: vale o erro. No compacto, o tooltip do
+        // ponto diz o mesmo que o AccessKit.
+        app.api.error = Some("Falha ao conectar.".into());
+        let size = [720., 560.];
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let dot = widget_rect(&out, Role::Label, "ai-memory: Falha ao conectar.");
+        let out = rest_pointer(&mut app, &ctx, size, dot.center());
+        assert_eq!(
+            shows(&out, "ai-memory: Falha ao conectar."),
+            2,
+            "the compact dot's tooltip must name the source like its AccessKit label"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_drags_the_window_from_empty_bar_areas_but_not_from_the_pause_button() {
+        use egui::{Event, PointerButton, ViewportCommand, accesskit::Role};
+        fn commands(out: &egui::FullOutput) -> Vec<ViewportCommand> {
+            out.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone()
+        }
+        let size = [1320., 860.];
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // Pressiona, arrasta 40 pontos e solta; devolve os comandos dos três frames.
+        let drag = |app: &mut MonitorApp, ctx: &egui::Context, from: egui::Pos2| {
+            let to = from + Vec2::new(40., 0.);
+            [
+                vec![Event::PointerMoved(from), press(from, true)],
+                vec![Event::PointerMoved(to)],
+                vec![press(to, false)],
+            ]
+            .into_iter()
+            .flat_map(|events| commands(&frame(app, ctx, size, events)))
+            .filter(|c| *c == ViewportCommand::StartDrag)
+            .count()
+        };
+        let mut app = app_with_unsaved_draft();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        // Primeiro frame: os widgets que os próximos frames vão atingir.
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let pause = widget_rect(&out, Role::Button, "Pausar atualização da tela");
+        let title = widget_rect(&out, Role::Label, "Visão geral");
+        let chip = widget_rect(&out, Role::Label, "Conectando…");
+        // Entre o título e o chip, e no meio da faixa de 52 px da lateral.
+        let empty_bar = egui::pos2((title.right() + chip.left()) / 2., pause.center().y);
+        let sidebar_strip = egui::pos2(110., 26.);
+
+        assert_eq!(
+            drag(&mut app, &ctx, empty_bar),
+            1,
+            "empty top bar must drag"
+        );
+        assert_eq!(
+            drag(&mut app, &ctx, sidebar_strip),
+            1,
+            "sidebar strip must drag"
+        );
+        assert_eq!(
+            drag(&mut app, &ctx, pause.center()),
+            0,
+            "dragging from the pause button must not move the window"
+        );
+        assert!(!app.paused, "a drag is not a click");
+        // O fundo vem antes: um clique no botão ainda chega a ele.
+        frame(
+            &mut app,
+            &ctx,
+            size,
+            vec![
+                Event::PointerMoved(pause.center()),
+                press(pause.center(), true),
+            ],
+        );
+        frame(&mut app, &ctx, size, vec![press(pause.center(), false)]);
+        assert!(app.paused, "a click on the pause button must still pause");
+
+        let mut maximize = Vec::new();
+        for pressed in [true, false, true, false] {
+            maximize.extend(commands(&frame(
+                &mut app,
+                &ctx,
+                size,
+                vec![press(empty_bar, pressed)],
+            )));
+        }
+        assert!(
+            maximize.contains(&ViewportCommand::Maximized(true)),
+            "double click on the empty bar must maximize: {maximize:?}"
+        );
+    }
+
+    #[test]
+    fn main_area_scrolls_sideways_when_a_page_is_wider_than_720() {
+        // A linha de filtros da aba Sessões (busca, projeto, "Só abertas")
+        // passa da área de conteúdo em 720 pontos, com ou sem dados.
+        let label = |out: &egui::FullOutput| {
+            out.shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "Só abertas" => {
+                        Some(t.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .expect("the Sessões tab shows the filter row")
+        };
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Sessions;
+        app.session_tab = 1;
+        let ctx = styled();
+        let size = [720., 560.];
+        let before = label(&frame(&mut app, &ctx, size, vec![]));
+        assert!(
+            before.right() > 720. - 24.,
+            "precondition: the filter row overflows the content area ({})",
+            before.right()
+        );
+        // Ponteiro sobre a linha de filtros, dentro da área visível.
+        let pointer = egui::Event::PointerMoved(egui::pos2(400., before.center().y));
+        frame(&mut app, &ctx, size, vec![pointer.clone()]);
+        frame(
+            &mut app,
+            &ctx,
+            size,
+            vec![
+                pointer.clone(),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(-300., 0.),
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        let mut after = before;
+        for _ in 0..30 {
+            after = label(&frame(&mut app, &ctx, size, vec![pointer.clone()]));
+        }
+        assert!(
+            after.left() < before.left() - 50.,
+            "content cut at 720 must be reachable by scrolling sideways: x {} -> {}",
+            before.left(),
+            after.left()
+        );
     }
 }
