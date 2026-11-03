@@ -3740,6 +3740,59 @@ pub(crate) mod tests {
             }
         }
     }
+
+    #[test]
+    fn in_a_mid_height_window_only_the_preview_shrinks_and_the_middle_does_not_scroll() {
+        for height in [480., 520.] {
+            for (theme, p) in THEMES {
+                let ctx = context(theme);
+                let mut input = String::new();
+                let mut add = |ui: &mut Ui| {
+                    confirm_sheet(
+                        ui,
+                        &sheet_with(Some("acme / legado"), FIVE_MINUTES),
+                        &mut input,
+                        |ui| {
+                            for i in 0..200 {
+                                ui.label(format!("linha {i}"));
+                            }
+                        },
+                    );
+                };
+                let mut out = open(&ctx, [800., height], &mut add);
+                for _ in 0..10 {
+                    out = run_sized(&ctx, [800., height], vec![], &mut add);
+                }
+                let frame = rects(&out)
+                    .into_iter()
+                    .find(|r| {
+                        r.corner_radius.se == 12 && r.corner_radius.nw == 0 && r.blur_width == 0.
+                    })
+                    .expect("the sheet")
+                    .rect;
+                let preview = preview_frame(&out, p);
+                let case = format!("{theme:?} {height}: {preview:?}");
+                // Borda (2), cabeçalho (~23), margens (16) e o conteúdo: nem
+                // no mínimo nem no máximo, com 10 de folga de cada lado (a
+                // prévia inteira mede 281).
+                assert!(
+                    preview.height() > 2. + 22. + 16. + PREVIEW_MIN + 10.,
+                    "{case}: shrunk below the minimum regime"
+                );
+                assert!(
+                    preview.height() < 2. + 24. + 16. + PREVIEW_HEIGHT - 10.,
+                    "{case}: did not shrink"
+                );
+                let middle: Vec<Rect> =
+                    scroll_handles(&out, frame.with_max_x(frame.right() - 23.), p.text2)
+                        .into_iter()
+                        .filter(|h| !preview.contains_rect(*h))
+                        .collect();
+                assert!(middle.is_empty(), "{case}: the middle scrolls: {middle:?}");
+            }
+        }
+    }
+
     /// Os retângulos dos textos pintados dentro de `area`.
     fn texts_in(out: &egui::FullOutput, area: Rect) -> Vec<Rect> {
         text_rects(out)
