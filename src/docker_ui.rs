@@ -20,11 +20,15 @@
 //!   a mesma ordem, qualquer que seja a ordem em que o Docker listou.
 //! - Seleção = ID do contêiner. Padrão: o monitorado (`config.container`) se
 //!   estiver na lista filtrada, senão o primeiro. Se o selecionado some ou
-//!   sai do filtro, volta ao padrão; lista vazia = sem inspetor.
+//!   sai do filtro, volta ao padrão e a tela estreita volta à tabela; lista
+//!   vazia = sem inspetor.
 //! - Largura de conteúdo ≥ `SIDE_BY_SIDE`: inspetor de `INSPECTOR` à
-//!   direita. Abaixo disso, o inspetor vem depois da tabela, na mesma
-//!   rolagem. A coluna Portas só aparece com a tabela a partir de
-//!   `PORTS_FROM` (no inspetor, sempre). Tudo sai da largura do frame.
+//!   direita, na altura toda. Abaixo disso, um de cada vez, como nas
+//!   Sessões: a tabela; um clique (ou a Visão geral) abre o inspetor no lugar
+//!   dela, com "← Voltar"; mudar a busca ou "Só em execução" volta à tabela.
+//!   A coluna Portas só aparece com a tabela a partir de `PORTS_FROM` (no
+//!   inspetor, sempre). Tudo sai da largura do frame; nada do layout
+//!   anterior fica.
 use crate::{
     app::{ago, process_matches, short_id},
     model::{
@@ -300,12 +304,37 @@ fn duration(text: &str) -> Option<String> {
     };
     Some(format!("{} {}", number(n), if n == 1 { one } else { many }))
 }
-/// "(0) 2 hours ago" de Exited e Restarting: "há 2 horas (código 0)".
-fn exited(rest: &str) -> Option<String> {
+/// "(0) 2 hours ago" de Exited e Restarting: ("2 horas", "0").
+fn exited(rest: &str) -> Option<(String, &str)> {
     let (code, rest) = rest.strip_prefix('(')?.split_once(") ")?;
     code.parse::<i64>().ok()?;
-    let ago = duration(rest.strip_suffix(" ago")?)?;
-    Some(format!("há {ago} (código {code})"))
+    Some((duration(rest.strip_suffix(" ago")?)?, code))
+}
+/// Há quanto tempo o contêiner está no estado atual, do `Status` do `docker
+/// ps` ("Up 3 days", "Exited (0) 2 hours ago" → "há 3 dias", "há 2 horas");
+/// `None` fora desses formatos.
+fn since(status: &str) -> Option<String> {
+    let status = status.trim();
+    let time = if let Some(up) = status.strip_prefix("Up ") {
+        duration(up.rsplit_once(" (").map_or(up, |(up, _)| up))?
+    } else {
+        let rest = status
+            .strip_prefix("Exited ")
+            .or_else(|| status.strip_prefix("Restarting "))?;
+        exited(rest)?.0
+    };
+    Some(format!("há {time}"))
+}
+/// A 2ª linha do Nome depois da imagem: em execução, só a duração ("há 3
+/// dias", como o artboard); noutro estado com duração, o estado em pt-BR na
+/// frente ("parado há 2 horas"); sem duração, só o estado.
+fn state_since(state: &str, status: &str) -> String {
+    let label = state_label(state);
+    match since(status) {
+        Some(when) if state == "running" => when,
+        Some(when) => format!("{label} {when}"),
+        None => label.to_owned(),
+    }
 }
 /// O `Status` do `docker ps` em pt-BR ("Up 3 days" → "Em execução há 3
 /// dias"). Vazio = o estado; um formato desconhecido vem como veio.
@@ -340,9 +369,9 @@ fn status_label(status: &str, state: &str) -> String {
             _ => None,
         }
     } else if let Some(rest) = status.strip_prefix("Exited ") {
-        exited(rest).map(|t| format!("Parado {t}"))
+        exited(rest).map(|(ago, code)| format!("Parado há {ago} (código {code})"))
     } else if let Some(rest) = status.strip_prefix("Restarting ") {
-        exited(rest).map(|t| format!("Reiniciando {t}"))
+        exited(rest).map(|(ago, code)| format!("Reiniciando há {ago} (código {code})"))
     } else {
         None
     };
@@ -361,6 +390,10 @@ pub(crate) struct Docker {
     sort: Sort,
     /// ID do contêiner no inspetor.
     selected: Option<String>,
+    /// Tela estreita: o inspetor no lugar da tabela.
+    open: bool,
+    /// Busca e "Só em execução" do frame anterior.
+    shown: (String, bool),
 }
 impl Default for Docker {
     fn default() -> Self {
@@ -370,22 +403,29 @@ impl Default for Docker {
             running_only: false,
             sort: Sort::default(),
             selected: None,
+            open: false,
+            shown: (String::new(), false),
         }
     }
 }
 
 impl Docker {
-    /// Reconexão: a seleção (os contêineres são de outra conexão). Aba,
-    /// busca, "Só em execução" e ordenação ficam.
+    /// Reconexão: a seleção (os contêineres são de outra conexão) e, na tela
+    /// estreita, a volta à tabela. Aba, busca, "Só em execução" e ordenação
+    /// ficam.
     pub(crate) fn reset(&mut self) {
         self.selected = None;
+        self.open = false;
     }
     /// A Visão geral abre um contêiner: a aba Contêineres com ele no
-    /// inspetor. A busca sai, para ele não ficar fora da lista.
+    /// inspetor (na tela estreita, no lugar da tabela). A busca sai, para ele
+    /// não ficar fora da lista; limpá-la aqui não conta como troca de filtro.
     pub(crate) fn open(&mut self, id: &str) {
         self.tab = Tab::Containers;
         self.search.clear();
+        self.shown.0.clear();
         self.selected = Some(id.to_owned());
+        self.open = true;
     }
     #[cfg(test)]
     pub(crate) fn selected(&self) -> Option<&str> {
@@ -423,6 +463,11 @@ impl Docker {
         match self.tab {
             Tab::Containers => {
                 self.summary(ui, r);
+                let key = (self.search.clone(), self.running_only);
+                if key != self.shown {
+                    self.shown = key;
+                    self.open = false;
+                }
                 let matching: Vec<&Container> = r
                     .containers
                     .iter()
@@ -644,8 +689,9 @@ impl Docker {
         );
     }
 
-    /// A tabela (cabeçalho fixo, linhas visíveis), a linha dos ocultos e o
-    /// inspetor, ao lado ou abaixo.
+    /// A tabela (cabeçalho fixo, linhas visíveis) e a linha dos ocultos;
+    /// o inspetor ao lado na tela larga. Na estreita, um de cada vez: a
+    /// tabela; um clique abre o inspetor no lugar dela, com "← Voltar".
     fn containers(
         &mut self,
         ui: &mut Ui,
@@ -654,9 +700,24 @@ impl Docker {
         r: &ResourceSnapshot,
         monitored: &str,
     ) {
-        let p = theme::palette(ui.visuals());
         let rect = ui.max_rect();
-        let side = rect.width() >= SIDE_BY_SIDE && !rows.is_empty();
+        let wide = rect.width() >= SIDE_BY_SIDE;
+        let current = rows
+            .iter()
+            .copied()
+            .find(|c| self.selected.as_deref() == Some(c.id.as_str()));
+        if current.is_none() && self.selected.is_some() {
+            // Sumiu ou saiu do filtro: a tabela na tela estreita.
+            self.open = false;
+        }
+        if !wide
+            && self.open
+            && let Some(c) = current
+        {
+            self.inspector_column(ui, rect, c, r, monitored, true);
+            return;
+        }
+        let side = wide && !rows.is_empty();
         let table = if side {
             Rect::from_min_max(rect.min, pos2(rect.right() - INSPECTOR - 1., rect.bottom()))
         } else {
@@ -666,10 +727,7 @@ impl Docker {
         let columns = columns(table.width());
         self.header(ui, table, &columns);
         rows.sort_by(|a, b| order(a, b, self.sort));
-        if !rows
-            .iter()
-            .any(|c| self.selected.as_deref() == Some(c.id.as_str()))
-        {
+        if current.is_none() {
             self.selected = rows
                 .iter()
                 .find(|c| c.name == monitored)
@@ -688,6 +746,7 @@ impl Docker {
                 .max_rect(body)
                 .layout(Layout::top_down(Align::Min)),
         );
+        widgets::scroll_bar(&mut child);
         let (mut clicked, mut show_all) = (None, false);
         egui::ScrollArea::vertical()
             .id_salt("docker-containers")
@@ -727,55 +786,65 @@ impl Docker {
                 if hidden > 0 {
                     show_all = hidden_line(ui, hidden);
                 }
-                if !side && let Some(c) = find(&clicked.clone().or(selected.clone())) {
-                    ui.add_space(space::S);
-                    let shown = egui::Frame::new()
-                        .fill(p.surf)
-                        .inner_margin(egui::Margin::symmetric(20, 18))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            inspector(ui, c, r, monitored);
-                        })
-                        .response;
-                    ui.painter().hline(
-                        shown.rect.x_range(),
-                        shown.rect.top() + 0.5,
-                        Stroke::new(1.0_f32, p.line),
-                    );
-                    shown.widget_info(|| {
-                        WidgetInfo::labeled(WidgetType::Panel, true, "Inspetor do contêiner")
-                    });
-                }
             });
         if side && let Some(c) = find(&clicked.clone().or(selected)) {
             let at = Rect::from_min_max(pos2(table.right() + 1., rect.top()), rect.max);
-            widgets::pane(ui, at, "Inspetor do contêiner");
-            ui.painter().rect_filled(at, 0., p.surf);
-            ui.painter()
-                .vline(at.left() - 0.5, at.y_range(), Stroke::new(1.0_f32, p.line));
-            let mut column = ui.new_child(
-                UiBuilder::new()
-                    .max_rect(at)
-                    .layout(Layout::top_down(Align::Min)),
-            );
-            egui::ScrollArea::vertical()
-                .id_salt(("docker-inspector", &c.id))
-                .auto_shrink(false)
-                .show(&mut column, |ui| {
-                    egui::Frame::new()
-                        .inner_margin(egui::Margin::symmetric(20, 18))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            inspector(ui, c, r, monitored);
-                        });
-                });
+            self.inspector_column(ui, at, c, r, monitored, false);
         }
         if clicked.is_some() {
             self.selected = clicked;
+            self.open = true;
         }
         if show_all {
             self.running_only = false;
         }
+    }
+
+    /// O inspetor em `at`, na altura toda: fundo surf, borda line à
+    /// esquerda e o conteúdo rolando. `back` = tela estreita, com "← Voltar".
+    fn inspector_column(
+        &mut self,
+        ui: &mut Ui,
+        at: Rect,
+        c: &Container,
+        r: &ResourceSnapshot,
+        monitored: &str,
+        back: bool,
+    ) {
+        let p = theme::palette(ui.visuals());
+        widgets::pane(ui, at, "Inspetor do contêiner");
+        ui.painter().rect_filled(at, 0., p.surf);
+        // Ao lado, no 1 px entre a tabela e o inspetor; sozinho, dentro.
+        let edge = if back {
+            at.left() + 0.5
+        } else {
+            at.left() - 0.5
+        };
+        ui.painter()
+            .vline(edge, at.y_range(), Stroke::new(1.0_f32, p.line));
+        let mut column = ui.new_child(
+            UiBuilder::new()
+                .max_rect(at)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt(("docker-inspector", &c.id))
+            .auto_shrink(false)
+            .show(&mut column, |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(20, 18))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        if back
+                            && ui
+                                .add(Button::secondary("← Voltar").small().on_surf())
+                                .clicked()
+                        {
+                            self.open = false;
+                        }
+                        inspector(ui, c, r, monitored);
+                    });
+            });
     }
 
     /// Cabeçalho de `HEAD`: Nome, CPU, Memória e Tarefas ordenam ao clique,
@@ -863,8 +932,9 @@ fn columns(width: f32) -> Vec<(Col, f32)> {
     columns
 }
 
-/// Uma linha de `ROW`: ponto, nome e "imagem · estado"; CPU e memória com a
-/// barra; tarefas; portas. Selecionada: fundo sel e o filete acc de 3 px.
+/// Uma linha de `ROW`: ponto, nome e "imagem · há 3 dias" (`state_since`);
+/// CPU e memória com a barra; tarefas; portas ("—" sem nenhuma).
+/// Selecionada: fundo sel e o filete acc de 3 px.
 fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected: bool) -> Response {
     let p = theme::palette(ui.visuals());
     let on = running(c);
@@ -877,7 +947,7 @@ fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected:
         .map_or_else(unknown, |t| number(t as usize));
     let ports = host_ports(&c.ports);
     let state = state_label(&c.state);
-    let second = format!("{} · {state}", dash(&c.image));
+    let second = format!("{} · {}", dash(&c.image), state_since(&c.state, &c.status));
     let response = ui.interact(rect, ui.id().with(("container", &c.id)), Sense::click());
     let spoken = format!(
         "{} · {state} · CPU {cpu} · Memória {memory} · Tarefas {tasks}",
@@ -972,8 +1042,14 @@ fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected:
                 );
             }
             Col::Ports => {
-                let galley =
-                    widgets::one_line(ui, &ports, Type::Mono.font(), p.text2, cell.width());
+                // Sem porta, o "—" das outras colunas (o da fonte mono é
+                // outro traço).
+                let font = if ports == "—" {
+                    Type::Body.font()
+                } else {
+                    Type::Mono.font()
+                };
+                let galley = widgets::one_line(ui, &ports, font, p.text2, cell.width());
                 elided |= galley.elided;
                 ui.painter().galley(
                     pos2(cell.left(), rect.center().y - galley.size().y / 2.),
@@ -1071,14 +1147,14 @@ fn inspector(ui: &mut Ui, c: &Container, r: &ResourceSnapshot, monitored: &str) 
     if ours {
         status.push_str(" · contêiner monitorado");
     }
-    ui.add(Label::new(RichText::new(status).size(12.).color(p.text2)).truncate());
+    ui.add(Label::new(RichText::new(status).size(12.).color(p.text2)).wrap());
     ui.add_space(10.);
     let limit = c
         .usage
         .as_ref()
         .filter(|u| u.limit > 0)
         .map_or_else(|| "—".to_owned(), |u| bytes(u.limit));
-    widgets::facts(
+    widgets::details(
         ui,
         &[
             Fact::new("Imagem", dash(&c.image)),
@@ -1110,10 +1186,10 @@ fn inspector(ui: &mut Ui, c: &Container, r: &ResourceSnapshot, monitored: &str) 
     ui.add_space(10.);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = space::S;
-        if ui.add(Button::secondary("Copiar ID")).clicked() {
+        if ui.add(Button::secondary("Copiar ID").on_surf()).clicked() {
             ui.ctx().copy_text(c.id.clone());
         }
-        if ui.add(Button::secondary("Copiar nome")).clicked() {
+        if ui.add(Button::secondary("Copiar nome").on_surf()).clicked() {
             ui.ctx().copy_text(c.name.clone());
         }
     });
@@ -1833,8 +1909,10 @@ mod tests {
             for (text, color) in [
                 ("web", p.text),
                 ("db", p.text2),
-                ("web:latest · em execução", p.text2),
-                ("db:latest · parado", p.text2),
+                // Há quanto tempo no estado ("Up 3 days", "Exited (0) 2
+                // hours ago"), como o artboard.
+                ("web:latest · há 3 dias", p.text2),
+                ("db:latest · parado há 2 horas", p.text2),
                 ("25,0%", p.text),
                 ("256,0 MiB", p.text),
                 ("250,0%", p.text),
@@ -1928,7 +2006,14 @@ mod tests {
                 assert_eq!(t.galley.job.sections[0].format.font_id, Type::Mono.font());
                 assert_eq!(t.galley.job.sections[0].format.color, theme::DARK.text2);
             }
-            // No inspetor, sempre, por publicação.
+            // No inspetor, sempre, por publicação (estreita: depois do
+            // clique, no lugar da tabela).
+            let out = if size == NARROW {
+                page.click_row("web");
+                page.show()
+            } else {
+                out
+            };
             node(&out, Role::Label, "Portas: 80 → 80/tcp");
         }
         assert_eq!(PORTS_FROM, 710.);
@@ -2070,6 +2155,144 @@ mod tests {
             ("Em pausa", "paused", "Em pausa"),
         ] {
             assert_eq!(status_label(status, state), want, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn the_second_line_tells_how_long_in_the_state_or_else_the_state() {
+        // (Status, há quanto tempo no estado)
+        for (status, want) in [
+            ("Up 3 days", Some("há 3 dias")),
+            ("Up 5 hours (healthy)", Some("há 5 horas")),
+            ("Up 3 weeks (Paused)", Some("há 3 semanas")),
+            ("Up 3 days (sleepy)", Some("há 3 dias")),
+            ("Up About an hour", Some("há cerca de uma hora")),
+            ("Up Less than a second", Some("há menos de um segundo")),
+            ("Up 1 day", Some("há 1 dia")),
+            ("  Up 1234 days ", Some("há 1.234 dias")),
+            ("Exited (0) 2 hours ago", Some("há 2 horas")),
+            (
+                "Exited (137) About a minute ago",
+                Some("há cerca de um minuto"),
+            ),
+            ("Restarting (1) 5 seconds ago", Some("há 5 segundos")),
+            ("Created", None),
+            ("Dead", None),
+            ("Removal In Progress", None),
+            ("", None),
+            ("Up", None),
+            ("Up 3 fortnights", None),
+            ("Exited (x) 2 hours ago", None),
+            ("Exited (0) 2 hours", None),
+            ("Restarting", None),
+            ("Em pausa", None),
+        ] {
+            assert_eq!(since(status).as_deref(), want, "{status:?}");
+        }
+        // (estado, Status com duração, Status sem duração, com, sem): em
+        // execução só a duração; os outros com o estado na frente; sem
+        // duração, só o estado.
+        for (state, timed, untimed, with, without) in [
+            ("running", "Up 3 days", "Up", "há 3 dias", "em execução"),
+            (
+                "exited",
+                "Exited (0) 2 hours ago",
+                "Exited (x) 2 hours ago",
+                "parado há 2 horas",
+                "parado",
+            ),
+            (
+                "paused",
+                "Up 5 minutes (Paused)",
+                "",
+                "pausado há 5 minutos",
+                "pausado",
+            ),
+            (
+                "restarting",
+                "Restarting (1) 5 seconds ago",
+                "Restarting",
+                "reiniciando há 5 segundos",
+                "reiniciando",
+            ),
+            (
+                "created",
+                "Up About a minute",
+                "Created",
+                "criado há cerca de um minuto",
+                "criado",
+            ),
+            ("zumbi", "Up 1 day", "Em pausa", "zumbi há 1 dia", "zumbi"),
+        ] {
+            // Um estado novo do Docker tem de entrar nesta tabela.
+            assert_eq!(state_since(state, timed), with, "{state} {timed:?}");
+            assert_eq!(state_since(state, untimed), without, "{state} {untimed:?}");
+        }
+        // Na linha pintada.
+        let mut created = stopped("loki", "created");
+        created.status = "Created".into();
+        let mut odd = stopped("tempo", "exited");
+        odd.status = "Exited (x) 2 hours ago".into();
+        let mut paused = stopped("minio", "paused");
+        paused.status = "Up 3 weeks (Paused)".into();
+        let r = collected(vec![
+            running("web", 1., 1, 1, ""),
+            stopped("db", "exited"),
+            paused,
+            created,
+            odd,
+        ]);
+        let out = Page::new(egui::Theme::Dark, WIDE, r).show();
+        let painted: Vec<String> = texts(&out).into_iter().map(|(t, _)| t).collect();
+        for want in [
+            "web:latest · há 3 dias",
+            "db:latest · parado há 2 horas",
+            "minio:latest · pausado há 3 semanas",
+            "loki:latest · criado",
+            "tempo:latest · parado",
+        ] {
+            assert!(painted.iter().any(|t| t == want), "{want}: {painted:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_ports_cell_is_the_same_dash_as_the_other_columns() {
+        for (theme, p) in THEMES {
+            let r = collected(vec![
+                running("web", 1., 1, 1, ""),
+                running("api", 1., 1, 1, "0.0.0.0:80->80/tcp"),
+                stopped("db", "exited"),
+            ]);
+            let out = Page::new(theme, WIDE, r).show();
+            let dashes = |name: &str| -> Vec<(FontId, Color32)> {
+                let row = row_rect(&out, name);
+                out.shapes
+                    .iter()
+                    .filter_map(|c| match &c.shape {
+                        egui::Shape::Text(t)
+                            if t.galley.text() == "—"
+                                && row.contains_rect(t.visual_bounding_rect()) =>
+                        {
+                            let f = &t.galley.job.sections[0].format;
+                            Some((f.font_id.clone(), f.color))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let dash = (Type::Body.font(), p.text2);
+            // Parado: CPU, Memória, Tarefas e Portas, todos iguais.
+            assert_eq!(dashes("db"), vec![dash.clone(); 4], "{theme:?}");
+            // Em execução sem porta: só a coluna Portas.
+            assert_eq!(dashes("web"), vec![dash.clone()], "{theme:?}");
+            assert!(dashes("api").is_empty(), "{theme:?}");
+            let port = out.shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "80" => {
+                    Some(t.galley.job.sections[0].format.font_id.clone())
+                }
+                _ => None,
+            });
+            assert_eq!(port, Some(Type::Mono.font()), "a port stays mono");
         }
     }
 
@@ -2445,6 +2668,95 @@ mod tests {
     }
 
     #[test]
+    fn inspector_values_wrap_left_aligned_in_12_px_and_the_buttons_stand_on_bg() {
+        let image = "docker.io/akitaonrails/ai-memory:latest-com-uma-tag-bem-comprida";
+        for (theme, p) in THEMES {
+            let mut c = running("ai-memory", 12.4, 421, 46, "127.0.0.1:49374->49374/tcp");
+            c.image = image.into();
+            c.status = "Up 18 hours (healthy)".into();
+            c.block_io = "69.9GB / 3.58GB".into();
+            let mut page = Page::new(theme, WIDE, collected(vec![c]));
+            let out = page.show();
+            let pane = rect_of(&node(&out, Role::Pane, "Inspetor do contêiner"));
+            let painted = |text: &str| -> egui::epaint::TextShape {
+                out.shapes
+                    .iter()
+                    .find_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text() == text => Some(t.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{theme:?}: {text} painted whole"))
+            };
+            // Valores inteiros, quebrando linha dentro do inspetor.
+            let mut lefts = Vec::new();
+            for (text, font, lines) in [
+                (image, Type::Caption.font(), 2..=3),
+                (
+                    "69,9 GB lidos · 3,58 GB gravados",
+                    Type::Caption.font(),
+                    1..=2,
+                ),
+                ("127.0.0.1:49374 → 49374/tcp", Type::Mono.font(), 1..=2),
+                ("8,0 GiB", Type::Caption.font(), 1..=1),
+            ] {
+                let t = painted(text);
+                let rect = t.visual_bounding_rect();
+                let format = &t.galley.job.sections[0].format;
+                assert_eq!(
+                    (format.font_id.clone(), format.color, t.galley.elided),
+                    (font, p.text, false),
+                    "{theme:?}: {text}"
+                );
+                assert!(
+                    lines.contains(&t.galley.rows.len()),
+                    "{theme:?}: {text} in {} lines",
+                    t.galley.rows.len()
+                );
+                assert!(
+                    pane.contains_rect(rect),
+                    "{theme:?}: {text} {rect:?} in {pane:?}"
+                );
+                lefts.push(t.pos.x);
+            }
+            // À esquerda, na mesma coluna, a 14 do rótulo mais largo.
+            let label = painted("Limite de memória");
+            let column = label.pos.x + label.galley.size().x + 14.;
+            assert!(
+                lefts.iter().all(|&x| (x - column).abs() < 0.01),
+                "{theme:?}: {lefts:?} / {column}"
+            );
+            // Linhas a 8.
+            let a = rect_of(&node(&out, Role::Label, "Limite de memória: 8,0 GiB"));
+            let b = rect_of(&node(
+                &out,
+                Role::Label,
+                "Rede acumulada: 1,2 GB ↓ · 840 MB ↑",
+            ));
+            assert_eq!(b.top() - a.bottom(), 8., "{theme:?}");
+            // O status também quebra, sem cortar.
+            let status = painted("Em execução há 18 horas · saudável · contêiner monitorado");
+            assert!(
+                !status.galley.elided && status.galley.rows.len() == 2,
+                "{theme:?}"
+            );
+            // Copiar ID e nome: fundo bg sobre o surf.
+            let painted = rects(&out);
+            for button in ["Copiar ID", "Copiar nome"] {
+                let at = rect_of(&node(&out, Role::Button, button));
+                assert_eq!(
+                    painted
+                        .iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect::<Vec<_>>(),
+                    vec![p.bg],
+                    "{theme:?}: {button}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hidden_stopped_containers_are_counted_and_mostrar_turns_the_filter_off() {
         let mut page = Page::new(egui::Theme::Dark, WIDE, collected(eight()));
         let out = page.show();
@@ -2809,7 +3121,7 @@ mod tests {
                 "{rect:?} inside the Nome cell of {row:?}"
             );
         }
-        let tip = format!("{name}\n{} · parado\n—", c.image);
+        let tip = format!("{name}\n{} · parado há 2 horas\n—", c.image);
         assert!(!has(&out, Role::Label, &tip));
         let out = page.rest(row.center());
         node(&out, Role::Label, &tip);
@@ -2890,6 +3202,8 @@ mod tests {
                 descending: false,
             },
             selected: Some("id".into()),
+            open: true,
+            shown: ("busca".into(), true),
         };
         docker.reset();
         assert_eq!(
@@ -2898,7 +3212,8 @@ mod tests {
                 docker.search.as_str(),
                 docker.running_only,
                 docker.sort,
-                docker.selected.clone()
+                docker.selected.clone(),
+                docker.open
             ),
             (
                 Tab::Images,
@@ -2908,7 +3223,8 @@ mod tests {
                     col: Col::Name,
                     descending: false
                 },
-                None
+                None,
+                false
             )
         );
         docker.open("outro");
@@ -2916,9 +3232,17 @@ mod tests {
             (
                 docker.tab,
                 docker.search.as_str(),
-                docker.selected.as_deref()
+                docker.selected.as_deref(),
+                docker.open,
+                docker.shown.clone()
             ),
-            (Tab::Containers, "", Some("outro"))
+            (
+                Tab::Containers,
+                "",
+                Some("outro"),
+                true,
+                (String::new(), true)
+            )
         );
         assert_eq!(
             Docker::default().sort,
@@ -2931,8 +3255,8 @@ mod tests {
     }
 
     #[test]
-    fn inspector_is_beside_when_wide_and_below_the_rows_when_narrow() {
-        for (theme, _) in THEMES {
+    fn inspector_is_beside_when_wide_and_replaces_the_table_when_narrow() {
+        for (theme, p) in THEMES {
             let mut page = Page::new(theme, WIDE, collected(eight()));
             let out = page.show();
             let table = rect_of(&node(&out, Role::Pane, "Contêineres"));
@@ -2941,33 +3265,180 @@ mod tests {
             assert_eq!(inspector.right(), WIDE[0] - 8.);
             assert_eq!(table.left(), 8.);
             assert_eq!(table.right() + 1., inspector.left());
+            // Na altura toda da área, até a legenda.
             assert_eq!(inspector.top(), table.top());
-            // Estreita: a tabela na largura toda; o inspetor depois da última
-            // linha, na mesma rolagem.
+            assert_eq!(inspector.bottom(), table.bottom(), "{theme:?}");
+            assert!(!has(&out, Role::Button, "← Voltar"), "{theme:?}");
+            // Estreita: só a tabela, na largura toda, sem inspetor embaixo.
             page.size = NARROW;
             let out = page.show();
             let table = rect_of(&node(&out, Role::Pane, "Contêineres"));
             assert_eq!((table.left(), table.right()), (8., NARROW[0] - 8.));
+            assert!(!has(&out, Role::Pane, "Inspetor do contêiner"), "{theme:?}");
             let out = page.wheel(table.center(), -2000.);
+            assert!(!has(&out, Role::Pane, "Inspetor do contêiner"), "not below");
+            assert_eq!(selected(&out), ["ai-memory"], "the default selection");
+            // Um clique numa linha: o inspetor no lugar da tabela, na área toda.
+            page.click_row("postgres-dev");
+            let out = page.show();
+            assert!(!has(&out, Role::Pane, "Contêineres"), "{theme:?}");
+            assert!(rows(&out).is_empty(), "{theme:?}: no row behind it");
             let inspector = rect_of(&node(&out, Role::Pane, "Inspetor do contêiner"));
-            let last = row_rect(&out, "zipkin");
+            assert_eq!(inspector, table, "{theme:?}: the whole area");
             assert!(
-                inspector.top() >= last.bottom(),
-                "{inspector:?} below {last:?}"
+                rects(&out)
+                    .iter()
+                    .any(|r| r.rect == inspector && r.fill == p.surf),
+                "{theme:?}: surf"
             );
-            assert!(
-                (inspector.left() - table.left()).abs() < 0.5
-                    && inspector.right() <= table.right() + 0.5
-                    && inspector.width() > table.width() - 20.,
-                "{theme:?}: {inspector:?} spans {table:?}"
-            );
+            let name = rect_of(&nodes(&out, Role::Label, "postgres-dev")[0]);
+            assert!(inspector.contains_rect(name), "{theme:?}");
             let copy = rect_of(&node(&out, Role::Button, "Copiar nome"));
-            assert!(
-                table.contains_rect(copy),
-                "reachable: {copy:?} in {table:?}"
-            );
+            assert!(inspector.contains_rect(copy), "{theme:?}");
             let out = page.click(copy.center());
-            assert_eq!(copied(&out), ["ai-memory"]);
+            assert_eq!(copied(&out), ["postgres-dev"]);
+            // "← Voltar": a tabela outra vez, com a seleção.
+            page.click_on(Role::Button, "← Voltar");
+            let out = page.show();
+            assert!(!has(&out, Role::Pane, "Inspetor do contêiner"), "{theme:?}");
+            assert_eq!(selected(&out), ["postgres-dev"], "{theme:?}");
+            // Larga e estreita de novo, no mesmo contexto: aberto, segue
+            // aberto; nada do layout anterior fica.
+            page.click_row("redis-cache");
+            for (size, beside) in [(WIDE, true), (NARROW, false), (WIDE, true)] {
+                page.size = size;
+                let out = page.show();
+                assert_eq!(has(&out, Role::Pane, "Contêineres"), beside, "{size:?}");
+                let inspector = rect_of(&node(&out, Role::Pane, "Inspetor do contêiner"));
+                let want = if beside { INSPECTOR } else { size[0] - 16. };
+                assert_eq!(inspector.width(), want, "{theme:?} {size:?}");
+                node(&out, Role::Label, "Rede acumulada: 1,2 GB ↓ · 840 MB ↑");
+                assert_eq!(
+                    page.docker.selected(),
+                    Some(&*format!("redis-cache-{LONG_ID}"))
+                );
+            }
         }
+    }
+
+    #[test]
+    fn the_table_shows_its_scroll_bar_only_when_rows_overflow() {
+        let many: Vec<Container> = (0..30)
+            .map(|i| running(&format!("c{i:02}"), (30 - i) as f64, 1, 1, ""))
+            .collect();
+        for (theme, p) in THEMES {
+            // (contêineres, puxador?): 30 × 44 não cabem em 600; oito, sim
+            // numa janela alta.
+            for (containers, size, shown) in [
+                (many.clone(), NARROW, true),
+                (many.clone(), WIDE, true),
+                (eight(), [610., 1200.], false),
+            ] {
+                let mut page = Page::new(theme, size, collected(containers));
+                let mut out = page.show();
+                for _ in 0..10 {
+                    out = page.show();
+                }
+                let table = rect_of(&node(&out, Role::Pane, "Contêineres"));
+                let body = Rect::from_min_max(pos2(table.left(), table.top() + HEAD), table.max);
+                let handles = crate::widgets::tests::scroll_handles(&out, body, p.text2);
+                assert_eq!(
+                    handles.len(),
+                    usize::from(shown),
+                    "{theme:?} {size:?}: {handles:?}"
+                );
+                // A barra flutua no respiro direito: as linhas mantêm a largura.
+                let first = row_rect(&out, if shown { "c00" } else { "ai-memory" });
+                assert_eq!(first.right(), table.right(), "{theme:?} {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_narrow_inspector_goes_back_to_the_table_when_its_container_leaves() {
+        let mut page = Page::new(egui::Theme::Dark, NARROW, collected(eight()));
+        page.monitored = "redis-cache".into();
+        let open = |page: &mut Page, name: &str| {
+            page.click_row(name);
+            let out = page.show();
+            assert!(
+                has(&out, Role::Pane, "Inspetor do contêiner"),
+                "{name} opens"
+            );
+            assert!(!has(&out, Role::Pane, "Contêineres"));
+        };
+        // Some na coleta: a tabela, no padrão (o monitorado).
+        open(&mut page, "postgres-dev");
+        page.r = collected(
+            eight()
+                .into_iter()
+                .filter(|c| c.name != "postgres-dev")
+                .collect(),
+        );
+        let out = page.show();
+        assert!(has(&out, Role::Pane, "Contêineres"));
+        assert!(!has(&out, Role::Pane, "Inspetor do contêiner"));
+        assert_eq!(selected(&out), ["redis-cache"]);
+        // Coleta nova com ele, outra ordem e outros valores: segue aberto.
+        page.r = collected(eight());
+        open(&mut page, "postgres-dev");
+        let mut next = eight();
+        next.reverse();
+        next[6].usage.as_mut().unwrap().cpu = 90.;
+        page.r = collected(next);
+        let out = page.show();
+        assert!(
+            has(&out, Role::Pane, "Inspetor do contêiner"),
+            "follows the ID"
+        );
+        node(&out, Role::Label, "Limite de memória: 8,0 GiB");
+        // A busca o tira: a tabela, no primeiro que sobra.
+        page.r = collected(eight());
+        page.docker.search = "redis".into();
+        let out = page.show();
+        assert!(has(&out, Role::Pane, "Contêineres"));
+        assert!(!has(&out, Role::Pane, "Inspetor do contêiner"));
+        assert_eq!(selected(&out), ["redis-cache"]);
+        // Mudar a busca com ele ainda na lista também volta à tabela.
+        open(&mut page, "redis-cache");
+        page.docker.search = "red".into();
+        let out = page.show();
+        assert!(
+            has(&out, Role::Pane, "Contêineres"),
+            "a new search shows the table"
+        );
+        assert_eq!(selected(&out), ["redis-cache"], "and keeps the selection");
+        // "Só em execução" esconde o parado aberto: a tabela.
+        page.docker.search.clear();
+        page.show();
+        open(&mut page, "minio");
+        page.docker.running_only = true;
+        let out = page.show();
+        assert!(has(&out, Role::Pane, "Contêineres"));
+        assert!(!has(&out, Role::Pane, "Inspetor do contêiner"));
+        assert_eq!(selected(&out), ["redis-cache"]);
+        // Reconexão: a seleção sai e a tela volta à tabela.
+        page.docker.running_only = false;
+        page.show();
+        open(&mut page, "minio");
+        page.docker.reset();
+        // Dois frames: no 1º a seleção volta ao padrão; no 2º, sem `open`
+        // limpo, o inspetor do padrão tomaria a tela.
+        page.show();
+        let out = page.show();
+        assert!(has(&out, Role::Pane, "Contêineres"));
+        assert!(!has(&out, Role::Pane, "Inspetor do contêiner"));
+        assert_eq!(selected(&out), ["redis-cache"]);
+        // A Visão geral abre um contêiner: o inspetor, mesmo com busca.
+        page.docker.search = "nada".into();
+        page.show();
+        page.docker.open(&format!("postgres-dev-{LONG_ID}"));
+        let out = page.show();
+        assert!(
+            has(&out, Role::Pane, "Inspetor do contêiner"),
+            "opened from the overview"
+        );
+        node(&out, Role::Button, "← Voltar");
+        assert_eq!(page.docker.search, "");
     }
 }

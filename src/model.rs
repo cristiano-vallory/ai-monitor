@@ -410,6 +410,9 @@ pub struct Usage {
 pub struct ResourceSample {
     pub at: DateTime<Utc>,
     pub ai: Option<Usage>,
+    /// O `ai` é o contêiner monitorado em execução, já somado em `docker`;
+    /// `false` = processos nativos (fora do Docker) ou sem medida.
+    pub ai_in_docker: bool,
     pub docker: Option<Usage>,
 }
 
@@ -480,13 +483,18 @@ impl ResourceSnapshot {
         Some(total)
     }
     pub fn ai_usage(&self, name: &str) -> Option<Usage> {
+        self.ai_measure(name).map(|(usage, _)| usage)
+    }
+    /// O uso do ai-memory e a origem: `true` = o contêiner `name` em execução
+    /// (já somado em `docker_total`); `false` = os processos nativos.
+    pub fn ai_measure(&self, name: &str) -> Option<(Usage, bool)> {
         if self.docker_error.is_none()
             && let Some(c) = self
                 .containers
                 .iter()
                 .find(|c| c.name == name && c.state == "running")
         {
-            return c.usage.clone();
+            return c.usage.clone().map(|usage| (usage, true));
         }
         let native: Vec<_> = self
             .processes
@@ -496,7 +504,7 @@ impl ResourceSnapshot {
         if native.is_empty() {
             return None;
         }
-        Some(Usage {
+        let usage = Usage {
             cpu: native.iter().map(|p| p.usage.cpu).sum(),
             memory: native.iter().map(|p| p.usage.memory).sum(),
             tasks: native
@@ -504,6 +512,19 @@ impl ResourceSnapshot {
                 .map(|p| p.usage.tasks)
                 .try_fold(0, |a, b| b.map(|v| a + v)),
             ..Default::default()
+        };
+        Some((usage, false))
+    }
+    /// A amostra do histórico desta coleta, com a origem do ai-memory
+    /// (`name` = o contêiner monitorado); `None` antes da 1ª coleta.
+    pub fn sample(&self, name: &str) -> Option<ResourceSample> {
+        let at = self.at?;
+        let ai = self.ai_measure(name);
+        Some(ResourceSample {
+            at,
+            ai_in_docker: ai.as_ref().is_some_and(|&(_, in_docker)| in_docker),
+            ai: ai.map(|(usage, _)| usage),
+            docker: self.docker_total(),
         })
     }
 }
@@ -736,6 +757,123 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(s.ai_usage("ai-memory").unwrap().cpu, 110.0);
+    }
+
+    #[test]
+    fn the_sample_records_whether_ai_memory_is_the_docker_container_or_native() {
+        let usage = |cpu: f64, memory: u64| Usage {
+            cpu,
+            memory,
+            tasks: Some(1),
+            ..Default::default()
+        };
+        let container = |name: &str, state: &str, u: Option<Usage>| Container {
+            name: name.into(),
+            state: state.into(),
+            usage: u,
+            ..Default::default()
+        };
+        let native = HostProcess {
+            pid: 42,
+            name: "ai-memory".into(),
+            group: "ai-memory".into(),
+            usage: usage(7., 70),
+        };
+        let web = container("web", "running", Some(usage(1., 10)));
+        let snapshot = |containers: Vec<Container>, processes: Vec<HostProcess>| ResourceSnapshot {
+            at: Some(Utc::now()),
+            containers,
+            processes,
+            ..Default::default()
+        };
+        // (caso, coleta, (CPU do ai-memory, no Docker?), CPU do Docker)
+        type Case<'a> = (&'a str, ResourceSnapshot, Option<(f64, bool)>, Option<f64>);
+        let cases: [Case<'_>; 8] = [
+            (
+                "container",
+                snapshot(
+                    vec![
+                        web.clone(),
+                        container("ai-memory", "running", Some(usage(5., 50))),
+                    ],
+                    vec![],
+                ),
+                Some((5., true)),
+                Some(6.),
+            ),
+            (
+                "native",
+                snapshot(vec![web.clone()], vec![native.clone()]),
+                Some((7., false)),
+                Some(1.),
+            ),
+            ("none", snapshot(vec![web.clone()], vec![]), None, Some(1.)),
+            (
+                "docker down",
+                ResourceSnapshot {
+                    docker_error: Some("Docker CLI não encontrado.".into()),
+                    ..snapshot(
+                        vec![container("ai-memory", "running", Some(usage(5., 50)))],
+                        vec![native.clone()],
+                    )
+                },
+                Some((7., false)),
+                None,
+            ),
+            (
+                "stopped container, native running",
+                snapshot(
+                    vec![web.clone(), container("ai-memory", "exited", None)],
+                    vec![native.clone()],
+                ),
+                Some((7., false)),
+                Some(1.),
+            ),
+            (
+                "running container wins over native",
+                snapshot(
+                    vec![container("ai-memory", "running", Some(usage(5., 50)))],
+                    vec![native.clone()],
+                ),
+                Some((5., true)),
+                Some(5.),
+            ),
+            (
+                "running container without stats: not measured, never native",
+                snapshot(
+                    vec![container("ai-memory", "running", None)],
+                    vec![native.clone()],
+                ),
+                None,
+                None,
+            ),
+            (
+                "another container's name",
+                snapshot(
+                    vec![container("ai-memory-old", "running", Some(usage(5., 50)))],
+                    vec![],
+                ),
+                None,
+                Some(5.),
+            ),
+        ];
+        for (case, s, ai, docker) in cases {
+            let sample = s.sample("ai-memory").expect("collected");
+            assert_eq!(
+                (
+                    sample.ai.as_ref().map(|u| (u.cpu, sample.ai_in_docker)),
+                    sample.docker.as_ref().map(|u| u.cpu)
+                ),
+                (ai, docker),
+                "{case}"
+            );
+            assert!(ai.is_some() || !sample.ai_in_docker, "{case}");
+            assert_eq!(sample.at, s.at.unwrap(), "{case}");
+        }
+        assert!(
+            ResourceSnapshot::default().sample("ai-memory").is_none(),
+            "no collection, no sample"
+        );
     }
 
     #[test]

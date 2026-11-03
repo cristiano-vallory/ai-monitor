@@ -259,7 +259,7 @@ fn window_theme_on(linux: bool, choice: Appearance, platform: Option<Theme>) -> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const THEMES: [(Theme, &Palette); 2] = [(Theme::Dark, &DARK), (Theme::Light, &LIGHT)];
@@ -296,7 +296,7 @@ mod tests {
     }
 
     /// Contraste WCAG 2.x entre duas cores opacas.
-    fn contrast(a: Color32, b: Color32) -> f64 {
+    pub(crate) fn contrast(a: Color32, b: Color32) -> f64 {
         let luminance = |c: Color32| {
             let [r, g, b] = [c.r(), c.g(), c.b()].map(|v| {
                 let v = f64::from(v) / 255.;

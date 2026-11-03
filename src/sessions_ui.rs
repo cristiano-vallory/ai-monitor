@@ -59,6 +59,8 @@ const TABLE: widgets::TableSize = widgets::TableSize {
 const FOOT: f32 = 1. + 12. + 28.;
 /// Abaixo desta altura útil o pé do detalhe rola junto com o texto.
 const PINNED: f32 = 360.;
+/// Folga à direita do conteúdo rolável do detalhe, para a barra de rolagem.
+const DETAIL_GAP: f32 = space::L;
 /// Largura máxima de um filtro (projeto, agente).
 const PICKER: f32 = 200.;
 const SEARCH: &str = "Projeto, agente, ID ou resumo";
@@ -529,6 +531,7 @@ impl Sessions {
                 .max_rect(scroll)
                 .layout(Layout::top_down(Align::Min)),
         );
+        widgets::scroll_bar(&mut child);
         let mut area = egui::ScrollArea::vertical()
             .id_salt("handoff-list")
             .auto_shrink(false);
@@ -718,6 +721,9 @@ impl Sessions {
             .id_salt(("handoff-detail", &h.scope, &h.id))
             .auto_shrink(false)
             .show(&mut scroll, |ui| {
+                // Folga para a barra de rolagem (10 px ao passar o mouse):
+                // sem ela, a faixa e o texto encostam na barra.
+                ui.set_max_width(ui.available_width() - DETAIL_GAP);
                 ui.spacing_mut().item_spacing.y = 6.;
                 ui.add(Label::new(RichText::new(&h.scope).size(12.).color(p.text2)).truncate());
                 ui.add(Label::new(RichText::new(&title).font(Type::Detail.font())).wrap());
@@ -849,7 +855,8 @@ fn present<'a>(names: impl Iterator<Item = &'a str>, current: &str) -> Vec<Strin
     agents
 }
 
-/// Filtro de 24 px: `all` (vazio) e as opções; o texto corta em `PICKER`.
+/// Filtro de 24 px: `all` (vazio) e as opções, com o chevron de 10 px do
+/// artboard; o texto corta em `PICKER`.
 fn picker(
     ui: &mut Ui,
     id: &str,
@@ -867,6 +874,9 @@ fn picker(
         vec2(PICKER, 24.),
         Layout::left_to_right(Align::Center),
         |ui| {
+            // A seta do artboard: 10 px, a 6 do texto.
+            ui.spacing_mut().icon_width = 10.;
+            ui.spacing_mut().icon_spacing = 6.;
             // Largura sem corte: texto (12), seta e margens do botão.
             let spacing = ui.spacing();
             let natural = ui
@@ -884,6 +894,13 @@ fn picker(
             let response = egui::ComboBox::from_id_salt(id)
                 .selected_text(text.clone())
                 .truncate()
+                // O chevron fino (text) no lugar do triângulo cheio do egui;
+                // 10 × 10 fixo, mesmo com a expansão do hover.
+                .icon(|ui, rect, _, _| {
+                    let p = theme::palette(ui.visuals());
+                    let icon = Rect::from_center_size(rect.center(), Vec2::splat(10.));
+                    widgets::chevron(ui.painter(), icon, true, p.text);
+                })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(current, String::new(), all);
                     for option in options {
@@ -1988,6 +2005,32 @@ mod tests {
     }
 
     #[test]
+    fn the_list_shows_its_scroll_bar_only_when_rows_overflow() {
+        let now = Utc::now();
+        for (theme, p) in THEMES {
+            // (handoffs, puxador?): 200 não cabem; três, sim.
+            for (handoffs, shown) in [(two_hundred(now), true), (abc(now), false)] {
+                for size in [NARROW, WIDE] {
+                    let mut page = Page::new(theme, size, collected(handoffs.clone()), now);
+                    let mut out = page.show();
+                    for _ in 0..10 {
+                        out = page.show();
+                    }
+                    let list = rect_of(&node(&out, Role::Pane, "Lista de handoffs"));
+                    let body =
+                        Rect::from_min_max(list.min, pos2(list.right(), list.bottom() - LIST_FOOT));
+                    let handles = crate::widgets::tests::scroll_handles(&out, body, p.text2);
+                    assert_eq!(
+                        handles.len(),
+                        usize::from(shown),
+                        "{theme:?} {size:?}: {handles:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn only_the_visible_rows_are_mounted() {
         let now = Utc::now();
         let handoffs: Vec<Handoff> = (0..15)
@@ -2021,6 +2064,87 @@ mod tests {
         );
         assert!(rows(&out).len() < 30, "still only what is visible");
         assert!(!has(&out, Role::Button, "Título 0-0 · codex · 1 min"));
+    }
+
+    #[test]
+    fn the_detail_text_keeps_clear_of_the_scroll_bar() {
+        let now = Utc::now();
+        let cross = handoff(now, "acme / api", "id-x", "claude-code", 12, CROSS);
+        let strip = "Mensagem entre sessões · de “Trilha \"A\" & B” — marcação técnica ocultada.";
+        for (theme, _) in THEMES {
+            for (size, side) in [(WIDE, 28.), (NARROW, 0.)] {
+                let mut page = Page::new(theme, size, collected(vec![cross.clone()]), now);
+                if size == NARROW {
+                    page.click_on(Role::Button, "Pergunta ao dono. · claude-code · 12 min");
+                }
+                let out = page.show();
+                let detail = rect_of(&node(&out, Role::Pane, "Detalhe do handoff"));
+                let scroll_right = detail.right() - side;
+                let strip = rect_of(&node(&out, Role::Label, strip));
+                // 16 de folga: cabe a barra aberta (10) com respiro.
+                assert_eq!(
+                    strip.right(),
+                    scroll_right - 16.,
+                    "{theme:?} {size:?}: {strip:?} in {detail:?}"
+                );
+                let button = rect_of(&node(&out, Role::Button, "Ver texto bruto"));
+                assert!(button.right() <= strip.right(), "{theme:?} {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn filters_open_with_the_thin_10_px_chevron() {
+        let now = Utc::now();
+        for (theme, p) in THEMES {
+            let mut page = Page::new(theme, WIDE, collected(abc(now)), now);
+            let out = page.show();
+            for shown in ["Todos os projetos", "Agente: todos"] {
+                let combo = rect_of(&node(&out, Role::ComboBox, shown));
+                let paths: Vec<egui::epaint::PathShape> = crate::widgets::tests::shapes(&out)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Path(path)
+                            if path.points.iter().all(|&pt| combo.contains(pt)) =>
+                        {
+                            Some(path)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(paths.len(), 1, "{theme:?} {shown}: one icon, no triangle");
+                let path = &paths[0];
+                // O traço de 2,5 no quadro de 24, num ícone de 10 px.
+                let scale = 10. / 24.;
+                assert_eq!(
+                    (
+                        path.closed,
+                        path.fill,
+                        path.stroke.width,
+                        path.stroke.color.clone()
+                    ),
+                    (
+                        false,
+                        Color32::TRANSPARENT,
+                        2.5 * scale,
+                        egui::epaint::ColorMode::Solid(p.text)
+                    ),
+                    "{theme:?} {shown}"
+                );
+                let origin = path.points[1] - vec2(12., 15.) * scale;
+                let want: Vec<Pos2> = [(6., 9.), (12., 15.), (18., 9.)]
+                    .iter()
+                    .map(|&(x, y)| origin + vec2(x, y) * scale)
+                    .collect();
+                assert_eq!(path.points, want, "{theme:?} {shown}: chevron down");
+                // À direita do botão, centrado na altura.
+                let center = origin + vec2(5., 5.);
+                assert!(
+                    (center.y - combo.center().y).abs() < 0.5 && combo.right() - center.x < 20.,
+                    "{theme:?} {shown}: {center:?} in {combo:?}"
+                );
+            }
+        }
     }
 
     #[test]

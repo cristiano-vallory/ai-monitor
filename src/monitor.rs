@@ -150,13 +150,10 @@ impl Shared {
                 {
                     let mut target = resources.resources.lock().unwrap();
                     if resources.generation.load(Ordering::Acquire) == current {
-                        if let Some(at) = snapshot.at {
+                        if let Some(sample) = snapshot.sample(&config.container) {
+                            let at = sample.at;
                             let mut history = resources.history.lock().unwrap();
-                            history.push_back(ResourceSample {
-                                at,
-                                ai: snapshot.ai_usage(&config.container),
-                                docker: snapshot.docker_total(),
-                            });
+                            history.push_back(sample);
                             while history
                                 .front()
                                 .is_some_and(|s| (at - s.at).num_seconds() > 600)

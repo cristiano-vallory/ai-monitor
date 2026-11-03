@@ -7,15 +7,19 @@
 //! Regras desta tela:
 //! - Sem dado = "—", nunca 0. Sparkline e gráfico sem amostras não desenham
 //!   linha nenhuma.
-//! - Indicadores (`flex: 1 1 220px`) e a linha de baixo (`3 1 420px` e
-//!   `2 1 300px`) quebram como o `flex-wrap` do artboard, com gap 12
-//!   (`flex_lines`); na mesma linha, a mesma altura.
-//! - Outros contêineres = total do Docker − ai-memory, nunca negativo; sem o
-//!   ai-memory medido, o total do Docker.
+//! - Indicadores (mín. 220): os quatro numa linha quando cabem, senão 2 + 2
+//!   e, abaixo de dois, um por linha (`kpi_lines`). A linha de baixo
+//!   (`3 1 420px` e `2 1 300px`) quebra como o `flex-wrap` do artboard
+//!   (`flex_lines`). Gap 12; na mesma linha, a mesma altura.
+//! - Outros contêineres = total do Docker − ai-memory, nunca negativo, só
+//!   quando o ai-memory medido é o contêiner monitorado em execução; com o
+//!   ai-memory nativo (fora do Docker) ou sem medida, o total do Docker. O
+//!   cartão e o gráfico fazem a mesma conta (`stack`).
 //! - Gráfico, sparklines, média e pico na janela escolhida (1, 5 ou 10 min até
 //!   a última amostra), com as lacunas da coleta: amostra isolada = ponto;
 //!   intervalo acima de 3 coletas (mín. 65 s), tempo que volta ou amostra sem
-//!   o valor = a linha quebra.
+//!   o valor = a linha quebra. O eixo x do gráfico é a janela inteira; o da
+//!   sparkline (sem eixo) vai da 1ª amostra da janela à última.
 //! - Continuidade: handoffs = total do servidor ("N+" sem o total, "—" antes da
 //!   1ª coleta); sessões abertas = `open_session_links` (o mesmo número da aba
 //!   Sessões abertas); propostas só com projeto vigiado (`watched_pending`;
@@ -180,7 +184,7 @@ impl Overview {
                 let one_row = title.size().x + 16. + legend_width + 16. + controls <= width;
                 // Os segmentados vão da esquerda para a direita mesmo
                 // encostados à direita: num leiaute da direita para a
-                // esquerda, os itens de cada um sairiam invertidos.
+                // esquerda, a ordem entre os dois se inverteria.
                 ui.horizontal(|ui| {
                     ui.set_min_height(30.);
                     ui.label(egui::RichText::new("Recursos").font(Type::Section.font()));
@@ -251,19 +255,38 @@ pub(crate) fn flex_lines(width: f32, items: &[(f32, f32)], gap: f32) -> Vec<Vec<
         .collect()
 }
 
-/// Cartões nas linhas de `flex_lines`, com a mesma altura na linha; cada um é
-/// um nó `Pane` com o seu título.
+/// Os quatro indicadores numa linha quando cabem (`KPI_MIN` cada, com o
+/// gap); senão dois por linha (2 + 2, nunca 3 + 1), e um por linha abaixo de
+/// dois. Na linha, larguras iguais. Devolve, por linha, (índice, largura).
+pub(crate) fn kpi_lines(width: f32) -> Vec<Vec<(usize, f32)>> {
+    let fits = |n: f32| n * KPI_MIN + (n - 1.) * GAP <= width;
+    let per_line = if fits(4.) {
+        4
+    } else if fits(2.) {
+        2
+    } else {
+        1
+    };
+    let each = (width - GAP * (per_line - 1) as f32) / per_line as f32;
+    (0..4)
+        .collect::<Vec<usize>>()
+        .chunks(per_line)
+        .map(|line| line.iter().map(|&i| (i, each)).collect())
+        .collect()
+}
+
+/// Cartões nas `lines` (índice, largura), com a mesma altura na linha; cada
+/// um é um nó `Pane` com o seu título.
 fn cards(
     ui: &mut Ui,
     titles: &[&str],
-    items: &[(f32, f32)],
+    lines: Vec<Vec<(usize, f32)>>,
     margin: egui::Margin,
     mut add: impl FnMut(&mut Ui, usize),
 ) {
-    let width = ui.available_width();
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = GAP;
-        for line in flex_lines(width, items, GAP) {
+        for line in lines {
             let top = ui.next_widget_position().y;
             let mut x = ui.max_rect().left();
             let mut cells = Vec::new();
@@ -537,13 +560,11 @@ fn kpi_list(d: &Data<'_>, minutes: i64) -> [Kpi; 4] {
         .reduce(f64::max)
         .map(|v| bytes(v as u64));
     let docker = r.at.is_some() && r.docker_error.is_none();
-    let others = r.docker_total().map(|total| {
-        let (cpu, memory) = ai.as_ref().map_or((0., 0), |u| (u.cpu, u.memory));
-        format!(
-            "{}% · {}",
-            decimal((total.cpu - cpu).max(0.), 1),
-            bytes(total.memory.saturating_sub(memory))
-        )
+    // A mesma conta do gráfico (`stack`), na coleta atual.
+    let others = r.sample(&d.config.container).and_then(|s| {
+        let cpu = stack(&s, Metric::Cpu).1?;
+        let memory = stack(&s, Metric::Memory).1?;
+        Some(format!("{}% · {}", decimal(cpu, 1), bytes(memory as u64)))
     });
     let handoffs = open_handoffs(d.api);
     let sessions = match d.api.open_session_links() {
@@ -607,10 +628,11 @@ fn kpi_list(d: &Data<'_>, minutes: i64) -> [Kpi; 4] {
 fn kpis(ui: &mut Ui, d: &Data<'_>, minutes: i64) {
     let list = kpi_list(d, minutes);
     let titles = list.each_ref().map(|k| k.title);
+    let lines = kpi_lines(ui.available_width());
     cards(
         ui,
         &titles,
-        &[(KPI_MIN, 1.); 4],
+        lines,
         egui::Margin {
             left: 16,
             right: 16,
@@ -703,7 +725,8 @@ fn value_line(ui: &Ui, k: &Kpi, width: f32) -> (String, Arc<Galley>) {
     };
     (text, ui.painter().layout_job(job))
 }
-/// A série do ai-memory na janela, de 0 ao pico; sem amostras, nada.
+/// A série do ai-memory na janela, de 0 ao pico, da 1ª amostra da janela à
+/// última (`Axis::Samples`); sem amostras, nada.
 fn sparkline(
     painter: &egui::Painter,
     rect: Rect,
@@ -735,17 +758,34 @@ fn sparkline(
 
 // ---- Gráfico ----
 
-/// Trechos contínuos da janela: (fração do tempo na janela, valor). Quebra
+/// O eixo x de uma série.
+#[derive(Clone, Copy)]
+enum Axis {
+    /// A janela inteira, de `minutes` antes da última amostra até ela (o
+    /// gráfico, que mostra o eixo).
+    Window,
+    /// Da 1ª amostra dentro da janela até a última (a sparkline, sem eixo):
+    /// poucos segundos de histórico ocupam a largura toda; uma amostra só
+    /// fica na borda direita.
+    Samples,
+}
+/// Trechos contínuos da janela: (posição no `axis`, de 0 a 1, valor). Quebra
 /// quando o intervalo passa de 3 coletas (mín. 65 s), quando o tempo volta ou
 /// quando a amostra não tem o valor (que conta como a anterior no intervalo).
 fn runs<T>(
     history: &VecDeque<Sample>,
     minutes: i64,
     resource_seconds: u64,
+    axis: Axis,
     value: impl Fn(&Sample) -> Option<T>,
 ) -> Vec<Vec<(f32, T)>> {
     let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
     let start = end - chrono::Duration::minutes(minutes);
+    let origin = match axis {
+        Axis::Window => start,
+        Axis::Samples => history.iter().find(|s| s.at >= start).map_or(end, |s| s.at),
+    };
+    let span = (end - origin).num_milliseconds() as f32;
     let gap_limit = (resource_seconds.saturating_mul(3).max(65)) as i64;
     let mut runs = Vec::new();
     let mut run = Vec::new();
@@ -759,8 +799,11 @@ fn runs<T>(
             runs.push(std::mem::take(&mut run));
         }
         if let Some(v) = v {
-            let x = ((s.at - start).num_milliseconds() as f32 / (minutes * 60 * 1000) as f32)
-                .clamp(0., 1.);
+            let x = if span > 0. {
+                ((s.at - origin).num_milliseconds() as f32 / span).clamp(0., 1.)
+            } else {
+                1.
+            };
             run.push((x, v));
         }
         previous = Some(s.at);
@@ -776,7 +819,8 @@ fn plot_x(plot: Rect, x: f32) -> f32 {
 fn plot_y(plot: Rect, v: f64, max: f64) -> f32 {
     (plot.bottom() - plot.height() * (v / max) as f32).clamp(plot.top(), plot.bottom())
 }
-/// Linhas (trechos de 2+ amostras) e pontos (amostra isolada) de uma série.
+/// Linhas (trechos de 2+ amostras) e pontos (amostra isolada) de uma série
+/// da sparkline (`Axis::Samples`).
 fn segments(
     history: &VecDeque<Sample>,
     minutes: i64,
@@ -787,7 +831,7 @@ fn segments(
 ) -> (Vec<Vec<Pos2>>, Vec<Pos2>) {
     let mut lines = Vec::new();
     let mut dots = Vec::new();
-    for run in runs(history, minutes, resource_seconds, value) {
+    for run in runs(history, minutes, resource_seconds, Axis::Samples, value) {
         let points: Vec<Pos2> = run
             .into_iter()
             .map(|(x, v)| pos2(plot_x(plot, x), plot_y(plot, v, max)))
@@ -845,12 +889,14 @@ fn axis_label(metric: Metric, v: f64, max: f64) -> String {
         Metric::Memory => format!("{} MiB", decimal_up_to(v / MIB, 0)),
     }
 }
-/// ai-memory, outros (total do Docker − ai-memory, ≥ 0) e o total de uma
-/// amostra. Sem o ai-memory, os outros são o total.
+/// ai-memory, outros e o total do Docker de uma amostra. Outros = o total
+/// menos o ai-memory (≥ 0) só quando ele é o contêiner monitorado; nativo ou
+/// sem medida, ele não está no total e os outros são o total.
 fn stack(s: &Sample, metric: Metric) -> (Option<f64>, Option<f64>, Option<f64>) {
     let ai = s.ai.as_ref().map(|u| metric.of(u));
     let total = s.docker.as_ref().map(|u| metric.of(u));
-    let others = total.map(|t| (t - ai.unwrap_or(0.)).max(0.));
+    let inside = if s.ai_in_docker { ai.unwrap_or(0.) } else { 0. };
+    let others = total.map(|t| (t - inside).max(0.));
     (ai, others, total)
 }
 fn chart(
@@ -865,11 +911,13 @@ fn chart(
     let (rect, _) = ui.allocate_exact_size(vec2(width, PLOT_HEIGHT), Sense::hover());
     let plot = Rect::from_min_max(pos2(rect.left() + AXIS + AXIS_GAP, rect.top()), rect.max);
     let samples = window(history, minutes);
+    // O topo da pilha: o ai-memory mais os outros.
     let peak = samples
         .iter()
-        .flat_map(|s| [s.ai.as_ref(), s.docker.as_ref()])
-        .flatten()
-        .map(|u| metric.of(u))
+        .map(|s| {
+            let (ai, others, _) = stack(s, metric);
+            ai.unwrap_or(0.) + others.unwrap_or(0.)
+        })
         .fold(0., f64::max);
     let max = scale(metric, peak);
     let painter = ui.painter();
@@ -889,12 +937,14 @@ fn chart(
     let clip = painter.with_clip_rect(plot.expand(2.));
     let at = |x: f32, v: f64| pos2(plot_x(plot, x), plot_y(plot, v, max));
     // Outros, empilhados sobre o ai-memory, e a linha do total.
-    let stacked = runs(history, minutes, resource_seconds, |s| {
+    let stacked = runs(history, minutes, resource_seconds, Axis::Window, |s| {
         let (ai, others, _) = stack(s, metric);
         let base = ai.unwrap_or(0.);
         others.map(|o| (base, base + o))
     });
-    let ai = runs(history, minutes, resource_seconds, |s| stack(s, metric).0);
+    let ai = runs(history, minutes, resource_seconds, Axis::Window, |s| {
+        stack(s, metric).0
+    });
     for (series, color, alpha, width) in
         [(true, p.series2, 0.22, 1.5_f32), (false, p.acc, 0.28, 1.75)]
     {
@@ -1140,10 +1190,11 @@ fn legend_items(ui: &mut Ui, items: &[(Color32, &str)]) {
 /// outro.
 fn bottom(ui: &mut Ui, d: &Data<'_>) -> Option<Go> {
     let mut go = None;
+    let lines = flex_lines(ui.available_width(), &[(420., 3.), (300., 2.)], GAP);
     cards(
         ui,
         &["Contêineres em execução", "Handoffs recentes"],
-        &[(420., 3.), (300., 2.)],
+        lines,
         egui::Margin::ZERO,
         |ui, i| {
             let next = if i == 0 {
@@ -1490,6 +1541,8 @@ mod tests {
         Sample {
             at: now - chrono::Duration::seconds(ago),
             ai: ai.map(|(c, m)| usage(c, m)),
+            // O cenário padrão: o ai-memory é o contêiner monitorado.
+            ai_in_docker: ai.is_some(),
             docker: docker.map(|(c, m)| usage(c, m)),
         }
     }
@@ -1762,6 +1815,71 @@ mod tests {
     }
 
     #[test]
+    fn indicators_are_four_or_two_by_two_or_one_per_line_never_three_and_one() {
+        // (largura, índices por linha, largura de cada um)
+        let cases: [(f32, &[&[usize]], f32); 9] = [
+            (0., &[&[0], &[1], &[2], &[3]], 0.),
+            (451.9, &[&[0], &[1], &[2], &[3]], 451.9),
+            // 2 × 220 + 12.
+            (452., &[&[0, 1], &[2, 3]], 220.),
+            (594., &[&[0, 1], &[2, 3]], 291.),
+            // Onde o flex-wrap dava 3 + 1 (684–915,9): 2 + 2.
+            (684., &[&[0, 1], &[2, 3]], 336.),
+            (800., &[&[0, 1], &[2, 3]], 394.),
+            (915.9, &[&[0, 1], &[2, 3]], 451.95),
+            // 4 × 220 + 3 × 12.
+            (916., &[&[0, 1, 2, 3]], 220.),
+            (1040., &[&[0, 1, 2, 3]], 251.),
+        ];
+        for (width, want, each) in cases {
+            let got = kpi_lines(width);
+            let shape: Vec<Vec<usize>> = got
+                .iter()
+                .map(|line| line.iter().map(|&(i, _)| i).collect())
+                .collect();
+            assert_eq!(shape, want, "{width}");
+            assert!(
+                got.iter().flatten().all(|&(_, w)| (w - each).abs() < 0.01),
+                "{width}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn indicators_go_two_by_two_on_the_page_where_three_would_fit() {
+        for (theme, _) in THEMES {
+            // 816 − 16 = 800 de conteúdo: cabem três de 220, não quatro.
+            let mut page = Page::new(theme, [816., 1400.]);
+            let out = page.show();
+            let kpis: Vec<Rect> = [
+                "ai-memory · CPU",
+                "ai-memory · Memória",
+                "Contêineres",
+                "Continuidade",
+            ]
+            .iter()
+            .map(|t| pane(&out, t))
+            .collect();
+            let (left, right) = (8., 816. - 8.);
+            for line in [&kpis[..2], &kpis[2..]] {
+                assert!(
+                    (line[0].left() - left).abs() < 0.5
+                        && (line[1].right() - right).abs() < 0.5
+                        && (line[1].left() - line[0].right() - GAP).abs() < 0.5
+                        && line[0].top() == line[1].top()
+                        && line[0].size() == line[1].size(),
+                    "{theme:?}: {line:?}"
+                );
+            }
+            assert!(
+                kpis[2].top() >= kpis[0].bottom() + GAP - 0.5,
+                "{theme:?}: the second pair is a line of its own: {kpis:?}"
+            );
+            assert_eq!(kpis[0].width(), kpis[3].width(), "{theme:?}");
+        }
+    }
+
+    #[test]
     fn health_strip_names_every_state_with_its_tone_in_both_themes() {
         let now = Utc::now();
         let alerts = Snapshot {
@@ -1983,14 +2101,22 @@ mod tests {
         };
         let mut stopped_ai = resources(now);
         stopped_ai.containers[3] = stopped("ai-memory");
+        let process = crate::model::HostProcess {
+            pid: 77,
+            name: "ai-memory".into(),
+            group: "ai-memory".into(),
+            usage: usage(50., 1024),
+        };
         let native = ResourceSnapshot {
-            processes: vec![crate::model::HostProcess {
-                pid: 77,
-                name: "ai-memory".into(),
-                group: "ai-memory".into(),
-                usage: usage(50., 1024),
-            }],
+            processes: vec![process.clone()],
             ..stopped_ai.clone()
+        };
+        // Sem contêiner do ai-memory na lista: só o nativo.
+        let mut only_native = native.clone();
+        only_native.containers.remove(3);
+        let down_native = ResourceSnapshot {
+            processes: vec![process],
+            ..down.clone()
         };
         // (caso, recursos, histórico, API, saúde, os quatro cartões)
         let cases = [
@@ -2078,8 +2204,10 @@ mod tests {
                     ],
                 ],
             ),
+            // O nativo não está no total do Docker: nada a subtrair, mesmo
+            // acima do total.
             (
-                "native ai-memory above the Docker total: never below zero",
+                "stopped container, native running: the others are the whole Docker",
                 native,
                 history(now),
                 api(now),
@@ -2094,8 +2222,54 @@ mod tests {
                     [
                         "Contêineres",
                         "2 de 8 ativos",
-                        "demais contêineres: 0,0% · 0 B",
+                        "demais contêineres: 3,1% · 312,0 MiB",
                     ],
+                    [
+                        "Continuidade",
+                        "75 handoffs abertos",
+                        "11 sessões abertas · 3 propostas",
+                    ],
+                ],
+            ),
+            (
+                "native only: the others are the whole Docker",
+                only_native,
+                history(now),
+                api(now),
+                healthy(now),
+                [
+                    [
+                        "ai-memory · CPU",
+                        "50,0 %",
+                        "100% = 1 núcleo · média 5 min 19,7%",
+                    ],
+                    ["ai-memory · Memória", "1,0 GiB", "pico em 5 min: 500,0 MiB"],
+                    [
+                        "Contêineres",
+                        "2 de 7 ativos",
+                        "demais contêineres: 3,1% · 312,0 MiB",
+                    ],
+                    [
+                        "Continuidade",
+                        "75 handoffs abertos",
+                        "11 sessões abertas · 3 propostas",
+                    ],
+                ],
+            ),
+            (
+                "docker down, native running: no others",
+                down_native,
+                VecDeque::from([sample(now, 0, None, None)]),
+                api(now),
+                healthy(now),
+                [
+                    [
+                        "ai-memory · CPU",
+                        "50,0 %",
+                        "100% = 1 núcleo · média 5 min —",
+                    ],
+                    ["ai-memory · Memória", "1,0 GiB", "pico em 5 min: —"],
+                    ["Contêineres", "—", "demais contêineres: —"],
                     [
                         "Continuidade",
                         "75 handoffs abertos",
@@ -2264,15 +2438,19 @@ mod tests {
         }
     }
 
-    /// Linhas e pontos acc pintados na sparkline de `card`.
-    fn spark(out: &egui::FullOutput, card: &str, p: &theme::Palette) -> (Vec<usize>, usize) {
+    /// O retângulo da sparkline de `card` (borda 1 e margem 16 × 14).
+    fn spark_rect(out: &egui::FullOutput, card: &str) -> Rect {
         let pane = pane(out, card);
         let right = pane.right() - 1. - 16.;
         let top = pane.top() + 1. + 14.;
-        let rect = Rect::from_min_max(
+        Rect::from_min_max(
             pos2(right - SPARK_WIDTH, top),
             pos2(right, top + SPARK_HEIGHT),
-        );
+        )
+    }
+    /// Linhas e pontos acc pintados na sparkline de `card`.
+    fn spark(out: &egui::FullOutput, card: &str, p: &theme::Palette) -> (Vec<usize>, usize) {
+        let rect = spark_rect(out, card);
         let mut lines = Vec::new();
         let mut dots = 0;
         for s in shapes(out) {
@@ -2336,6 +2514,70 @@ mod tests {
     }
 
     #[test]
+    fn sparklines_span_their_samples_while_the_chart_keeps_the_window() {
+        for (theme, p) in THEMES {
+            let mut page = Page::new(theme, WIDE);
+            let now = page.now;
+            // Dez segundos de histórico numa janela de 5 min.
+            page.history = VecDeque::from([
+                sample(now, 10, Some((10., 400)), Some((15., 700))),
+                sample(now, 5, Some((20., 300)), Some((25., 700))),
+                sample(now, 0, Some((10., 400)), Some((15., 700))),
+            ]);
+            let out = page.show();
+            for card in ["ai-memory · CPU", "ai-memory · Memória"] {
+                let plot = spark_rect(&out, card).shrink2(vec2(1., 2.));
+                let xs: Vec<Vec<f32>> = shapes(&out)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        Shape::Path(path)
+                            if path.stroke.color == ColorMode::Solid(p.acc)
+                                && path.points.iter().all(|&pt| plot.contains(pt)) =>
+                        {
+                            Some(path.points.iter().map(|pt| pt.x).collect())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    xs,
+                    vec![vec![plot.left(), plot.center().x, plot.right()]],
+                    "{theme:?} {card}: from the first sample to the last"
+                );
+            }
+            let chart = plot(&out);
+            let line = lines_in(&out, chart, p.acc, 1.75);
+            let at = |ago: f32| chart.left() + chart.width() * (300. - ago) / 300.;
+            assert!(
+                line.len() == 1
+                    && line[0].len() == 3
+                    && line[0]
+                        .iter()
+                        .zip([at(10.), at(5.), at(0.)])
+                        .all(|(pt, x)| (pt.x - x).abs() < 0.01),
+                "{theme:?}: the chart keeps the 5 min axis: {line:?}"
+            );
+            // Uma amostra: o ponto na borda direita.
+            page.history = VecDeque::from([sample(now, 0, Some((10., 400)), None)]);
+            let out = page.show();
+            let plot = spark_rect(&out, "ai-memory · CPU").shrink2(vec2(1., 2.));
+            let dots: Vec<Pos2> = shapes(&out)
+                .into_iter()
+                .filter_map(|s| match s {
+                    Shape::Circle(c) if c.fill == p.acc && plot.contains(c.center) => {
+                        Some(c.center)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                dots,
+                vec![pos2(plot.right(), plot.bottom() - plot.height())]
+            );
+        }
+    }
+
+    #[test]
     fn chart_preserves_isolated_samples_and_scales_gap_with_resource_interval() {
         let base = Utc::now();
         let u = Some(Usage {
@@ -2348,11 +2590,13 @@ mod tests {
             Sample {
                 at: base - chrono::Duration::seconds(10),
                 ai: u.clone(),
+                ai_in_docker: false,
                 docker: None,
             },
             Sample {
                 at: base - chrono::Duration::seconds(8),
                 ai: None,
+                ai_in_docker: false,
                 docker: None,
             },
         ]);
@@ -2371,16 +2615,19 @@ mod tests {
             Sample {
                 at: base - chrono::Duration::seconds(132),
                 ai: u.clone(),
+                ai_in_docker: false,
                 docker: None,
             },
             Sample {
                 at: base - chrono::Duration::seconds(66),
                 ai: u.clone(),
+                ai_in_docker: false,
                 docker: None,
             },
             Sample {
                 at: base,
                 ai: u,
+                ai_in_docker: false,
                 docker: None,
             },
         ]);
@@ -2520,6 +2767,70 @@ mod tests {
                 (20, "ai-memory 10,0% · Outros 5,0% · Total Docker 15,0%"),
                 (10, "ai-memory 12,0% · Outros 0,0% · Total Docker 11,0%"),
                 (0, "ai-memory — · Outros 14,0% · Total Docker 14,0%"),
+            ] {
+                let out = page.hover(pos2(x(ago as f32), plot.center().y));
+                node(&out, Role::Label, &format!("{} · {want}", time(ago)));
+            }
+        }
+    }
+
+    #[test]
+    fn chart_never_subtracts_a_native_ai_memory_from_the_docker_total() {
+        for (theme, p) in THEMES {
+            let mut page = Page::new(theme, WIDE);
+            let now = page.now;
+            // As amostras do teste acima, com o ai-memory nativo: fora do
+            // total do Docker, os outros são o total inteiro, por cima dele.
+            let native = |ago, ai, docker| Sample {
+                ai_in_docker: false,
+                ..sample(now, ago, Some(ai), Some(docker))
+            };
+            page.history = VecDeque::from([
+                native(10, (10., 1), (15., 1)),
+                native(0, (12., 1), (11., 1)),
+            ]);
+            let out = page.show();
+            let plot = plot(&out);
+            // Topo da pilha 12 + 11 = 23 → 26,45 → eixo até 50%.
+            let (x, y) = (
+                |ago: f32| plot.left() + plot.width() * (300. - ago) / 300.,
+                |v: f32| plot.bottom() - plot.height() * v / 50.,
+            );
+            let near = |got: &[Pos2], want: &[(f32, f32)]| {
+                got.len() == want.len()
+                    && got
+                        .iter()
+                        .zip(want)
+                        .all(|(g, w)| (g.x - w.0).abs() < 0.01 && (g.y - w.1).abs() < 0.01)
+            };
+            let total = lines_in(&out, plot, p.series2, 1.5);
+            assert!(
+                total.len() == 1 && near(&total[0], &[(x(10.), y(25.)), (x(0.), y(23.))]),
+                "{theme:?}: others stacked whole over the native ai-memory {total:?}"
+            );
+            let others = meshes(&out, widgets::tone(p.series2, 0.22));
+            assert!(
+                others.len() == 1
+                    && near(
+                        &others[0],
+                        &[
+                            (x(10.), y(25.)),
+                            (x(0.), y(23.)),
+                            (x(0.), y(12.)),
+                            (x(10.), y(10.)),
+                        ]
+                    ),
+                "{theme:?}: others band {others:?}"
+            );
+            let time = |ago: i64| {
+                (now - chrono::Duration::seconds(ago))
+                    .with_timezone(&Local)
+                    .format("%H:%M:%S")
+                    .to_string()
+            };
+            for (ago, want) in [
+                (10, "ai-memory 10,0% · Outros 15,0% · Total Docker 15,0%"),
+                (0, "ai-memory 12,0% · Outros 11,0% · Total Docker 11,0%"),
             ] {
                 let out = page.hover(pos2(x(ago as f32), plot.center().y));
                 node(&out, Role::Label, &format!("{} · {want}", time(ago)));

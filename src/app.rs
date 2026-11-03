@@ -798,18 +798,6 @@ fn section(ui: &mut egui::Ui, text: &str) {
             .family(theme::semibold()),
     );
 }
-/// Texto em uma linha só, com reticências se passar de `width`.
-fn one_line(
-    ui: &egui::Ui,
-    text: &str,
-    font: egui::FontId,
-    color: Color32,
-    width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
-    ui.painter().layout_job(job)
-}
 /// O que fica à direita do rótulo de um item da lateral.
 enum Aside {
     Count(String),
@@ -886,7 +874,7 @@ fn nav_item(
         egui::FontFamily::Proportional
     };
     let left = icon.right() + 10.;
-    let galley = one_line(
+    let galley = crate::widgets::one_line(
         ui,
         label,
         egui::FontId::new(13., family),
@@ -1048,7 +1036,7 @@ fn source(
     ui.painter().circle_filled(dot, 3.5, color);
     if !compact {
         let left = dot.x + 3.5 + 8.;
-        let galley = one_line(ui, label, font, p.text2, rect.right() - left);
+        let galley = crate::widgets::one_line(ui, label, font, p.text2, rect.right() - left);
         ui.painter().galley(
             egui::pos2(left, rect.center().y - galley.size().y / 2.),
             galley,
@@ -3329,33 +3317,42 @@ mod tests {
                     let rows = container_rows(&out);
                     assert_eq!(rows[0].0, "ai-memory", "{case}");
                     assert!(rows.windows(2).all(|w| w[0].1.bottom() <= w[1].1.top()));
-                    let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+                    let inspector = widgets(&out, Role::Pane, "Inspetor do contêiner")
+                        .first()
+                        .copied();
                     if size[0] == 1320. {
+                        let inspector = inspector.expect("beside at 1320");
                         assert_eq!(inspector.width(), 320., "{case}");
                         assert!((inspector.right() - right).abs() < 0.5, "{case}");
                         assert_eq!(table.right() + 1., inspector.left(), "{case}");
                         widget_rect(&out, Role::Label, "Portas");
                     } else {
-                        // Depois das oito linhas, abaixo da dobra.
-                        assert!(inspector.top() > table.bottom(), "{case}: below the fold");
+                        // Só a tabela; um clique abre o inspetor no lugar dela.
+                        assert!(inspector.is_none(), "{case}: no inspector below");
+                        assert!(widgets(&out, Role::Label, "Portas").is_empty(), "{case}");
+                        click_at(&mut app, &ctx, size, rows[0].1.center());
+                        let out = frame(&mut app, &ctx, size, vec![]);
                         assert!(
-                            inspector.top() >= rows[0].1.top() + 8. * 44.,
-                            "{case}: {inspector:?} after the rows from {:?}",
-                            rows[0].1
+                            widgets(&out, Role::Pane, "Contêineres").is_empty(),
+                            "{case}"
                         );
-                        let out = wheel(&mut app, &ctx, size, table.center(), -3000.);
                         let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
-                        assert!(
-                            (inspector.left() - left).abs() < 0.5
-                                && (inspector.right() - right).abs() < 0.5,
-                            "{case}: {inspector:?} spans the content"
-                        );
+                        assert_eq!(inspector, table, "{case}: the table's place");
+                        widget_rect(&out, Role::Button, "← Voltar");
+                        // Em 720 × 560 os botões ficam abaixo da dobra: rolando
+                        // o inspetor, aparecem inteiros dentro dele.
+                        let out = wheel(&mut app, &ctx, size, inspector.center(), -3000.);
                         let copy = widget_rect(&out, Role::Button, "Copiar nome");
                         assert!(
-                            table.contains_rect(copy),
-                            "{case}: scrolled into view, not cut: {copy:?} in {table:?}"
+                            inspector.contains_rect(copy),
+                            "{case}: scrolled into view: {copy:?} in {inspector:?}"
                         );
-                        assert!(widgets(&out, Role::Label, "Portas").is_empty(), "{case}");
+                        for (name, rect) in page_widgets(&out, side, size[1]) {
+                            assert!(
+                                rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                                "{case}: {name:?} {rect:?} leaves the inspector"
+                            );
+                        }
                     }
                 }
             }
@@ -3395,9 +3392,55 @@ mod tests {
                     .all(|(_, r)| (r.left() - left).abs() < 0.5 && (r.right() - want).abs() < 0.5),
                 "{size:?}: rows follow the table: {rows:?}"
             );
-            let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
-            assert_eq!(inspector.left() > table.left(), beside, "{size:?}");
+            let inspector = widgets(&out, Role::Pane, "Inspetor do contêiner");
+            assert_eq!(inspector.len(), usize::from(beside), "{size:?}");
+            assert!(
+                inspector.iter().all(|i| i.left() > table.left()),
+                "{size:?}"
+            );
         }
+        // Aberto em 720 (um clique), segue aberto ao alargar e ao voltar:
+        // ao lado em 1320, no lugar da tabela em 720; "← Voltar" volta.
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        let row = container_rows(&out)
+            .into_iter()
+            .find(|(n, _)| n == "postgres-dev")
+            .unwrap()
+            .1;
+        click_at(&mut app, &ctx, narrow, row.center());
+        for (size, beside) in [(narrow, false), ([1320., 860.], true), (narrow, false)] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let (left, right) = content(&ctx, size);
+            let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+            let name = widget_rect(&out, Role::Label, "postgres-dev");
+            assert!(inspector.contains_rect(name), "{size:?}: {name:?}");
+            assert_eq!(
+                widgets(&out, Role::Pane, "Contêineres").len(),
+                usize::from(beside),
+                "{size:?}"
+            );
+            let want_left = if beside { right - 320. } else { left };
+            assert!(
+                (inspector.left() - want_left).abs() < 0.5
+                    && (inspector.right() - right).abs() < 0.5,
+                "{size:?}: {inspector:?}"
+            );
+            assert_eq!(
+                widgets(&out, Role::Button, "← Voltar").len(),
+                usize::from(!beside),
+                "{size:?}"
+            );
+        }
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        click_at(
+            &mut app,
+            &ctx,
+            narrow,
+            widget_rect(&out, Role::Button, "← Voltar").center(),
+        );
+        let out = frame(&mut app, &ctx, narrow, vec![]);
+        assert!(widgets(&out, Role::Pane, "Inspetor do contêiner").is_empty());
+        widget_rect(&out, Role::Pane, "Contêineres");
     }
 
     #[test]
@@ -3585,10 +3628,19 @@ mod tests {
                 Some(&*format!("postgres-dev-{}", "8f3c21a9d0e4".repeat(5)))
             );
             update_node(&out, Role::Button, "Contêineres 8");
-            if !scroll {
-                let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
-                assert!(inspector.contains_rect(widget_rect(&out, Role::Label, "postgres-dev")));
-            }
+            // Em 1320 ao lado da tabela; em 720 no lugar dela, com "← Voltar".
+            let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+            assert!(inspector.contains_rect(widget_rect(&out, Role::Label, "postgres-dev")));
+            assert_eq!(
+                widgets(&out, Role::Pane, "Contêineres").is_empty(),
+                scroll,
+                "{size:?}"
+            );
+            assert_eq!(
+                widgets(&out, Role::Button, "← Voltar").len(),
+                usize::from(scroll),
+                "{size:?}"
+            );
         }
     }
 
@@ -3719,6 +3771,8 @@ mod tests {
             ([1320., 860.], 4, true),
             ([1920., 1080.], 4, true),
             ([720., 560.], 2, false),
+            // 1000 − 232 − 48 = 720 de conteúdo: cabem três, vão 2 + 2.
+            ([1000., 700.], 2, false),
             ([1320., 860.], 4, true),
         ] {
             let out = frame(&mut app, &ctx, size, vec![]);
@@ -3737,7 +3791,7 @@ mod tests {
                 .iter()
                 .map(|t| widget_rect(&out, Role::Pane, t))
                 .collect();
-            let lines = crate::overview_ui::flex_lines(right - left, &[(220., 1.); 4], 12.);
+            let lines = crate::overview_ui::kpi_lines(right - left);
             assert_eq!(lines[0].len(), per_line, "{size:?}");
             for line in &lines {
                 let row: Vec<egui::Rect> = line.iter().map(|&(i, _)| kpis[i]).collect();

@@ -32,6 +32,16 @@ impl Section {
             Section::Maintenance => [(2, "Manutenção"), (3, "Backup e restauração")],
         }
     }
+    /// A legenda sem projeto escolhido; backup e checkpoints são da
+    /// Manutenção e backup.
+    fn pick_project(self) -> &'static str {
+        match self {
+            Section::Review => "Selecione o projeto para continuar.",
+            Section::Maintenance => {
+                "Selecione o projeto para continuar. Backup e checkpoints indicam explicitamente quando abrangem toda a instalação."
+            }
+        }
+    }
     fn of(tab: u8) -> Self {
         if tab < 2 {
             Section::Review
@@ -282,7 +292,7 @@ impl Management {
             self.discard();
         }
         let Some(scope) = self.scope.clone() else {
-            ui.small("Selecione o projeto para continuar. Backup e checkpoints indicam explicitamente quando abrangem toda a instalação.");
+            ui.small(section.pick_project());
             return None;
         };
         ui.separator();
@@ -710,6 +720,37 @@ mod tests {
                     "{label} on {section:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_caption_without_a_project_is_the_one_of_each_page() {
+        let review = "Selecione o projeto para continuar.";
+        let maintenance = "Selecione o projeto para continuar. Backup e checkpoints indicam explicitamente quando abrangem toda a instalação.";
+        for section in [Section::Review, Section::Maintenance] {
+            // Uma página nova tem de entrar nesta tabela.
+            let (mine, theirs) = match section {
+                Section::Review => (review, maintenance),
+                Section::Maintenance => (maintenance, review),
+            };
+            let shared = Shared::unstarted(crate::model::Config::default());
+            let mut m = Management::new(shared.clone());
+            let ctx = context(egui::Theme::Light);
+            let out = run(&ctx, vec![], |ui| {
+                m.show(ui, &shared, &[], section);
+            });
+            node(&out, Role::Label, mine);
+            assert!(
+                nodes(&out, Role::Label, theirs).is_empty(),
+                "{section:?}: not the caption of the other page"
+            );
+            // Com o projeto escolhido, a legenda sai.
+            m.scope = Some(scope());
+            let out = run(&ctx, vec![], |ui| {
+                m.show(ui, &shared, &[], section);
+            });
+            assert!(nodes(&out, Role::Label, mine).is_empty(), "{section:?}");
+            node(&out, Role::Button, section.tabs()[0].1);
         }
     }
 

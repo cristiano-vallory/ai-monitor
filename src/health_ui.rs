@@ -11,7 +11,7 @@ use crate::{
     widgets::{self, Fact, Tone, Type},
 };
 use chrono::{DateTime, Local, Utc};
-use eframe::egui::{self, Color32, RichText, Ui, pos2, vec2};
+use eframe::egui::{self, Align, Color32, Layout, RichText, Ui, pos2, vec2};
 use serde_json::Value;
 
 /// Títulos dos cartões da grade, na ordem do artboard.
@@ -238,7 +238,12 @@ fn size(v: &Value) -> String {
     v.as_u64().map(bytes).unwrap_or("—".into())
 }
 
-/// Ícone de estado num círculo de 40 px, título, subtítulo e a identidade.
+/// Largura mínima do texto do estado (`flex: 1 1 280px` do artboard).
+const STATUS_TEXT: f32 = 280.;
+
+/// Ícone de estado num círculo de 40 px; ao lado, o título em cima do
+/// subtítulo; e a identidade à direita, que desce quando o texto ficaria
+/// abaixo de `STATUS_TEXT`.
 fn status_card(ui: &mut Ui, state: &Overall, identity: Option<&health::Identity>) {
     let p = theme::palette(ui.visuals());
     let (fill, color) = state.tone(p);
@@ -281,11 +286,10 @@ fn status_card(ui: &mut Ui, state: &Overall, identity: Option<&health::Identity>
         .show(ui, |ui| {
             let width = ui.available_width();
             ui.set_min_width(width);
-            // A identidade vai à direita se o texto ainda tiver 220 px.
-            const IDENTITY: f32 = 210.;
-            let beside = width - 56. - IDENTITY - 16. >= 220.;
+            let identity = identity_width(ui, &rows);
+            let beside = width - 56. - identity - 16. >= STATUS_TEXT;
             let text_width = if beside {
-                width - 56. - IDENTITY - 16.
+                width - 56. - identity - 16.
             } else {
                 width - 56.
             };
@@ -295,15 +299,23 @@ fn status_card(ui: &mut Ui, state: &Overall, identity: Option<&health::Identity>
                 ui.painter().circle_filled(circle.center(), 20., fill);
                 let icon = egui::Rect::from_center_size(circle.center(), vec2(22., 22.));
                 state_icon(ui.painter(), icon, state, color);
-                ui.allocate_ui(vec2(text_width, 0.), |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.;
-                    ui.set_width(text_width);
-                    ui.label(RichText::new(state.title()).font(Type::Detail.font()));
-                    ui.add(
-                        egui::Label::new(RichText::new(state.subtitle()).color(p.text2).size(13.))
+                // Uma coluna: num `allocate_ui` a linha horizontal poria o
+                // título ao lado do subtítulo.
+                ui.allocate_ui_with_layout(
+                    vec2(text_width, 0.),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.;
+                        ui.set_width(text_width);
+                        ui.label(RichText::new(state.title()).font(Type::Detail.font()));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(state.subtitle()).color(p.text2).size(13.),
+                            )
                             .wrap(),
-                    );
-                });
+                        );
+                    },
+                );
                 if beside {
                     identity_grid(ui, &rows);
                 }
@@ -316,10 +328,28 @@ fn status_card(ui: &mut Ui, state: &Overall, identity: Option<&health::Identity>
             }
         });
 }
+/// A largura da identidade: o rótulo mais largo, 12 e o valor mais largo.
+fn identity_width(ui: &Ui, rows: &[(&str, String); 3]) -> f32 {
+    let widest = |texts: [&str; 3]| {
+        texts
+            .map(|text| {
+                ui.painter()
+                    .layout_no_wrap(text.to_owned(), Type::Caption.font(), Color32::PLACEHOLDER)
+                    .size()
+                    .x
+            })
+            .into_iter()
+            .fold(0., f32::max)
+    };
+    widest(rows.each_ref().map(|r| r.0)) + 12. + widest(rows.each_ref().map(|r| r.1.as_str()))
+}
 fn identity_grid(ui: &mut Ui, rows: &[(&str, String); 3]) {
     let p = theme::palette(ui.visuals());
+    // Sem largura mínima de coluna (o `max-content` do artboard), a largura
+    // é a de `identity_width` mesmo com os valores "—".
     egui::Grid::new("health-identity")
         .num_columns(2)
+        .min_col_width(0.)
         .spacing([12., 2.])
         .show(ui, |ui| {
             for (label, value) in rows {
@@ -800,11 +830,51 @@ mod tests {
                 let circles: Vec<_> = crate::widgets::tests::shapes(&out)
                     .into_iter()
                     .filter_map(|s| match s {
-                        egui::Shape::Circle(c) if c.radius == 20. => Some(c.fill),
+                        egui::Shape::Circle(c) if c.radius == 20. => Some((c.fill, c.center)),
                         _ => None,
                     })
                     .collect();
-                assert_eq!(circles, vec![fill], "{theme:?} {title}");
+                assert_eq!(
+                    circles.iter().map(|c| c.0).collect::<Vec<_>>(),
+                    vec![fill],
+                    "{theme:?} {title}"
+                );
+                // O ícone de 22 px no círculo: todo traço e ponto na cor do
+                // estado.
+                let icon_color = match state {
+                    Overall::Healthy => p.acc,
+                    Overall::Alerts(_) | Overall::Stale => p.warn,
+                    Overall::Unavailable(_) => p.bad,
+                    Overall::Waiting => p.text2,
+                };
+                let icon = egui::Rect::from_center_size(circles[0].1, vec2(22., 22.)).expand(1.);
+                let mut colors = Vec::new();
+                for shape in crate::widgets::tests::shapes(&out) {
+                    match shape {
+                        egui::Shape::Path(path)
+                            if path.points.iter().all(|&pt| icon.contains(pt)) =>
+                        {
+                            match path.stroke.color {
+                                egui::epaint::ColorMode::Solid(c) => colors.push(c),
+                                other => panic!("{title}: {other:?}"),
+                            }
+                        }
+                        egui::Shape::Circle(c) if c.radius < 20. && icon.contains(c.center) => {
+                            if c.stroke.width > 0. {
+                                colors.push(c.stroke.color);
+                            }
+                            if c.fill != Color32::TRANSPARENT {
+                                colors.push(c.fill);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(!colors.is_empty(), "{theme:?} {title}: the icon is painted");
+                assert!(
+                    colors.iter().all(|&c| c == icon_color),
+                    "{theme:?} {title}: {colors:?} / {icon_color:?}"
+                );
             }
         }
         let ctx = context(egui::Theme::Dark);
@@ -830,6 +900,79 @@ mod tests {
             3,
             "unknown identity: version, access and operators are —"
         );
+    }
+
+    #[test]
+    fn status_title_sits_over_its_subtitle_and_the_identity_drops_only_below_280() {
+        let now = Utc::now();
+        // (leitura, conteúdo, identidade ao lado?): 720 no macOS (594) e no
+        // Linux (608), 1320 (1040); a identidade saudável (~184) deixa 280
+        // ao texto a partir de ~578, então 590 fica e 570 desce; uma coluna
+        // estreita; e a identidade desconhecida ("—"), mais estreita.
+        let cases = [
+            (healthy(now), 594., true),
+            (healthy(now), 608., true),
+            (healthy(now), 1040., true),
+            (healthy(now), 590., true),
+            (healthy(now), 570., false),
+            (healthy(now), 420., false),
+            (Snapshot::default(), 594., true),
+            (Snapshot::default(), 1040., true),
+        ];
+        for (s, content, beside) in cases {
+            let state = overall(&s, now);
+            let subtitle = state.subtitle();
+            for (theme, _) in THEMES {
+                let ctx = context(theme);
+                let out = run_sized(&ctx, [content + 16., 2400.], vec![], |ui| {
+                    show(ui, &shared(), &s, false, false, now)
+                });
+                let case = format!("{theme:?} {content} {}", state.title());
+                let title = rect_of(&node(&out, Role::Label, state.title()));
+                let text = rect_of(&node(&out, Role::Label, &subtitle));
+                // Margem 8 do painel, borda 1, margem 20, círculo 40 e gap 16.
+                let left = 8. + 1. + 20. + 40. + 16.;
+                assert_eq!((title.left(), text.left()), (left, left), "{case}");
+                assert!(
+                    title.bottom() <= text.top(),
+                    "{case}: {title:?} over {text:?}"
+                );
+                let version = rect_of(&node(&out, Role::Label, "Versão"));
+                let identity = rect_of(&node(&out, Role::Label, "Distingue operadores"));
+                if beside {
+                    assert!(
+                        version.left() >= text.right() + 16. - 0.5 && version.top() < text.bottom(),
+                        "{case}: identity beside {version:?} / {text:?}"
+                    );
+                    assert!(
+                        version.left() - 16. - left >= STATUS_TEXT,
+                        "{case}: the text keeps 280"
+                    );
+                } else {
+                    assert!(version.top() > text.bottom(), "{case}: {version:?} below");
+                }
+                let right = content + 8. - 1. - 20.;
+                assert!(
+                    identity.right() <= right + 0.5,
+                    "{case}: {identity:?} inside"
+                );
+                // O cartão não passa da largura: a grade abaixo dele (que
+                // segue a largura da página) termina na borda do conteúdo.
+                let grid = CARDS
+                    .iter()
+                    .map(|t| rect_of(&node(&out, Role::Pane, t)).right())
+                    .fold(0., f32::max);
+                assert_eq!(grid, content + 8., "{case}: the card widened the page");
+                // Uma linha de 13 px tem 16: em 1320 o subtítulo cabe numa;
+                // em 720, com o título em cima, nos ~280 que sobram, em três.
+                let lines = (text.height() / 16.).round();
+                let most = if content > 1000. { 1. } else { 3. };
+                assert!(
+                    (1. ..=most).contains(&lines),
+                    "{case}: {lines} lines, {text:?}"
+                );
+            }
+        }
     }
 
     /// Todos os valores dos cartões, como o leitor de tela os diz.

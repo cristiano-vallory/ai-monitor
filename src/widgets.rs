@@ -23,11 +23,14 @@
 //!   é um nó AccessKit `Pane` com o título como rótulo.
 //! - `grid_columns(largura, itens) -> usize`: a conta da grade acima.
 //! - `toolbar(ui, |ui| esquerda, |ui| direita)`: linha de ferramentas no topo do
-//!   conteúdo da página; a direita é montada da direita para a esquerda.
+//!   conteúdo da página; a direita é montada da direita para a esquerda (a
+//!   1ª chamada fica na borda), e cada componente mantém a ordem interna (um
+//!   `segmented` ali segue da esquerda para a direita).
 //!
 //! Controles (todos respeitam `ui.add_enabled` / `add_enabled_ui`)
 //! - `ui.add(Button::primary("Salvar"))`, `Button::secondary`,
-//!   `Button::destructive`; `.small()` = 24 px e texto 12 (padrão: 28 px, 13).
+//!   `Button::destructive`; `.small()` = 24 px e texto 12 (padrão: 28 px, 13);
+//!   `.on_surf()` = fundo bg, para quando o botão fica sobre surf.
 //!   Raio 6. Desabilitado: `ui.add_enabled(false, Button::…)` pinta bg/line/text
 //!   e o egui esmaece (≈ o cinza do artboard). AccessKit: `Button`, com
 //!   `disabled` quando desabilitado.
@@ -38,7 +41,9 @@
 //!   `segmented_width(ui, &atual, &itens)`: a largura que ele ocupa, antes de
 //!   desenhar (para decidir a quebra de uma linha).
 //! - `switch(ui, &mut ligado, rótulo) -> Response`: interruptor 26 × 16 com
-//!   rótulo; `changed()` no clique. AccessKit: `CheckBox` marcado/desmarcado.
+//!   rótulo; `changed()` no clique. Ligado: trilho acc; desligado: trilho
+//!   line com borda e botão text2 (≥ 3:1 sobre o fundo). AccessKit:
+//!   `CheckBox` marcado/desmarcado.
 //! - `disclosure_row(ui, id, título, meta, |ui| corpo) -> Option<R>`: linha de
 //!   40 px com seta, título e `meta` (text2) à direita; `disclosure_link(ui, id,
 //!   título, |ui| corpo) -> Option<R>`: seta e título em 12, cor acc. Recolhidos
@@ -61,7 +66,14 @@
 //!   de 6. Numa linha só: o valor longo corta com reticências (o rótulo cede
 //!   até 40 % da largura) e o texto cortado vai ao tooltip. AccessKit: um
 //!   `Label` "rótulo: valor" por linha.
+//! - `details(ui, &[Fact::new(rótulo, valor)…])`: a variante do inspetor do
+//!   Docker: rótulos (12, text2) numa coluna da largura do maior e valores
+//!   (12, Regular, `cor` ou text; `.mono()` = `Type::Mono`) à esquerda, que
+//!   quebram linha em vez de cortar; linhas a 8, colunas a 14. AccessKit:
+//!   um `Label` "rótulo: valor" por linha.
 //! - `tone(cor, alfa) -> Color32`: o tom translúcido de chips e faixas.
+//! - `chevron(painter, rect, aberto, cor)`: a seta fina dos recolhíveis (para
+//!   baixo se aberto), também a dos filtros (`ComboBox::icon`).
 //! - `strokes(painter, rect, &[&[(x, y), …]], largura, cor)` e `dot(painter,
 //!   rect, (x, y), largura, cor)`: ícones a partir dos paths de 24 unidades dos
 //!   artboards (um traço que volta ao ponto inicial é fechado).
@@ -73,7 +85,7 @@
 //! - `empty(ui, título, subtítulo)`: mensagem centrada no fluxo (24 de
 //!   respiro, título Seção, subtítulo 12 text2 que quebra).
 //! - `search_field(ui, &mut texto, largura, dica)`: campo de busca de 12 px
-//!   com a lupa à esquerda e a `dica` como placeholder.
+//!   com a lupa à esquerda e a `dica` como placeholder em text2.
 //! - `split(ui, &[legenda], |ui| conteúdo) -> R`: dá ao conteúdo a altura que
 //!   sobra (mín. 120) e pinta as linhas da legenda (`caption`) embaixo.
 //! - `table(ui, id, &[Column { title, width, hint }], TableSize { head, row,
@@ -81,7 +93,10 @@
 //!   `hint` vai ao tooltip) e linhas de `row` com divisória, na largura e na
 //!   altura de `ui.max_rect()` a cada frame; `width: None` = a coluna que
 //!   estica (mín. 120). Só as linhas visíveis são montadas; `topo` volta a
-//!   rolagem ao início.
+//!   rolagem ao início. A barra de rolagem é a de `scroll_bar`.
+//! - `scroll_bar(ui)`: nas listas e tabelas, a barra de rolagem à vista
+//!   (4 px, text2) sempre que há mais linhas que a área; sem transbordo,
+//!   nenhuma. Chamar antes de montar a `ScrollArea`.
 use crate::theme;
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Galley, Layout, Pos2, Rect, Response,
@@ -283,6 +298,7 @@ pub(crate) struct Button<'a> {
     text: &'a str,
     kind: Kind,
     small: bool,
+    on_surf: bool,
 }
 impl<'a> Button<'a> {
     #[allow(dead_code, reason = "Fase 4: confirmações")]
@@ -301,10 +317,17 @@ impl<'a> Button<'a> {
             text,
             kind,
             small: false,
+            on_surf: false,
         }
     }
     pub(crate) fn small(mut self) -> Self {
         self.small = true;
+        self
+    }
+    /// Sobre um fundo surf (o inspetor do Docker): secundário e destrutivo
+    /// com fundo bg, que contrasta com ele.
+    pub(crate) fn on_surf(mut self) -> Self {
+        self.on_surf = true;
         self
     }
 }
@@ -312,11 +335,12 @@ impl egui::Widget for Button<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui.visuals());
         let enabled = ui.is_enabled();
+        let base = if self.on_surf { p.bg } else { p.surf };
         let (fill, stroke, color) = match (enabled, self.kind) {
             (false, _) => (p.bg, Some(p.line), p.text),
             (true, Kind::Primary) => (p.acc, None, p.on_acc),
-            (true, Kind::Secondary) => (p.surf, Some(p.line), p.text),
-            (true, Kind::Destructive) => (p.surf, Some(p.line), p.bad),
+            (true, Kind::Secondary) => (base, Some(p.line), p.text),
+            (true, Kind::Destructive) => (base, Some(p.line), p.bad),
         };
         let family = if self.kind == Kind::Primary {
             theme::semibold()
@@ -387,6 +411,17 @@ fn segment_text<T>(
     };
     (job, label)
 }
+/// A largura dos itens (texto + 24 cada), sem a moldura.
+fn items_width<T: PartialEq + Copy>(ui: &Ui, current: &T, items: &[Segment<'_, T>]) -> f32 {
+    let p = theme::palette(ui.visuals());
+    items
+        .iter()
+        .map(|item| {
+            let (job, _) = segment_text(p, item, *current == item.value);
+            ui.painter().layout_job(job).size().x + 24.
+        })
+        .sum()
+}
 /// A largura de `segmented` com estes itens: os itens (texto + 24), a margem
 /// de 2 e a borda de 1 dos dois lados.
 pub(crate) fn segmented_width<T: PartialEq + Copy>(
@@ -394,15 +429,7 @@ pub(crate) fn segmented_width<T: PartialEq + Copy>(
     current: &T,
     items: &[Segment<'_, T>],
 ) -> f32 {
-    let p = theme::palette(ui.visuals());
-    let inner: f32 = items
-        .iter()
-        .map(|item| {
-            let (job, _) = segment_text(p, item, *current == item.value);
-            ui.painter().layout_job(job).size().x + 24.
-        })
-        .sum();
-    inner + 2. * 2. + 2. * 1.
+    items_width(ui, current, items) + 2. * 2. + 2. * 1.
 }
 pub(crate) fn segmented<T: PartialEq + Copy>(
     ui: &mut Ui,
@@ -419,9 +446,11 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
         .show(ui, |ui| {
             // Uma linha de 24 desde o início: o `horizontal` começa com a
             // altura de interação (18) e, numa linha centrada, desceria e
-            // esticaria a moldura.
+            // esticaria a moldura. Na largura exata dos itens: num leiaute da
+            // direita para a esquerda (o lado direito de `toolbar`), a
+            // moldura encosta à direita com os itens na ordem.
             ui.allocate_ui_with_layout(
-                vec2(ui.available_width(), 24.),
+                vec2(items_width(ui, current, items), 24.),
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 0.;
@@ -474,12 +503,26 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, label));
     let track = Rect::from_min_size(pos2(rect.left(), rect.center().y - 8.), vec2(26., 16.));
     let painter = ui.painter();
-    painter.rect_filled(track, 8., if *on { p.acc } else { p.line });
-    // O botão claro do artboard: surf no tema claro (branco), text no escuro.
-    let knob = if ui.visuals().dark_mode {
-        p.text
+    // Desligado: trilho line com borda text2 e o botão text2, que se veem
+    // (≥ 3:1) sobre bg, surf e surf2 nos dois temas; o trilho line sozinho
+    // some no fundo. Ligado: o botão claro do artboard, surf no tema claro
+    // (branco) e text no escuro.
+    let knob = if !*on {
+        painter.rect(
+            track,
+            8.,
+            p.line,
+            Stroke::new(1.0_f32, p.text2),
+            StrokeKind::Inside,
+        );
+        p.text2
     } else {
-        p.surf
+        painter.rect_filled(track, 8., p.acc);
+        if ui.visuals().dark_mode {
+            p.text
+        } else {
+            p.surf
+        }
     };
     let x = if *on {
         track.left() + 12.
@@ -792,6 +835,48 @@ pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
     });
 }
 
+/// A lista do inspetor (o `dl` do Docker.dc.html): rótulos (12, text2) numa
+/// coluna da largura do maior; valores (12, Regular, `cor` ou text;
+/// `.mono()` = `Type::Mono`) alinhados à esquerda, que quebram linha (em
+/// qualquer ponto, se preciso) em vez de cortar. Linhas a 8, colunas a 14.
+/// AccessKit: um `Label` "rótulo: valor" por linha.
+pub(crate) fn details(ui: &mut Ui, rows: &[Fact<'_>]) {
+    let p = theme::palette(ui.visuals());
+    let labels: Vec<Arc<Galley>> = rows
+        .iter()
+        .map(|fact| {
+            ui.painter()
+                .layout_no_wrap(fact.label.to_owned(), Type::Caption.font(), p.text2)
+        })
+        .collect();
+    let column = labels.iter().map(|g| g.size().x).fold(0., f32::max);
+    let width = ui.available_width();
+    let value_width = (width - column - 14.).max(0.);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 8.;
+        for (fact, label) in rows.iter().zip(labels) {
+            let color = fact.color.unwrap_or(p.text);
+            let font = if fact.mono {
+                Type::Mono.font()
+            } else {
+                Type::Caption.font()
+            };
+            let value = ui
+                .painter()
+                .layout(fact.value.clone(), font, color, value_width);
+            let (rect, response) = ui.allocate_exact_size(
+                vec2(width, value.size().y.max(label.size().y)),
+                Sense::hover(),
+            );
+            let spoken = format!("{}: {}", fact.label, fact.value);
+            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
+            ui.painter().galley(rect.min, label, p.text2);
+            ui.painter()
+                .galley(pos2(rect.left() + column + 14., rect.top()), value, color);
+        }
+    });
+}
+
 /// Nó AccessKit `Pane` com o rótulo do artboard (aria-label).
 pub(crate) fn pane(ui: &mut Ui, rect: Rect, label: &str) {
     ui.interact(rect, ui.id().with(label), Sense::hover())
@@ -812,7 +897,9 @@ pub(crate) fn search_field(ui: &mut Ui, text: &mut String, width: f32, hint: &st
     let p = theme::palette(ui.visuals());
     let response = ui.add(
         egui::TextEdit::singleline(text)
-            .hint_text(hint)
+            // Sem cor própria, a dica sairia em `text` (override_text_color)
+            // e pareceria texto digitado.
+            .hint_text(egui::RichText::new(hint).color(p.text2))
             .font(FontId::proportional(12.))
             .margin(egui::Margin {
                 left: 26,
@@ -872,6 +959,30 @@ pub(crate) fn split<R>(ui: &mut Ui, legend: &[String], content: impl FnOnce(&mut
         caption(ui, line);
     }
     inner
+}
+
+/// Listas e tabelas: a barra de rolagem fica à vista (4 px de text2, 10 ao
+/// passar o mouse) sempre que há mais linhas que a área, para a lista não
+/// parecer completa; sem transbordo, nenhuma. Flutua sobre o respiro direito
+/// das linhas, sem mudar a largura delas. Vale para as `ScrollArea` montadas
+/// em `ui` depois da chamada.
+pub(crate) fn scroll_bar(ui: &mut Ui) {
+    let p = theme::palette(ui.visuals());
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        floating_width: 4.,
+        foreground_color: true,
+        dormant_handle_opacity: 1.,
+        active_handle_opacity: 1.,
+        interact_handle_opacity: 1.,
+        dormant_background_opacity: 0.,
+        active_background_opacity: 0.,
+        ..egui::style::ScrollStyle::floating()
+    };
+    // `foreground_color`: o puxador usa o traço dos widgets.
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.inactive.fg_stroke.color = p.text2;
+    widgets.hovered.fg_stroke.color = p.text;
+    widgets.active.fg_stroke.color = p.text;
 }
 
 /// Largura mínima da coluna que estica numa `table`.
@@ -937,6 +1048,7 @@ pub(crate) fn table(
             .max_rect(body)
             .layout(Layout::top_down(Align::Min)),
     );
+    scroll_bar(&mut child);
     let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false);
     if top {
         area = area.vertical_scroll_offset(0.);
@@ -974,7 +1086,9 @@ pub(crate) fn table(
 fn disclosure_state(ui: &Ui, id: egui::Id) -> bool {
     ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false)
 }
-fn chevron(painter: &egui::Painter, rect: Rect, open: bool, color: Color32) {
+/// A seta dos recolhíveis (e dos filtros): para baixo se `open`, senão para
+/// a direita; traço 2,5 no quadro de 24.
+pub(crate) fn chevron(painter: &egui::Painter, rect: Rect, open: bool, color: Color32) {
     let points: &[(f32, f32)] = if open {
         &[(6., 9.), (12., 15.), (18., 9.)]
     } else {
@@ -1216,6 +1330,69 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Os puxadores de rolagem pintados em `area`: retângulos `color` de até
+    /// 10 px encostados na borda direita.
+    pub(crate) fn scroll_handles(out: &egui::FullOutput, area: Rect, color: Color32) -> Vec<Rect> {
+        rects(out)
+            .into_iter()
+            .filter(|r| {
+                r.fill == color
+                    && (r.rect.right() - area.right()).abs() < 0.5
+                    && r.rect.width() <= 10.
+                    && area.expand(0.5).contains_rect(r.rect)
+            })
+            .map(|r| r.rect)
+            .collect()
+    }
+
+    #[test]
+    fn a_table_with_more_rows_than_its_area_shows_its_scroll_bar() {
+        let columns = [Column {
+            title: "Nome",
+            width: None,
+            hint: None,
+        }];
+        let size = TableSize {
+            head: 28.,
+            row: 36.,
+            pad: 6.,
+        };
+        for (theme, p) in THEMES {
+            // (linhas, puxador?): 10 × 36 = 360 numa área de 372 − 28 = 344.
+            for (rows, shown) in [(0, false), (9, false), (10, true), (100, true)] {
+                let ctx = context(theme);
+                let mut add = |ui: &mut Ui| {
+                    ui.allocate_ui(vec2(400., 372.), |ui| {
+                        let rect = ui.max_rect();
+                        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                            table(ui, "t", &columns, size, rows, false, |ui, row, _| {
+                                ui.label(format!("linha {row}"));
+                            });
+                        });
+                    });
+                };
+                // A barra aparece com uma animação curta (1/60 s por frame).
+                let mut out = run(&ctx, vec![], &mut add);
+                for _ in 0..10 {
+                    out = run(&ctx, vec![], &mut add);
+                }
+                let body = Rect::from_min_max(pos2(8., 8. + 28.), pos2(408., 8. + 372.));
+                let handles = scroll_handles(&out, body, p.text2);
+                let case = format!("{theme:?} {rows}");
+                assert_eq!(handles.len(), usize::from(shown), "{case}: {handles:?}");
+                if let Some(handle) = handles.first() {
+                    assert_eq!(handle.width(), 4., "{case}");
+                    // Proporcional ao que se vê: 344 de 36 × linhas.
+                    let want = body.height() * body.height() / (36. * rows as f32);
+                    assert!(
+                        (handle.height() - want.max(12.)).abs() < 1.,
+                        "{case}: {handle:?}, want {want}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1516,6 +1693,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_segmented_on_the_right_of_a_toolbar_keeps_its_order_against_the_edge() {
+        let segments = |count: &str| {
+            [View::A, View::B, View::C].map(|value| Segment {
+                value,
+                label: match value {
+                    View::A => "CPU",
+                    View::B => "Memória",
+                    View::C => "10 min",
+                },
+                count: Some(count.to_owned()),
+            })
+        };
+        for (theme, _) in THEMES {
+            let ctx = context(theme);
+            let (mut a, mut b) = (View::A, View::C);
+            let out = run(&ctx, vec![], |ui| {
+                toolbar(
+                    ui,
+                    |ui| {
+                        ui.label("Esquerda");
+                    },
+                    |ui| {
+                        // A primeira chamada fica na borda direita.
+                        segmented(ui, &mut a, &segments("1"));
+                        segmented(ui, &mut b, &segments("2"));
+                    },
+                );
+            });
+            let at = |text: &str| rect_of(&node(&out, Role::Button, text));
+            for count in ["1", "2"] {
+                let items = ["CPU", "Memória", "10 min"].map(|l| at(&format!("{l} {count}")));
+                assert!(
+                    items.windows(2).all(|w| w[0].right() == w[1].left()),
+                    "{theme:?} {count}: left to right, side by side: {items:?}"
+                );
+            }
+            let (first, second) = (at("10 min 1"), at("CPU 2"));
+            // Borda direita do painel (800 − 8), menos a borda e a margem.
+            assert_eq!(first.right(), 800. - 8. - 1. - 2., "{theme:?}");
+            assert!(
+                second.right() < at("CPU 1").left(),
+                "{theme:?}: the second call is left of the first"
+            );
+            assert!(at("CPU 2").left() > rect_of(&node(&out, Role::Label, "Esquerda")).right());
+        }
+    }
+
+    #[test]
     fn switch_toggles_and_reports_checked_state() {
         for (theme, p) in THEMES {
             let ctx = context(theme);
@@ -1543,6 +1768,68 @@ pub(crate) mod tests {
             click(&ctx, at, &mut add);
             drop(add);
             assert_eq!((on, changed), (false, 2));
+        }
+    }
+
+    #[test]
+    fn the_switch_is_visible_against_every_background_on_and_off() {
+        use crate::theme::tests::contrast;
+        for (theme, p) in THEMES {
+            for on in [false, true] {
+                let ctx = context(theme);
+                let mut state = on;
+                let out = run(&ctx, vec![], |ui| {
+                    switch(ui, &mut state, "Só abertas");
+                });
+                let tracks: Vec<_> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect.size() == vec2(26., 16.))
+                    .collect();
+                assert_eq!(tracks.len(), 1, "{theme:?} {on}");
+                let track = &tracks[0];
+                let knobs: Vec<Color32> = shapes(&out)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Circle(c) if c.radius == 6. => Some(c.fill),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(knobs.len(), 1, "{theme:?} {on}");
+                // A cor que delimita o componente: a borda, se houver; senão
+                // o trilho.
+                let edge = if track.stroke.width > 0. {
+                    track.stroke.color
+                } else {
+                    track.fill
+                };
+                let want = if on {
+                    (
+                        p.acc,
+                        Stroke::NONE,
+                        if theme == egui::Theme::Dark {
+                            p.text
+                        } else {
+                            p.surf
+                        },
+                    )
+                } else {
+                    (p.line, Stroke::new(1.0_f32, p.text2), p.text2)
+                };
+                assert_eq!((track.fill, track.stroke, knobs[0]), want, "{theme:?} {on}");
+                for (name, back) in [("bg", p.bg), ("surf", p.surf), ("surf2", p.surf2)] {
+                    let ratio = contrast(edge, back);
+                    assert!(
+                        ratio >= 3.,
+                        "{theme:?} {on}: the switch on {name} is {ratio:.2}:1"
+                    );
+                }
+                // Desligado, o botão é o que marca o estado. Ligado, é o
+                // trilho acc (o botão claro sobre o acc é o do artboard).
+                if !on {
+                    let ratio = contrast(knobs[0], track.fill);
+                    assert!(ratio >= 3., "{theme:?}: knob on track {ratio:.2}:1");
+                }
+            }
         }
     }
 
@@ -1778,6 +2065,43 @@ pub(crate) mod tests {
             let a = rect_of(&node(&out, Role::Label, "Páginas atuais: 0"));
             let b = rect_of(&node(&out, Role::Label, "Sessões: —"));
             assert_eq!(b.top() - a.bottom(), 6., "rows 6 apart");
+        }
+    }
+
+    #[test]
+    fn the_search_placeholder_is_text2_and_typed_text_is_text() {
+        for (theme, p) in THEMES {
+            let ctx = context(theme);
+            for (typed, want) in [
+                ("", ("Nome, imagem ou ID", p.text2)),
+                ("redis", ("redis", p.text)),
+            ] {
+                let mut text = typed.to_owned();
+                let out = run(&ctx, vec![], |ui| {
+                    search_field(ui, &mut text, 200., "Nome, imagem ou ID");
+                });
+                // O egui pinta também o texto vazio do campo.
+                let painted: Vec<_> = texts(&out)
+                    .into_iter()
+                    .filter(|(t, _)| !t.is_empty())
+                    .collect();
+                assert_eq!(
+                    painted,
+                    vec![(want.0.to_owned(), want.1)],
+                    "{theme:?} {typed:?}"
+                );
+                let field = out
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.role() == Role::TextInput)
+                    .map(|(_, n)| n.placeholder().map(str::to_owned))
+                    .expect("the field");
+                assert_eq!(field.as_deref(), Some("Nome, imagem ou ID"));
+            }
         }
     }
 
