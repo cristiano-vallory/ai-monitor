@@ -6,7 +6,7 @@ use crate::{
     model::Project,
     monitor::Shared,
 };
-use eframe::egui::{self, Color32};
+use eframe::egui;
 use serde_json::Value;
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -141,7 +141,7 @@ impl Panel {
             );
         }
         if let Some(error) = &self.error {
-            ui.colored_label(Color32::from_rgb(244, 190, 103), error);
+            ui.colored_label(crate::theme::palette(ui.visuals()).bad, error);
         }
         if !self.notice.is_empty() {
             ui.label(&self.notice);

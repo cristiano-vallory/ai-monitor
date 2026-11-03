@@ -5,7 +5,7 @@ use crate::{
     model::Project,
     monitor::Shared,
 };
-use eframe::egui::{self, Color32};
+use eframe::egui;
 use serde_json::Value;
 use std::sync::{Arc, atomic::Ordering};
 
@@ -198,7 +198,7 @@ impl Management {
             });
         }
         if let Some(e) = &self.error {
-            ui.colored_label(Color32::from_rgb(244, 190, 103), e);
+            ui.colored_label(crate::theme::palette(ui.visuals()).bad, e);
         }
         if !self.notice.is_empty() {
             ui.label(&self.notice);
@@ -209,7 +209,10 @@ impl Management {
             ui.heading("Revisar e confirmar");
             ui.strong(receipt.action.label());
             ui.label(format!("Projeto: {}", receipt.action.scope.label()));
-            ui.colored_label(Color32::from_rgb(244, 190, 103), receipt.action.warning());
+            ui.colored_label(
+                crate::theme::palette(ui.visuals()).warn,
+                receipt.action.warning(),
+            );
             if let Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } =
                 &receipt.action.intent
             {

@@ -166,16 +166,18 @@ pub(crate) fn prepare_window(
     slot: &Rc<RefCell<Option<Rc<RefCell<MonitorApp>>>>>,
     shared: &Arc<Shared>,
 ) -> Rc<RefCell<MonitorApp>> {
-    // Cada run_native cria um egui Context novo; o estilo precisa ser
-    // aplicado em toda janela, não só na primeira.
-    MonitorApp::apply_style(ctx);
+    // Cada run_native cria um egui Context novo; fontes, os estilos dos dois
+    // temas e o tema atual precisam ser aplicados em toda janela.
+    crate::theme::install(ctx);
     let mut slot = slot.borrow_mut();
     if slot.is_none() {
         *slot = Some(Rc::new(RefCell::new(MonitorApp::for_shared(
             shared.clone(),
         ))));
     }
-    slot.clone().unwrap()
+    let app = slot.clone().unwrap();
+    app.borrow_mut().attach(ctx);
+    app
 }
 
 fn open_window(
@@ -233,6 +235,7 @@ pub fn run(config: Config) -> eframe::Result {
         }
     };
     let shared = Shared::start(config);
+    crate::portal::start();
     let tray = crate::tray::start(&shared, &control);
     let has_tray = tray.is_some();
     if !has_tray {
@@ -287,14 +290,39 @@ mod tests {
             Rc::ptr_eq(&first, &second),
             "the same MonitorApp must serve every window"
         );
-        // egui::Context::default() shares no state, so a green panel_fill on
-        // the second context proves the style was applied again.
+        // egui::Context::default() shares no state: the bg of both themes, the
+        // explicit theme and the semibold family on every fresh context prove
+        // they were applied again.
         for ctx in [egui::Context::default(), egui::Context::default()] {
             prepare_window(&ctx, &slot, &shared);
+            for (theme, palette) in [
+                (egui::Theme::Dark, &crate::theme::DARK),
+                (egui::Theme::Light, &crate::theme::LIGHT),
+            ] {
+                assert_eq!(
+                    ctx.style_of(theme).visuals.panel_fill,
+                    palette.bg,
+                    "each fresh egui Context must receive the {theme:?} style"
+                );
+            }
+            // Tests never start the portal: System without an answer is dark,
+            // set explicitly (not left to the winit fallback).
             assert_eq!(
-                ctx.style().visuals.panel_fill,
-                egui::Color32::from_rgb(15, 18, 24),
-                "each fresh egui Context must receive the app style"
+                ctx.options(|o| o.theme_preference),
+                egui::ThemePreference::Dark
+            );
+            let out = ctx.run(egui::RawInput::default(), |_| {});
+            assert!(
+                ctx.fonts(|f| f.families().contains(&crate::theme::semibold())),
+                "each fresh egui Context must receive the app fonts"
+            );
+            // The reused MonitorApp already sent SetTheme to an earlier
+            // context; a new window must get it again (CSD decorations).
+            assert!(
+                out.viewport_output[&egui::ViewportId::ROOT]
+                    .commands
+                    .contains(&egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark)),
+                "each fresh egui Context must receive the window theme"
             );
         }
     }

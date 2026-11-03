@@ -92,6 +92,8 @@ jobs:
         run: >
           DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent
           cargo test --locked -- --ignored secret_service_unavailable
+      - name: Portal color-scheme (real dbus-daemon)
+        run: dbus-run-session -- cargo test --locked -- --ignored portal_
       - name: Third-party notices are in sync with Cargo.lock
         run: |
           expected="Cargo.lock SHA-256: $(sha256sum Cargo.lock | cut -d' ' -f1)"

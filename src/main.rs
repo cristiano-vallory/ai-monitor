@@ -20,9 +20,12 @@ mod model;
 mod monitor;
 mod operations_ui;
 mod platform;
+#[cfg(target_os = "linux")]
+mod portal;
 mod queries;
 #[cfg(test)]
 mod test_support;
+mod theme;
 #[cfg(target_os = "linux")]
 mod tray;
 

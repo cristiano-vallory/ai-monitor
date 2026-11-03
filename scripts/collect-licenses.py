@@ -12,6 +12,14 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 CARGO = os.environ.get("CARGO_BIN", str(Path.home() / ".cargo/bin/cargo"))
+# Fonts embedded by src/theme.rs, keyed by license file: a new *-OFL.txt
+# without an entry here stops the script instead of shipping without notice.
+FONTS = {
+    "Inter-OFL.txt": ("Inter", "4.1", "https://github.com/rsms/inter",
+                      ("Inter-Regular.ttf", "Inter-SemiBold.ttf")),
+    "JetBrainsMono-OFL.txt": ("JetBrains Mono", "2.304", "https://github.com/JetBrains/JetBrainsMono",
+                              ("JetBrainsMonoNL-Regular.ttf",)),
+}
 
 
 def download(url):
@@ -135,7 +143,23 @@ def notices(platform, targets):
         output.append(f"License text [{reference(std_text)}]: {name}")
     for content, label in texts.items():
         output.extend(["\n" + "=" * 72, f"[{label}]", content])
+    output.extend(bundled_fonts())
     return output, len(packages)
+
+
+def bundled_fonts():
+    directory = ROOT / "assets/fonts"
+    output = ["\n" + "=" * 72, "Bundled fonts",
+              "Embedded in the application binary from assets/fonts."]
+    for path in sorted(directory.glob("*-OFL.txt")):
+        name, version, source, files = FONTS[path.name]
+        for file in files:
+            if not (directory / file).is_file():
+                raise RuntimeError(f"Missing bundled font: {file}")
+        text = "\n".join(line.rstrip() for line in path.read_text().splitlines()).strip()
+        output.extend(["\n" + "-" * 72, f"{name} {version}", "SPDX: OFL-1.1",
+                       f"Source: {source}", "Files: " + ", ".join(files), "", text])
+    return output
 
 
 def main():

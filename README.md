@@ -92,6 +92,7 @@ Abra **Conexão**, ajuste os campos e clique em **Salvar e conectar**.
 | Executável Docker | Detecção de caminhos usuais | Aceita caminho absoluto personalizado |
 | Recursos | 2 segundos | Entre 1 e 60 segundos |
 | Sessões/handoffs | 60 segundos | Entre 5 e 300 segundos; espera após cada varredura |
+| Aparência | Sistema | Sistema, Claro ou Escuro; aplica e salva na hora, sem reconectar |
 
 Configurações são salvas em `~/Library/Application Support/AI Monitor/config.json`, fora do projeto. **O token não entra no JSON.** Pode ser guardado opcionalmente no Keychain, separado por endereço de servidor. URLs com usuário, senha, query ou fragmento são recusadas. Tokens em servidores fora de loopback exigem HTTPS. Redirecionamentos HTTP são recusados. O app não depende do PATH do Finder para encontrar as instalações usuais do Docker Desktop.
 
