@@ -92,6 +92,9 @@ fn compact(width: f32) -> bool {
     width < COMPACT_BELOW
 }
 
+/// Da página à borda direita da barra de rolagem dela, na margem de 24 do
+/// painel central.
+const PAGE_GAP: f32 = 16.;
 /// A janela de Ajustes (Settings.dc.html), em pontos.
 const SETTINGS_SIZE: [f32; 2] = [780., 620.];
 /// macOS: a faixa do título, no cromo, sob os botões da janela (a barra de
@@ -695,8 +698,11 @@ impl MonitorApp {
     fn settings_ui(&mut self, ui: &mut egui::Ui, rect: egui::Rect, native: bool) {
         let p = theme::palette(ui.visuals());
         let title = if native { SETTINGS_TITLE } else { 0. };
-        // Abas de 50 com 2 acima e 8 abaixo.
-        let chrome = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), title + 60.));
+        // Abas de 50 com 2 acima (8 sem a faixa do título, como no Linux) e
+        // 8 abaixo.
+        let above = if title > 0. { 2. } else { 8. };
+        let chrome =
+            egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), title + above + 50. + 8.));
         let footer =
             egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 52.), rect.max);
         let body = egui::Rect::from_min_max(
@@ -724,24 +730,32 @@ impl MonitorApp {
         let left = rect.center().x - (tabs * 96. + (tabs - 1.) * 4.) / 2.;
         for (i, tab) in SettingsTab::ALL.into_iter().enumerate() {
             let at = egui::Rect::from_min_size(
-                egui::pos2(left + i as f32 * 100., rect.top() + title + 2.),
+                egui::pos2(left + i as f32 * 100., rect.top() + title + above),
                 Vec2::new(96., 50.),
             );
             if settings_tab(ui, at, tab, self.settings.tab == tab).clicked() {
                 self.settings.tab = tab;
             }
         }
+        // A barra de rolagem à vista (`scroll_bar`), a 8 da borda da janela,
+        // na margem de 40 do conteúdo.
         let mut content = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(body)
+                .max_rect(body.with_max_x(body.right() - 8.))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
+        crate::widgets::scroll_bar(&mut content);
         egui::ScrollArea::vertical()
             .id_salt("settings-body")
             .auto_shrink(false)
             .show(&mut content, |ui| {
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(40, 22))
+                    .inner_margin(egui::Margin {
+                        left: 40,
+                        right: 32,
+                        top: 22,
+                        bottom: 22,
+                    })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing = Vec2::new(20., 18.);
@@ -865,7 +879,7 @@ impl MonitorApp {
                 name(ui, &token, "Token");
                 let load = format!("Carregar do {SECRET_STORE}");
                 if ui
-                    .add_enabled(!busy, Button::secondary(&load).small().on_surf())
+                    .add_enabled(!busy, Button::secondary(&load).small().raised())
                     .clicked()
                 {
                     self.load_token();
@@ -1058,81 +1072,103 @@ impl MonitorApp {
                     return;
                 }
                 // Na largura mínima, o que passar da área rola na horizontal
-                // em vez de cortar.
+                // em vez de cortar. A barra fica à vista (`scroll_bar`) na
+                // margem direita do painel, a `PAGE_GAP` da página; a página
+                // não herda o estilo da barra.
+                let rect = ui.available_rect_before_wrap();
+                let mut area = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect.with_max_x(rect.right() + PAGE_GAP))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                let style = area.style().clone();
+                crate::widgets::scroll_bar(&mut area);
                 egui::ScrollArea::both()
                     .id_salt("main-scroll")
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        match self.page {
-                            Page::Overview => {
-                                use crate::overview_ui::{Data, Go};
-                                let data = Data {
-                                    resources: &self.resources,
-                                    history: &self.history,
-                                    api: &self.api,
-                                    health: &self.health,
-                                    config: &self.config,
-                                    now: Utc::now(),
-                                };
-                                match self.overview.show(ui, &data) {
-                                    Some(Go::Health) => self.page = Page::Health,
-                                    Some(Go::Sessions) => self.page = Page::Sessions,
-                                    Some(Go::Docker(id)) => {
-                                        self.page = Page::Docker;
-                                        if let Some(id) = id {
-                                            self.docker.open(&id);
+                    .show(&mut area, |ui| {
+                        ui.set_style(style);
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin {
+                                right: PAGE_GAP as i8,
+                                ..Default::default()
+                            })
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                match self.page {
+                                    Page::Overview => {
+                                        use crate::overview_ui::{Data, Go};
+                                        let data = Data {
+                                            resources: &self.resources,
+                                            history: &self.history,
+                                            api: &self.api,
+                                            health: &self.health,
+                                            config: &self.config,
+                                            now: Utc::now(),
+                                        };
+                                        match self.overview.show(ui, &data) {
+                                            Some(Go::Health) => self.page = Page::Health,
+                                            Some(Go::Sessions) => self.page = Page::Sessions,
+                                            Some(Go::Docker(id)) => {
+                                                self.page = Page::Docker;
+                                                if let Some(id) = id {
+                                                    self.docker.open(&id);
+                                                }
+                                            }
+                                            None => {}
                                         }
                                     }
-                                    None => {}
-                                }
-                            }
-                            Page::Review | Page::Maintenance => {
-                                let section = if self.page == Page::Review {
-                                    Section::Review
-                                } else {
-                                    Section::Maintenance
-                                };
-                                let go = ui
-                                    .add_enabled_ui(
-                                        !self.authentication.busy && !self.operations.busy,
-                                        |ui| {
-                                            self.management.show(
-                                                ui,
-                                                &self.shared,
-                                                &self.api,
-                                                section,
-                                                Utc::now(),
+                                    Page::Review | Page::Maintenance => {
+                                        let section = if self.page == Page::Review {
+                                            Section::Review
+                                        } else {
+                                            Section::Maintenance
+                                        };
+                                        let go = ui
+                                            .add_enabled_ui(
+                                                !self.authentication.busy && !self.operations.busy,
+                                                |ui| {
+                                                    self.management.show(
+                                                        ui,
+                                                        &self.shared,
+                                                        &self.api,
+                                                        section,
+                                                        Utc::now(),
+                                                    )
+                                                },
                                             )
-                                        },
-                                    )
-                                    .inner;
-                                if let Some(section) = go {
-                                    self.page = Page::of(section);
+                                            .inner;
+                                        if let Some(section) = go {
+                                            self.page = Page::of(section);
+                                        }
+                                    }
+                                    Page::Admin => {
+                                        ui.add_enabled_ui(
+                                            !self.authentication.busy && !self.management.busy,
+                                            |ui| {
+                                                self.operations.show(
+                                                    ui,
+                                                    &self.shared,
+                                                    &self.api.projects,
+                                                );
+                                            },
+                                        );
+                                    }
+                                    Page::Health => crate::health_ui::show(
+                                        ui,
+                                        &self.shared,
+                                        &self.health,
+                                        self.shared.health_asked.load(Ordering::Acquire)
+                                            > self.health_served,
+                                        self.paused,
+                                        Utc::now(),
+                                    ),
+                                    Page::Explore => {
+                                        self.central.show(ui, &self.shared, &self.api.projects)
+                                    }
+                                    // Mostradas acima, fora desta rolagem.
+                                    Page::Sessions | Page::Docker => {}
                                 }
-                            }
-                            Page::Admin => {
-                                ui.add_enabled_ui(
-                                    !self.authentication.busy && !self.management.busy,
-                                    |ui| {
-                                        self.operations.show(ui, &self.shared, &self.api.projects);
-                                    },
-                                );
-                            }
-                            Page::Health => crate::health_ui::show(
-                                ui,
-                                &self.shared,
-                                &self.health,
-                                self.shared.health_asked.load(Ordering::Acquire)
-                                    > self.health_served,
-                                self.paused,
-                                Utc::now(),
-                            ),
-                            Page::Explore => {
-                                self.central.show(ui, &self.shared, &self.api.projects)
-                            }
-                            // Mostradas acima, fora desta rolagem.
-                            Page::Sessions | Page::Docker => {}
-                        }
+                            });
                     });
             });
         self.settings_window(ctx);
@@ -2926,6 +2962,180 @@ mod tests {
     }
 
     #[test]
+    fn at_the_minimum_window_the_sheet_keeps_the_warning_and_the_field_above_its_buttons() {
+        use crate::maintenance::{Action, Intent, Receipt};
+        use egui::accesskit::Role;
+        let size = MIN_WINDOW_SIZE;
+        let scope = crate::client::Scope {
+            workspace: "default".into(),
+            project: "acme-servicos-portal-coleta-zero-carbono-v2".into(),
+        };
+        let target = scope.label();
+        // A prévia de 06-sheet-expire-720: bem mais alta que a folha.
+        let handoff = serde_json::json!({
+            "agent": "claude-code",
+            "at": "2026-11-03T18:25:11.964249Z",
+            "cwd": "/home/fixture/projetos/portal-coleta-zero-carbono/.claude/worktrees/gifted-chebyshev-95fe00",
+            "files_touched": ["src/a.rs", "src/b.rs"],
+            "id": "01a1a2a8-771c-7fd1-9d5c-40340d1cd3fe",
+            "next_steps": ["um", "dois"],
+            "open_questions": ["três"],
+        });
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Review;
+            app.management.set_tab(1);
+            app.management.hold_preview(
+                Receipt {
+                    action: Action {
+                        scope: scope.clone(),
+                        intent: Intent::ExpireHandoffs { days: 7 },
+                    },
+                    generation: 0,
+                    at: Instant::now(),
+                },
+                serde_json::json!({ "limited_open_handoffs": vec![handoff.clone(); 20] }),
+            );
+            let ctx = styled();
+            ctx.set_theme(theme);
+            ctx.enable_accesskit();
+            frame(&mut app, &ctx, size, vec![]);
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let rects = crate::widgets::tests::rects(&out);
+            let veil = egui::Color32::from_black_alpha(115);
+            let content = rects
+                .iter()
+                .find(|r| r.fill == veil && r.blur_width == 0.)
+                .expect("the veil over the content area")
+                .rect;
+            let sheet = rects
+                .iter()
+                .find(|r| r.corner_radius.se == 12 && r.corner_radius.nw == 0 && r.blur_width == 0.)
+                .expect("the sheet")
+                .rect;
+            let p = theme::palette(&ctx.style_of(theme).visuals);
+            let preview = rects
+                .iter()
+                .find(|r| {
+                    r.stroke == egui::Stroke::new(1.0_f32, p.line)
+                        && r.corner_radius == egui::CornerRadius::same(8)
+                })
+                .expect("the preview box")
+                .rect;
+            let fields: Vec<egui::Rect> = widgets(&out, Role::TextInput, "")
+                .into_iter()
+                .filter(|r| sheet.contains_rect(*r))
+                .collect();
+            let [field] = fields[..] else {
+                let all = widgets(&out, Role::TextInput, "");
+                panic!("{theme:?}: one field in the sheet {sheet:?}, got {fields:?} of {all:?}");
+            };
+            let warning = widget_rect(
+                &out,
+                Role::Label,
+                "Atenção. O handoff deixa de estar disponível para retomada. A prévia de expiração é limitada a 200 itens; o servidor reavalia todos no momento da ação.",
+            );
+            let cancel = widget_rect(&out, Role::Button, "Cancelar");
+            let confirm = widget_rect(&out, Role::Button, "Expirar");
+            let case = format!("{theme:?}: {content:?}");
+            // O cenário: a prévia encolheu (sem isso, nada foi exercitado).
+            assert!(
+                preview.height() < 240.,
+                "{case}: the preview did not shrink: {preview:?}"
+            );
+            for (name, rect) in [
+                ("field", field),
+                ("warning", warning),
+                ("Cancelar", cancel),
+                ("Expirar", confirm),
+            ] {
+                assert!(
+                    content.contains_rect(rect),
+                    "{case}: {name} at {rect:?} is outside the content area"
+                );
+            }
+            // Na ordem, sem nada rolado para fora: prévia, faixa, campo, botões.
+            assert!(preview.bottom() <= warning.top(), "{case}: {warning:?}");
+            assert!(warning.bottom() <= field.top(), "{case}: {field:?}");
+            assert!(field.bottom() <= cancel.top(), "{case}: {cancel:?}");
+            assert!(
+                update_node(&out, Role::Button, "Expirar").is_disabled(),
+                "{case}: precondition: nothing typed yet"
+            );
+            // O campo recebe a digitação sem clique.
+            let out = frame(
+                &mut app,
+                &ctx,
+                size,
+                vec![egui::Event::Text(target.clone())],
+            );
+            assert!(
+                !update_node(&out, Role::Button, "Expirar").is_disabled(),
+                "{case}: the typed target enables Expirar"
+            );
+        }
+    }
+
+    #[test]
+    fn the_page_scroll_bar_shows_without_hover_only_when_the_page_overflows() {
+        use crate::widgets::tests::{THEMES, scroll_handles};
+        // As páginas da rolagem principal (Sessões e Docker rolam por conta
+        // própria): (janela, página, transborda?).
+        let cases = [
+            ([720., 560.], Page::Overview, true),
+            ([720., 560.], Page::Health, true),
+            ([720., 560.], Page::Maintenance, true),
+            ([720., 560.], Page::Explore, false),
+            ([720., 560.], Page::Review, false),
+            ([720., 560.], Page::Admin, false),
+            ([1320., 860.], Page::Overview, false),
+            ([1320., 860.], Page::Health, false),
+            ([1320., 860.], Page::Maintenance, false),
+            ([1320., 860.], Page::Explore, false),
+            ([1320., 860.], Page::Review, false),
+            ([1320., 860.], Page::Admin, false),
+        ];
+        for (theme, p) in THEMES {
+            for (size, page, shown) in cases {
+                let mut app = app_with_unsaved_draft();
+                app.api.projects.push(Project {
+                    workspace_name: "acme".into(),
+                    project_name: "api".into(),
+                    ..Default::default()
+                });
+                // Com projeto: os três cartões da Manutenção.
+                app.management
+                    .open_handoff(&app.api.projects, "acme / api", "");
+                app.page = page;
+                let ctx = styled();
+                ctx.set_theme(theme);
+                // Sem ponteiro na janela. A barra aparece com uma animação
+                // curta (1/60 s por frame).
+                let mut out = frame(&mut app, &ctx, size, vec![]);
+                for _ in 0..10 {
+                    out = frame(&mut app, &ctx, size, vec![]);
+                }
+                // Na margem direita do painel (24): a barra termina a 8 da
+                // borda da janela, a 16 da página.
+                let area = egui::Rect::from_min_max(
+                    egui::pos2(0., 52.),
+                    egui::pos2(size[0] - 8., size[1] - 28.),
+                );
+                let handles = scroll_handles(&out, area, p.text2);
+                let case = format!("{theme:?} {size:?} {page:?}");
+                assert_eq!(handles.len(), usize::from(shown), "{case}: {handles:?}");
+                if let Some(handle) = handles.first() {
+                    assert_eq!(handle.width(), 4., "{case}");
+                    assert!(
+                        handle.left() >= size[0] - 24.,
+                        "{case}: the bar covers the page: {handle:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cross_locks_keep_review_maintenance_and_admin_apart() {
         use egui::accesskit::Role;
         // (página, quem está ocupado, um botão da página, desabilitado?)
@@ -3920,6 +4130,85 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_secondaries_never_look_like_the_fields_in_either_theme() {
+        use crate::widgets::tests::THEMES;
+        use egui::accesskit::Role;
+        let load = format!("Carregar do {}", crate::platform::SECRET_STORE);
+        // (aba, com sessão humana?, botões, o campo da aba: papel e nome)
+        let cases = [
+            (
+                SettingsTab::Connection,
+                false,
+                vec![load.as_str()],
+                (Role::PasswordInput, "Token"),
+            ),
+            (
+                SettingsTab::Account,
+                false,
+                vec!["Entrar com sessão humana"],
+                (Role::TextInput, "Usuário"),
+            ),
+            (
+                SettingsTab::Account,
+                true,
+                vec![
+                    "Consultar identidade e capacidades",
+                    "Sair da sessão humana e voltar ao Bearer",
+                    "Alterar senha e renovar sessão",
+                ],
+                (Role::PasswordInput, "Senha atual"),
+            ),
+        ];
+        for (theme, p) in THEMES {
+            for (tab, human, buttons, (role, field)) in &cases {
+                let size = [1320., 860.];
+                let mut app = app_with_unsaved_draft();
+                app.settings.tab = *tab;
+                if *human {
+                    app.shared.config.write().unwrap().human =
+                        Some(crate::auth::Session::for_test("sessao", "csrf"));
+                }
+                app.open_settings();
+                let ctx = styled();
+                ctx.set_theme(theme);
+                ctx.enable_accesskit();
+                // O 1º frame da janela embutida só mede.
+                frame(&mut app, &ctx, size, vec![]);
+                let mut out = frame(&mut app, &ctx, size, vec![]);
+                if *human {
+                    let change = widget_rect(&out, Role::Button, "Alterar minha senha");
+                    click_at(&mut app, &ctx, size, change.center());
+                }
+                // A janela embutida aparece com uma animação curta (1/60 s
+                // por frame): as cores só valem depois dela.
+                for _ in 0..20 {
+                    out = frame(&mut app, &ctx, size, vec![]);
+                }
+                let fill = |at: egui::Rect| -> Vec<egui::Color32> {
+                    crate::widgets::tests::rects(&out)
+                        .into_iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect()
+                };
+                let typed = fill(widget_rect(&out, *role, field));
+                assert_eq!(typed, [p.field], "{theme:?} {field}: precondition");
+                for button in buttons {
+                    let case = format!("{theme:?} {button}");
+                    let pressed = fill(widget_rect(&out, Role::Button, button));
+                    assert_eq!(pressed, [p.raised], "{case}");
+                    assert_ne!(pressed, typed, "{case}: looks like the field");
+                }
+            }
+        }
+        // No escuro, o surf do artboard: mais claro que o corpo.
+        assert_eq!(
+            theme::DARK.raised,
+            egui::Color32::from_rgb(0x2C, 0x2E, 0x34)
+        );
+    }
+
+    #[test]
     fn the_address_and_the_docker_path_are_mono_and_the_other_fields_are_not() {
         use egui::accesskit::Role;
         let mut app = app_with_unsaved_draft();
@@ -4040,6 +4329,92 @@ mod tests {
             "Bandeja"
         };
         assert_eq!(SettingsTab::Tray.label(), tray);
+    }
+
+    #[test]
+    fn the_settings_tabs_keep_8_above_them_without_the_title_strip() {
+        use egui::accesskit::Role;
+        for native in [false, true] {
+            // Só a faixa do título do macOS (34) fica a 2 das abas; sem
+            // ela (Linux, e a janela embutida), 8.
+            let above = if native && cfg!(target_os = "macos") {
+                34. + 2.
+            } else {
+                8.
+            };
+            let mut app = app_with_unsaved_draft();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        SETTINGS_SIZE.into(),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            let rect = ui.max_rect();
+                            app.settings_ui(ui, rect, native);
+                        });
+                },
+            );
+            let p = theme::palette(&ctx.style().visuals);
+            let body = crate::widgets::tests::rects(&out)
+                .into_iter()
+                .find(|r| r.fill == p.surf && r.rect.width() == SETTINGS_SIZE[0])
+                .expect("the body")
+                .rect;
+            for tab in SettingsTab::ALL {
+                let at = widget_rect(&out, Role::Tab, tab.label());
+                assert_eq!(at.top(), above, "native {native}: {tab:?}");
+                assert_eq!(body.top(), at.bottom() + 8., "native {native}: 8 below");
+            }
+        }
+    }
+
+    #[test]
+    fn the_settings_body_shows_its_scroll_bar_only_when_it_overflows() {
+        use crate::widgets::tests::{THEMES, scroll_handles};
+        for (theme, p) in THEMES {
+            for long in [false, true] {
+                let mut app = app_with_unsaved_draft();
+                app.settings.tab = SettingsTab::Account;
+                if long {
+                    let fields: serde_json::Map<String, serde_json::Value> = (0..60)
+                        .map(|i| (format!("campo {i:02}"), serde_json::json!("valor")))
+                        .collect();
+                    app.authentication
+                        .hold_info(serde_json::Value::Object(fields));
+                }
+                app.open_settings();
+                let ctx = styled();
+                ctx.set_theme(theme);
+                let mut out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+                for _ in 0..10 {
+                    out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+                }
+                // O corpo: o retângulo surf mais alto da largura da janela
+                // (a barra de título da janela embutida também é surf).
+                let body = crate::widgets::tests::rects(&out)
+                    .into_iter()
+                    .filter(|r| r.fill == p.surf && r.rect.width() == SETTINGS_SIZE[0])
+                    .map(|r| r.rect)
+                    .max_by(|a, b| a.height().total_cmp(&b.height()))
+                    .expect("the body");
+                // A 8 da borda direita da janela, sem ponteiro sobre ela.
+                let area = body.with_max_x(body.right() - 8.);
+                let handles = scroll_handles(&out, area, p.text2);
+                assert_eq!(
+                    handles.len(),
+                    usize::from(long),
+                    "{theme:?} long {long}: {handles:?}"
+                );
+            }
+        }
     }
 
     #[test]

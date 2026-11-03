@@ -4,8 +4,9 @@ use crate::{
     model::Project,
     monitor::Shared,
     queries::{Query, Worker},
+    sessions_ui::dated,
     theme,
-    widgets::{self, Button, Fact, Segment, Tone, Type},
+    widgets::{self, Button, Fact, Segment, Tone, Type, space},
 };
 use chrono::{Local, Utc};
 use eframe::egui::{self, RichText};
@@ -174,43 +175,43 @@ impl Console {
             );
         }
     }
-    /// O seletor de projeto e as abas.
+    /// O seletor de projeto, que alarga até o que sobra na linha, e as abas.
     fn toolbar(&mut self, ui: &mut egui::Ui, projects: &[Project]) {
         let (scope, tab) = (&mut self.scope, &mut self.tab);
         let text = scope
             .as_ref()
             .map_or_else(|| "Selecione um projeto".to_owned(), Scope::label);
+        let tabs = [
+            Segment {
+                value: Tab::Sessions,
+                label: "Sessões detalhadas",
+                count: None,
+            },
+            Segment {
+                value: Tab::Knowledge,
+                label: "Conhecimento",
+                count: None,
+            },
+        ];
+        let room = ui.available_width() - widgets::segmented_width(ui, tab, &tabs) - space::S;
         widgets::toolbar(
             ui,
             |ui| {
-                widgets::select(ui, "Projeto", &text, 200., |ui| {
-                    for p in projects {
-                        let s = Scope {
-                            workspace: p.workspace_name.clone(),
-                            project: p.project_name.clone(),
-                        };
-                        let label = s.label();
-                        if widgets::option(ui, scope.as_ref() == Some(&s), &label).clicked() {
-                            *scope = Some(s);
+                ui.allocate_ui(egui::vec2(room.max(200.), 26.), |ui| {
+                    widgets::select(ui, "Projeto", &text, 200., |ui| {
+                        for p in projects {
+                            let s = Scope {
+                                workspace: p.workspace_name.clone(),
+                                project: p.project_name.clone(),
+                            };
+                            let label = s.label();
+                            if widgets::option(ui, scope.as_ref() == Some(&s), &label).clicked() {
+                                *scope = Some(s);
+                            }
                         }
-                    }
+                    });
                 });
-                widgets::segmented(
-                    ui,
-                    tab,
-                    &[
-                        Segment {
-                            value: Tab::Sessions,
-                            label: "Sessões detalhadas",
-                            count: None,
-                        },
-                        Segment {
-                            value: Tab::Knowledge,
-                            label: "Conhecimento",
-                            count: None,
-                        },
-                    ],
-                );
+                widgets::segmented(ui, tab, &tabs);
             },
             |_| {},
         );
@@ -291,6 +292,9 @@ impl Console {
     }
     fn render(&mut self, ui: &mut egui::Ui, shared: &Shared, query: &Query, data: &Value) {
         let p = theme::palette(ui.visuals());
+        // As datas como na Revisão ("03/11 18:25 (há 2 h)"); a do servidor
+        // vai à dica.
+        let now = Utc::now();
         match query {
             Query::Sessions {
                 scope,
@@ -325,11 +329,12 @@ impl Console {
                                     .size(12.)
                                     .color(if open { p.acc } else { p.text2 }),
                             );
-                            widgets::caption(ui, text(row, "started_at"));
+                            let started = text(row, "started_at");
+                            widgets::caption(ui, &dated(started, now)).on_hover_text(started);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let events = Button::secondary("Ver eventos").small().on_surf();
+                                    let events = Button::secondary("Ver eventos").small().raised();
                                     if ui.add_enabled(!self.busy, events).clicked() {
                                         self.observation_search.clear();
                                         self.kind.clear();
@@ -396,7 +401,7 @@ impl Console {
                                     }
                                 }
                             });
-                            let apply = Button::secondary("Aplicar filtro").on_surf();
+                            let apply = Button::secondary("Aplicar filtro").raised();
                             if ui.add(apply).clicked() {
                                 self.begin(
                                     shared,
@@ -446,11 +451,13 @@ impl Console {
                                 );
                                 ui.painter().rect_filled(line, 0., p.line);
                             }
-                            widgets::disclosure_row(
+                            let created = text(row, "created_at");
+                            widgets::disclosure_row_hinted(
                                 ui,
                                 row_key(&mut seen, row["id"].as_str(), idx),
                                 &format!("{} · {}", text(row, "kind"), text(row, "title")),
-                                text(row, "created_at"),
+                                &dated(created, now),
+                                Some(created),
                                 |ui| {
                                     ui.reset_style();
                                     ui.add(
@@ -508,7 +515,7 @@ impl Console {
                         ui,
                         &format!("{} · {} · versão {}", scope.label(), path, text(data, "id")),
                     );
-                    let history = Button::secondary("Histórico e comparação").on_surf();
+                    let history = Button::secondary("Histórico e comparação").raised();
                     if ui.add_enabled(!self.busy, history).clicked() {
                         self.from.clear();
                         self.to.clear();
@@ -571,8 +578,10 @@ impl Console {
                                 }
                                 for row in versions {
                                     let id = text(row, "id");
-                                    let version = format!("{} · {id}", text(row, "created_at"));
+                                    let created = text(row, "created_at");
+                                    let version = format!("{} · {id}", dated(created, now));
                                     if widgets::option(ui, selected.as_str() == id, &version)
+                                        .on_hover_text(created)
                                         .clicked()
                                     {
                                         *selected = id.into();
@@ -580,7 +589,7 @@ impl Console {
                                 }
                             });
                         }
-                        let compare = Button::secondary("Comparar").on_surf();
+                        let compare = Button::secondary("Comparar").raised();
                         if ui.add_enabled(!self.busy, compare).clicked() {
                             self.begin(
                                 shared,
@@ -610,12 +619,14 @@ impl Console {
                         },
                     );
                     for row in versions {
+                        let created = text(row, "created_at");
                         ui.label(format!(
                             "{} · {} · {} caracteres",
-                            text(row, "created_at"),
+                            dated(created, now),
                             text(row, "id"),
                             number(&row["body_chars"])
-                        ));
+                        ))
+                        .on_hover_text(created);
                     }
                 });
                 let diff = &data["diff"];
@@ -661,6 +672,7 @@ impl Console {
                 );
             }
             Query::Briefing(scope) => {
+                let last = text(data, "last_observation_at");
                 card(ui, "Resumo do projeto", |ui| {
                     widgets::facts(
                         ui,
@@ -669,7 +681,7 @@ impl Console {
                             Fact::new("Sessões", number(&data["counts"]["sessions"])),
                             Fact::new("Eventos", number(&data["counts"]["observations"])),
                             Fact::new("Handoffs pendentes", number(&data["pending_handoff_count"])),
-                            Fact::new("Último evento", text(data, "last_observation_at")),
+                            Fact::new("Último evento", dated(last, now)).hint(last),
                         ],
                     );
                     for (key, title) in [
@@ -747,10 +759,12 @@ impl Console {
                         ui,
                         &format!("{} · {}", text(row, "state"), text(row, "agent")),
                         |ui| {
+                            let at = text(row, "at");
                             widgets::caption(
                                 ui,
-                                &format!("{} · {}", text(row, "at"), text(row, "id")),
-                            );
+                                &format!("{} · {}", dated(at, now), text(row, "id")),
+                            )
+                            .on_hover_text(at);
                             if row["redacted"] == true {
                                 ui.label("Resumo restrito pelas permissões.");
                             } else {
@@ -1241,7 +1255,9 @@ mod tests {
 
     use crate::{
         test_support::{Mock, Response},
-        widgets::tests::{THEMES, click_sized, context, node, nodes, rect_of, rects, run_sized},
+        widgets::tests::{
+            THEMES, click_sized, context, node, nodes, rect_of, rects, run_sized, texts,
+        },
     };
     use egui::accesskit::{Role, Toggled};
 
@@ -1688,6 +1704,202 @@ mod tests {
                     .contains(&format!("offset=0&include_open={include}")),
                 "{include}: {}",
                 requests[0].path
+            );
+        }
+    }
+
+    #[test]
+    fn dates_read_like_the_review_and_keep_the_server_text_in_the_tooltip() {
+        // Há 2 h e 5 min, no formato do servidor (microssegundos, Z).
+        let raw = (Utc::now() - chrono::Duration::minutes(125))
+            .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+            .to_string();
+        let shown = format!("{} (há 2 h)", crate::app::date(&raw));
+        // (consulta, resposta, texto que leva a data)
+        let cases = [
+            (
+                Query::Sessions {
+                    scope: fixture(),
+                    offset: 0,
+                    include_open: true,
+                },
+                json!({"sessions": [{"agent_kind": "claude-code", "started_at": raw, "ended_at": raw, "session_id": "s1"}]}),
+                shown.clone(),
+            ),
+            (
+                Query::Handoffs {
+                    scope: fixture(),
+                    state: "open".into(),
+                },
+                json!({"handoffs": [{"state": "open", "agent": "codex", "at": raw, "id": "h1", "summary": "resumo"}]}),
+                format!("{shown} · h1"),
+            ),
+            (
+                Query::History {
+                    scope: fixture(),
+                    path: "a.md".into(),
+                    offset: 0,
+                    from: String::new(),
+                    to: String::new(),
+                },
+                json!({"versions": [{"id": "v1", "created_at": raw, "body_chars": 12}], "total": 1, "diff": {}}),
+                format!("{shown} · v1 · 12 caracteres"),
+            ),
+            (
+                Query::Observations {
+                    scope: fixture(),
+                    session: "s1".into(),
+                    offset: 0,
+                    text: String::new(),
+                    kind: String::new(),
+                },
+                json!({"observations": [{"id": "e1", "kind": "stop", "title": "fim", "created_at": raw, "body": "corpo"}], "total": 1}),
+                shown.clone(),
+            ),
+            (
+                Query::Briefing(fixture()),
+                json!({"counts": {}, "last_observation_at": raw}),
+                shown.clone(),
+            ),
+        ];
+        for (query, data, text) in cases {
+            let (_mock, shared, mut console) = explore(true);
+            console.result = Some((query, data));
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+            let out = frames(&ctx, &mut add);
+            assert!(
+                nodes(&out, Role::Label, &raw).is_empty()
+                    && !texts(&out).iter().any(|(t, _)| t.contains(&raw)),
+                "{text}: the server's text is not shown"
+            );
+            // A dica, com o ponteiro parado sobre a data pintada (0,5 s; cada
+            // frame avança 1/60 s).
+            let painted: Vec<egui::Rect> = crate::widgets::tests::shapes(&out)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.text() == text => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let [painted] = painted[..] else {
+                panic!("{text}: painted once, got {painted:?}");
+            };
+            let at = painted.center();
+            let mut out = run_sized(&ctx, TALL, vec![egui::Event::PointerMoved(at)], &mut add);
+            for _ in 0..45 {
+                out = run_sized(&ctx, TALL, vec![], &mut add);
+            }
+            assert!(
+                texts(&out).iter().any(|(t, _)| *t == raw),
+                "{text}: the tooltip has the server's text"
+            );
+        }
+    }
+
+    #[test]
+    fn the_secondaries_on_the_cards_are_raised_and_never_the_field_color() {
+        // (consulta, resposta, o secundário do cartão)
+        let cases = [
+            (
+                Query::Sessions {
+                    scope: fixture(),
+                    offset: 0,
+                    include_open: true,
+                },
+                json!({"sessions": [{"agent_kind": "claude-code", "session_id": "s1"}]}),
+                "Ver eventos",
+            ),
+            (
+                Query::Observations {
+                    scope: fixture(),
+                    session: "s1".into(),
+                    offset: 0,
+                    text: String::new(),
+                    kind: String::new(),
+                },
+                json!({"observations": [], "total": 0}),
+                "Aplicar filtro",
+            ),
+            (
+                Query::Page {
+                    scope: fixture(),
+                    path: "a.md".into(),
+                },
+                json!({"title": "A", "id": "v1", "body_markdown": "corpo"}),
+                "Histórico e comparação",
+            ),
+            (
+                Query::History {
+                    scope: fixture(),
+                    path: "a.md".into(),
+                    offset: 0,
+                    from: String::new(),
+                    to: String::new(),
+                },
+                json!({"versions": [], "total": 0, "diff": {}}),
+                "Comparar",
+            ),
+        ];
+        for (theme, p) in THEMES {
+            for (query, data, button) in cases.clone() {
+                let (_mock, shared, mut console) = explore(true);
+                console.result = Some((query, data));
+                let ctx = context(theme);
+                let out = frames(&ctx, &mut |ui: &mut egui::Ui| {
+                    console.show(ui, &shared, &[])
+                });
+                let at = rect_of(&node(&out, Role::Button, button));
+                let fills: Vec<egui::Color32> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| r.fill)
+                    .collect();
+                assert_eq!(fills, [p.raised], "{theme:?} {button}");
+                assert_ne!(p.raised, p.field, "{theme:?} {button}: like a field");
+            }
+        }
+    }
+
+    #[test]
+    fn the_project_selector_widens_up_to_the_tabs() {
+        // (projeto, cabe inteiro?)
+        for (project, whole) in [
+            (
+                "acme-servicos-portal-coleta-zero-carbono-v2-e-mais-um-tanto".to_owned(),
+                true,
+            ),
+            ("um-projeto".repeat(30), false),
+        ] {
+            let (_mock, shared, mut console) = explore(true);
+            console.scope = Some(Scope {
+                workspace: "fixture".into(),
+                project,
+            });
+            let label = console.scope.as_ref().unwrap().label();
+            let ctx = context(egui::Theme::Light);
+            let out = frames(&ctx, &mut |ui: &mut egui::Ui| {
+                console.show(ui, &shared, &[])
+            });
+            let select = rect_of(&node(&out, Role::ComboBox, "Projeto"));
+            let tab = rect_of(&node(&out, Role::Button, "Conhecimento"));
+            let elided: Vec<bool> = crate::widgets::tests::shapes(&out)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.text() == label => Some(t.galley.elided),
+                    _ => None,
+                })
+                .collect();
+            let case = format!("{} chars: {select:?} {tab:?}", label.len());
+            assert_eq!(elided, [!whole], "{case}");
+            assert!(select.width() > 260., "{case}");
+            // As abas seguem na linha, dentro da largura (1000 − 2 × 8).
+            assert!(tab.top() < select.bottom(), "{case}: the tabs wrapped");
+            assert!(
+                tab.right() <= TALL[0] - 8. + 0.5,
+                "{case}: the tabs overflow"
             );
         }
     }

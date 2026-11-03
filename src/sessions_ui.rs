@@ -1009,6 +1009,14 @@ impl Age {
         }
     }
 }
+/// A data do detalhe com a idade: "03/11 18:25 (há 2 h)"; só a data além
+/// de ontem, e "—" se ilegível.
+pub(crate) fn dated(at: &str, now: DateTime<Utc>) -> String {
+    match age(at, now).and_then(|a| a.long()) {
+        Some(ago) => format!("{} ({ago})", date(at)),
+        None => date(at),
+    }
+}
 /// Abaixo de 1 min = agora (o futuro, por relógio adiantado, também); até
 /// 24 h, em min ou h; depois, "ontem" se foi no dia anterior (fuso local) e
 /// senão a data ("dd/mm", com o ano se for outro). `None` = data ilegível.
@@ -1100,10 +1108,7 @@ fn meta(ui: &mut Ui, h: &Handoff, now: DateTime<Utc>) {
     let small = |ui: &mut Ui, text: &str| {
         ui.label(RichText::new(text).size(12.).color(p.text2));
     };
-    let when = match age(&h.at, now).and_then(|a| a.long()) {
-        Some(ago) => format!("{} ({ago})", date(&h.at)),
-        None => date(&h.at),
-    };
+    let when = dated(&h.at, now);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(10., 4.);
         pill(ui, "Aberto", p.surf2, Some(p.line), p.text);

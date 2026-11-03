@@ -28,6 +28,10 @@ pub struct Palette {
     pub shadow: Color32,
     /// Fundo dos campos de texto (Settings.dc.html).
     pub field: Color32,
+    /// Fundo do secundário sobre surf ao lado de campos (corpo de Ajustes,
+    /// cartões do Explorar e da Administração): no escuro, o `surf` do
+    /// Settings.dc.html, mais claro que o surf e que o campo; no claro, o bg.
+    pub raised: Color32,
     /// `acc` translúcido das linhas acrescentadas numa prévia (Review.dc.html).
     pub add_bg: Color32,
     /// `bad` translúcido das linhas removidas numa prévia (Review.dc.html).
@@ -53,6 +57,7 @@ pub const DARK: Palette = Palette {
     // 115/255 ≈ 45% de alfa.
     shadow: Color32::from_black_alpha(115),
     field: Color32::from_rgb(0x14, 0x15, 0x18),
+    raised: Color32::from_rgb(0x2C, 0x2E, 0x34),
     // 26/255 ≈ 10% de alfa.
     add_bg: Color32::from_rgba_unmultiplied_const(0x4F, 0xD1, 0xA5, 26),
     bad_bg: Color32::from_rgba_unmultiplied_const(0xFF, 0x7A, 0x7A, 26),
@@ -77,6 +82,7 @@ pub const LIGHT: Palette = Palette {
     // 15/255 ≈ 6% de alfa.
     shadow: Color32::from_black_alpha(15),
     field: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    raised: Color32::from_rgb(0xF5, 0xF5, 0xF7),
     // 20/255 ≈ 8% de alfa.
     add_bg: Color32::from_rgba_unmultiplied_const(0x0B, 0x7A, 0x5E, 20),
     bad_bg: Color32::from_rgba_unmultiplied_const(0xC4, 0x2B, 0x2B, 20),

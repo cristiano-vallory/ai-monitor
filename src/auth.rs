@@ -247,6 +247,12 @@ impl Panel {
         self.info = None;
         self.error = None;
     }
+    /// A resposta de "Consultar identidade e capacidades", como `poll` a
+    /// deixaria.
+    #[cfg(test)]
+    pub(crate) fn hold_info(&mut self, info: Value) {
+        self.info = Some(info);
+    }
     /// A aba Conta de Ajustes: o estado da conexão e o login humano, na
     /// grade de rótulos da janela.
     pub fn show(&mut self, ui: &mut eframe::egui::Ui, shared: &Arc<Shared>, enabled: bool) {
@@ -284,7 +290,7 @@ impl Panel {
                     name(ui, &field, "Senha");
                 });
                 let login = setting_row(ui, "", |ui| {
-                    ui.add(Button::secondary("Entrar com sessão humana").on_surf())
+                    ui.add(Button::secondary("Entrar com sessão humana").raised())
                 });
                 if login.clicked() {
                     let password = std::mem::take(&mut self.password);
@@ -301,11 +307,11 @@ impl Panel {
                     ui.horizontal(|ui| {
                         (
                             ui.add(
-                                Button::secondary("Consultar identidade e capacidades").on_surf(),
+                                Button::secondary("Consultar identidade e capacidades").raised(),
                             ),
                             ui.add(
                                 Button::secondary("Sair da sessão humana e voltar ao Bearer")
-                                    .on_surf(),
+                                    .raised(),
                             ),
                         )
                     })
@@ -332,7 +338,7 @@ impl Panel {
                         });
                     }
                     let change = setting_row(ui, "", |ui| {
-                        ui.add(Button::secondary("Alterar senha e renovar sessão").on_surf())
+                        ui.add(Button::secondary("Alterar senha e renovar sessão").raised())
                     });
                     if change.clicked() {
                         let current = std::mem::take(&mut self.current);

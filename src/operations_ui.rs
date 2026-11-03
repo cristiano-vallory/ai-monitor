@@ -325,7 +325,7 @@ impl Panel {
                     ui.set_min_height(28.);
                     ui.label(RichText::new("Resultado").font(Type::Section.font()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let clear = Button::secondary("Limpar resultado privado").on_surf();
+                        let clear = Button::secondary("Limpar resultado privado").raised();
                         if ui.add(clear).clicked() {
                             self.clear();
                         }
@@ -866,6 +866,23 @@ mod tests {
         node(&out, Role::Button, "Limpar resultado privado");
         assert!(nodes(&out, Role::Label, "Prévia de impacto").is_empty());
         assert!(nodes(&out, Role::Button, "Cancelar").is_empty(), "no sheet");
+    }
+    #[test]
+    fn the_result_clear_button_is_raised_and_never_the_field_color() {
+        for (theme, p) in THEMES {
+            let (_mock, shared, mut panel) = previewing(purge(), false);
+            panel.receipt = None;
+            let ctx = context(theme);
+            let out = frames(&ctx, &mut |ui: &mut egui::Ui| panel.show(ui, &shared, &[]));
+            let at = rect_of(&node(&out, Role::Button, "Limpar resultado privado"));
+            let fills: Vec<egui::Color32> = rects(&out)
+                .into_iter()
+                .filter(|r| r.rect == at)
+                .map(|r| r.fill)
+                .collect();
+            assert_eq!(fills, [p.raised], "{theme:?}");
+            assert_ne!(p.raised, p.field, "{theme:?}: like a field");
+        }
     }
     #[test]
     fn private_result_expires_without_rendering_a_window() {

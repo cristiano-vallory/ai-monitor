@@ -26,7 +26,10 @@
 //!   (cabeçalho 11 sobre surf2; rola além de 240), `strip` Warn com
 //!   `warning`; com `typed: Some(alvo)`, "Digite alvo para confirmar" e um
 //!   `text_field` (até 512 caracteres, ou o tamanho do alvo, se maior) que
-//!   pega o foco quando nada mais o tem. Rodapé: "Prévia válida por m:ss"
+//!   pega o foco quando nada mais o tem. A faixa e o campo ficam à vista
+//!   acima do rodapé: numa janela baixa, só a prévia encolhe, até 60; abaixo
+//!   disso, o meio (fatos e prévia) rola. As barras de rolagem são as de
+//!   `scroll_bar`. Rodapé: "Prévia válida por m:ss"
 //!   (de `left`, arredondado para cima; zero fecha a folha), Cancelar e o
 //!   botão final: `Button::primary(verb)` sem digitação,
 //!   `Button::danger(verb)` com ela, habilitado só com `ready` e o texto
@@ -52,11 +55,13 @@
 //!   `Button::destructive`, `Button::danger` (preenchido em bad, texto
 //!   on_acc em SemiBold: o botão final da confirmação com digitação);
 //!   `.small()` = 24 px e texto 12 (padrão: 28 px, 13); `.on_surf()` = fundo
-//!   bg, para quando o botão fica sobre surf. Raio 6. Desabilitado:
-//!   `ui.add_enabled(false, Button::…)` pinta bg/line/text e o egui esmaece
-//!   (≈ o cinza do artboard); o `danger`, bad a 35 %. Rótulo ≥ 4,5:1 sobre o
-//!   fundo em todos, nos dois temas. AccessKit: `Button`, com `disabled`
-//!   quando desabilitado.
+//!   bg, para quando o botão fica sobre surf; `.raised()` = fundo raised,
+//!   sobre surf ao lado de campos (corpo de Ajustes, cartões do Explorar e
+//!   da Administração: no escuro, o bg é o do campo). Raio 6.
+//!   Desabilitado: `ui.add_enabled(false, Button::…)` pinta bg/line/text e o
+//!   egui esmaece (≈ o cinza do artboard); o `danger`, bad a 35 %. Rótulo
+//!   ≥ 4,5:1 sobre o fundo em todos, nos dois temas. AccessKit: `Button`,
+//!   com `disabled` quando desabilitado.
 //! - `text_field(ui, &mut texto, largura, dica, senha, limite) -> Response`:
 //!   campo de 26 px, raio 5, fundo field, borda line (acc com foco), texto 12
 //!   e a `dica` em text2; `senha = true` mascara o texto; `limite` em
@@ -64,15 +69,17 @@
 //!   `TextInput` (`PasswordInput` com senha).
 //! - `mono_field(ui, &mut texto, largura) -> Response`: o `text_field` com o
 //!   texto em mono 12 (endereço, caminho), sem dica, máscara nem limite.
+//!   `mono_field_with(ui, &mut texto, largura, dica, limite)`: com a dica do
+//!   `text_field` (vazia = nenhuma) e o limite em caracteres (os IDs).
 //! - `select(ui, rótulo, texto, largura_mín, |ui| menu) -> Option<R>`:
 //!   seletor de 26 px no estilo do Secundário (fundo surf, surf2 sob o
 //!   ponteiro, borda line, raio 6), com o `texto` em 12 e a seta à direita.
 //!   A largura é a do texto, entre `largura_mín` e a da linha; o texto
 //!   cortado vai à dica. O clique abre `menu` num popup logo abaixo, da
-//!   largura do seletor, que rola além de 300; uma opção ou um clique fora
-//!   fecha. Devolve o retorno de `menu` quando aberto. Desabilitado: bg e
-//!   line. AccessKit: `ComboBox` com o `rótulo`, o valor `texto` e
-//!   `expanded`.
+//!   largura do seletor, que rola além de 300 (barra de `scroll_bar`); uma
+//!   opção ou um clique fora fecha. Devolve o retorno de `menu` quando
+//!   aberto. Desabilitado: bg e line. AccessKit: `ComboBox` com o `rótulo`,
+//!   o valor `texto` e `expanded`.
 //!   `option(ui, selecionada, texto) -> Response`: uma opção do `menu`;
 //!   AccessKit: marcada = selecionada.
 //! - `checkbox(ui, &mut marcado, rótulo) -> Response`: caixa 14 × 14, raio 3,
@@ -93,7 +100,9 @@
 //!   `CheckBox` marcado/desmarcado.
 //! - `disclosure_row(ui, id, título, meta, |ui| corpo) -> Option<R>`: linha de
 //!   40 px com seta, título e `meta` (text2) à direita; `disclosure_link(ui, id,
-//!   título, |ui| corpo) -> Option<R>`: seta e título em 12, cor acc. Recolhidos
+//!   título, |ui| corpo) -> Option<R>`: seta e título em 12, cor acc.
+//!   `disclosure_row_hinted(…, meta, Some(dica), …)`: a dica com o ponteiro
+//!   sobre o `meta` (o texto bruto de uma data formatada). Recolhidos
 //!   por padrão; o estado fica na memória do egui (`id` + id da `Ui`). Devolvem
 //!   o retorno do corpo quando aberto. AccessKit: `Button` com `expanded`.
 //!
@@ -111,8 +120,8 @@
 //! - `facts(ui, &[Fact::new(rótulo, valor).color(cor)])`: linhas rótulo (text2)
 //!   … valor (SemiBold, `cor` ou text; `.mono()` = `Type::Mono`), espaçadas
 //!   de 6. Numa linha só: o valor longo corta com reticências (o rótulo cede
-//!   até 40 % da largura) e o texto cortado vai ao tooltip. AccessKit: um
-//!   `Label` "rótulo: valor" por linha.
+//!   até 40 % da largura) e o texto cortado vai ao tooltip, com a dica de
+//!   `.hint(texto)` embaixo. AccessKit: um `Label` "rótulo: valor" por linha.
 //! - `details(ui, &[Fact::new(rótulo, valor)…])`: a variante do inspetor do
 //!   Docker: rótulos (12, text2) numa coluna da largura do maior e valores
 //!   (12, Regular, `cor` ou text; `.mono()` = `Type::Mono`) à esquerda, que
@@ -141,9 +150,11 @@
 //!   altura de `ui.max_rect()` a cada frame; `width: None` = a coluna que
 //!   estica (mín. 120). Só as linhas visíveis são montadas; `topo` volta a
 //!   rolagem ao início. A barra de rolagem é a de `scroll_bar`.
-//! - `scroll_bar(ui)`: nas listas e tabelas, a barra de rolagem à vista
-//!   (4 px, text2) sempre que há mais linhas que a área; sem transbordo,
-//!   nenhuma. Chamar antes de montar a `ScrollArea`.
+//! - `scroll_bar(ui)`: a barra de rolagem à vista (4 px, text2) sempre que
+//!   o conteúdo passa da área; sem transbordo, nenhuma. Nas listas e
+//!   tabelas, na página (`main-scroll`), nos detalhes, nas prévias e no
+//!   corpo de Ajustes. Chamar antes de montar a `ScrollArea`; o conteúdo
+//!   herda o estilo (a página principal o desfaz).
 use crate::theme;
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Galley, Layout, Pos2, Rect, Response,
@@ -358,6 +369,7 @@ pub(crate) struct Button<'a> {
     kind: Kind,
     small: bool,
     on_surf: bool,
+    raised: bool,
 }
 impl<'a> Button<'a> {
     pub(crate) fn primary(text: &'a str) -> Self {
@@ -379,6 +391,7 @@ impl<'a> Button<'a> {
             kind,
             small: false,
             on_surf: false,
+            raised: false,
         }
     }
     pub(crate) fn small(mut self) -> Self {
@@ -391,12 +404,25 @@ impl<'a> Button<'a> {
         self.on_surf = true;
         self
     }
+    /// Sobre surf ao lado de campos (corpo de Ajustes, cartões do Explorar e
+    /// da Administração): secundário e destrutivo com fundo raised (no
+    /// escuro, o bg seria o do campo).
+    pub(crate) fn raised(mut self) -> Self {
+        self.raised = true;
+        self
+    }
 }
 impl egui::Widget for Button<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let p = theme::palette(ui.visuals());
         let enabled = ui.is_enabled();
-        let base = if self.on_surf { p.bg } else { p.surf };
+        let base = if self.raised {
+            p.raised
+        } else if self.on_surf {
+            p.bg
+        } else {
+            p.surf
+        };
         let filled = matches!(self.kind, Kind::Primary | Kind::Danger);
         let (fill, stroke, color) = match (enabled, self.kind) {
             // O egui esmaece o desabilitado (`disabled_alpha`): bad a
@@ -851,6 +877,7 @@ pub(crate) struct Fact<'a> {
     value: String,
     color: Option<Color32>,
     mono: bool,
+    hint: Option<&'a str>,
 }
 impl<'a> Fact<'a> {
     pub(crate) fn new(label: &'a str, value: impl Into<String>) -> Self {
@@ -859,6 +886,7 @@ impl<'a> Fact<'a> {
             value: value.into(),
             color: None,
             mono: false,
+            hint: None,
         }
     }
     pub(crate) fn color(mut self, color: Option<Color32>) -> Self {
@@ -868,6 +896,11 @@ impl<'a> Fact<'a> {
     /// Valor em `Type::Mono` (IDs, portas).
     pub(crate) fn mono(mut self) -> Self {
         self.mono = true;
+        self
+    }
+    /// Dica da linha em `facts` (o texto bruto de uma data formatada).
+    pub(crate) fn hint(mut self, hint: &'a str) -> Self {
+        self.hint = Some(hint);
         self
     }
 }
@@ -936,17 +969,20 @@ pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
                 value,
                 value_color,
             );
-            match elided {
-                (true, false) => {
-                    response.on_hover_text(fact.label);
+            let cut = match elided {
+                (true, false) => Some(fact.label),
+                (false, true) => Some(fact.value.as_str()),
+                (true, true) => Some(spoken.as_str()),
+                (false, false) => None,
+            };
+            match (cut, fact.hint) {
+                (Some(cut), Some(hint)) => {
+                    response.on_hover_text(format!("{cut}\n{hint}"));
                 }
-                (false, true) => {
-                    response.on_hover_text(&fact.value);
+                (Some(text), None) | (None, Some(text)) => {
+                    response.on_hover_text(text);
                 }
-                (true, true) => {
-                    response.on_hover_text(&spoken);
-                }
-                (false, false) => {}
+                (None, None) => {}
             }
         }
     });
@@ -1066,13 +1102,32 @@ pub(crate) fn text_field(
     )
 }
 
-/// O `text_field` em mono 12 (endereço, caminho), sem dica, máscara nem limite.
+/// O `text_field` em mono 12 (endereço, caminho), sem dica, máscara nem
+/// limite.
 pub(crate) fn mono_field(ui: &mut Ui, text: &mut String, width: f32) -> Response {
-    field(
-        ui,
-        width,
-        egui::TextEdit::singleline(text).font(FontId::monospace(12.)),
-    )
+    mono_field_with(ui, text, width, "", usize::MAX)
+}
+/// O `mono_field` com a `dica` (a do `text_field`: 12 proporcional, text2;
+/// vazia = nenhuma) e o `limite` em caracteres (os campos de ID).
+pub(crate) fn mono_field_with(
+    ui: &mut Ui,
+    text: &mut String,
+    width: f32,
+    hint: &str,
+    limit: usize,
+) -> Response {
+    let p = theme::palette(ui.visuals());
+    let mut edit = egui::TextEdit::singleline(text)
+        .font(FontId::monospace(12.))
+        .char_limit(limit);
+    if !hint.is_empty() {
+        edit = edit.hint_text(
+            egui::RichText::new(hint)
+                .font(FontId::proportional(12.))
+                .color(p.text2),
+        );
+    }
+    field(ui, width, edit)
 }
 
 /// A caixa de `text_field` e `mono_field` em volta de `edit`.
@@ -1172,7 +1227,9 @@ pub(crate) fn select<R>(
     let inner = egui::Popup::menu(&response).width(width).show(|ui| {
         // O popup guarda o tamanho do frame anterior e a rolagem caberia
         // nele: com o mínimo igual ao máximo, ela mede só o conteúdo (até
-        // 300) e o popup cresce quando as opções aumentam.
+        // 300) e o popup cresce quando as opções aumentam. A barra fica à
+        // vista quando há mais opções que isso.
+        scroll_bar(ui);
         egui::ScrollArea::vertical()
             .max_height(300.)
             .min_scrolled_height(300.)
@@ -1233,11 +1290,12 @@ pub(crate) fn split<R>(ui: &mut Ui, legend: &[String], content: impl FnOnce(&mut
     inner
 }
 
-/// Listas e tabelas: a barra de rolagem fica à vista (4 px de text2, 10 ao
-/// passar o mouse) sempre que há mais linhas que a área, para a lista não
-/// parecer completa; sem transbordo, nenhuma. Flutua sobre o respiro direito
-/// das linhas, sem mudar a largura delas. Vale para as `ScrollArea` montadas
-/// em `ui` depois da chamada.
+/// A barra de rolagem fica à vista (4 px de text2, 10 ao passar o mouse)
+/// sempre que o conteúdo passa da área, para ele não parecer completo; sem
+/// transbordo, nenhuma. Flutua sobre o respiro direito (o das linhas, nas
+/// listas; nos painéis, a folga que quem chama deixa), sem mudar a largura
+/// do conteúdo. Vale para as `ScrollArea` montadas em `ui` depois da
+/// chamada.
 pub(crate) fn scroll_bar(ui: &mut Ui) {
     let p = theme::palette(ui.visuals());
     ui.spacing_mut().scroll = egui::style::ScrollStyle {
@@ -1386,6 +1444,18 @@ pub(crate) fn disclosure_row<R>(
     meta: &str,
     body: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
+    disclosure_row_hinted(ui, id_salt, title, meta, None, body)
+}
+/// `disclosure_row` com a `dica` sobre o `meta` (o texto bruto de uma data
+/// formatada), com o ponteiro sobre ele.
+pub(crate) fn disclosure_row_hinted<R>(
+    ui: &mut Ui,
+    id_salt: impl Hash,
+    title: &str,
+    meta: &str,
+    hint: Option<&str>,
+    body: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
     let p = theme::palette(ui.visuals());
     let id = ui.id().with(id_salt);
     let open = disclosure_state(ui, id);
@@ -1416,7 +1486,15 @@ pub(crate) fn disclosure_row<R>(
         galley,
         p.text,
     );
+    let meta_rect = Rect::from_min_size(meta_at, meta.size());
     ui.painter().galley(meta_at, meta, p.text2);
+    if let Some(hint) = hint
+        && response
+            .hover_pos()
+            .is_some_and(|at| meta_rect.contains(at))
+    {
+        response.on_hover_text(hint);
+    }
     if !open {
         return None;
     }
@@ -1490,6 +1568,9 @@ pub(crate) struct Confirm<'a> {
 const VEIL: Color32 = Color32::from_black_alpha(115);
 /// Altura máxima da prévia; o resto rola.
 const PREVIEW_HEIGHT: f32 = 240.;
+/// Até onde a prévia encolhe numa janela baixa, para a faixa de aviso e o
+/// campo ficarem à vista acima do rodapé.
+const PREVIEW_MIN: f32 = 60.;
 
 /// A área de conteúdo: o `CentralPanel` em volta de `ui` (abaixo da barra
 /// superior, à direita da lateral).
@@ -1575,23 +1656,41 @@ pub(crate) fn confirm_sheet(
                             .wrap(),
                         );
                     });
-                    // Numa janela baixa o meio rola, e o rodapé (28 + 14 de
-                    // espaço) fica à vista acima da margem (18) e de 16 de
-                    // respiro.
-                    let body = area.bottom() - 16. - 18. - 28. - 14. - ui.cursor().top();
+                    // O rodapé (28 + 14 de espaço) fica à vista acima da
+                    // margem (18) e de 16 de respiro, e a faixa e o campo
+                    // (`tail`, mais 14), fixos acima dele. Numa janela baixa
+                    // só a prévia encolhe, até `PREVIEW_MIN`; abaixo disso, o
+                    // meio (fatos e prévia) rola, até sumir. `tail` é a
+                    // medida do frame anterior (no 1º, o da medida da `Area`,
+                    // que não aparece).
+                    let tail_id = ui.id().with("tail");
+                    let tail = ui.data(|d| d.get_temp::<f32>(tail_id)).unwrap_or(0.);
+                    let body =
+                        (area.bottom() - 16. - 18. - 28. - 14. - tail - 14. - ui.cursor().top())
+                            .max(0.);
+                    scroll_bar(ui);
                     egui::ScrollArea::vertical()
                         .id_salt("body")
-                        .max_height(body.max(80.))
+                        .max_height(body)
+                        .min_scrolled_height(0.)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 14.;
                             details(ui, confirm.facts);
                             preview_box(ui, confirm.preview, preview);
-                            strip(ui, Tone::Warn, "Atenção.", confirm.warning, None);
-                            if let Some(target) = confirm.typed {
-                                typing(ui, target, input);
-                            }
                         });
+                    let top = ui.cursor().top();
+                    strip(ui, Tone::Warn, "Atenção.", confirm.warning, None);
+                    if let Some(target) = confirm.typed {
+                        typing(ui, target, input);
+                    }
+                    // Mudou (outra largura): o frame seguinte, já pedido, usa
+                    // a medida nova.
+                    let measured = ui.min_rect().bottom() - top;
+                    if (measured - tail).abs() > 0.5 {
+                        ui.data_mut(|d| d.insert_temp(tail_id, measured));
+                        ui.ctx().request_repaint();
+                    }
                     ui.horizontal(|ui| {
                         ui.set_min_height(28.);
                         let left =
@@ -1627,7 +1726,9 @@ pub(crate) fn confirm_sheet(
     answer
 }
 /// A caixa da prévia: borda line, cabeçalho (11, text2) sobre surf2 e o
-/// conteúdo com rolagem até `PREVIEW_HEIGHT`.
+/// conteúdo com rolagem até `PREVIEW_HEIGHT`, ou até o fim do meio da folha,
+/// mas não menos que `PREVIEW_MIN`. A barra à vista vem do meio da folha
+/// (`scroll_bar`).
 fn preview_box(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
     let p = theme::palette(ui.visuals());
     egui::Frame::new()
@@ -1649,14 +1750,26 @@ fn preview_box(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
                     ui.set_min_width(ui.available_width());
                     ui.label(egui::RichText::new(title).size(11.).color(p.text2));
                 });
+            // À direita, 4 de margem e 6 de folga no conteúdo (os 10 da
+            // esquerda): a barra fica entre o texto e a borda.
             egui::Frame::new()
-                .inner_margin(egui::Margin::symmetric(10, 8))
+                .inner_margin(egui::Margin {
+                    left: 10,
+                    right: 4,
+                    top: 8,
+                    bottom: 8,
+                })
                 .show(ui, |ui| {
+                    // A altura disponível é o que resta no meio da folha.
                     egui::ScrollArea::vertical()
                         .id_salt("preview")
                         .max_height(PREVIEW_HEIGHT)
+                        .min_scrolled_height(PREVIEW_MIN)
                         .auto_shrink([false, true])
-                        .show(ui, content);
+                        .show(ui, |ui| {
+                            ui.set_max_width(ui.available_width() - 6.);
+                            content(ui);
+                        });
                 });
         });
 }
@@ -2146,6 +2259,29 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn a_raised_button_paints_raised_and_reads_at_4_5_to_1() {
+        use crate::theme::tests::contrast;
+        for (theme, p) in THEMES {
+            for (kind, color) in [(Kind::Secondary, p.text), (Kind::Destructive, p.bad)] {
+                let ctx = context(theme);
+                let out = run(&ctx, vec![], |ui| {
+                    ui.add(Button::new("Rótulo", kind).raised());
+                });
+                let at = rect_of(&node(&out, Role::Button, "Rótulo"));
+                let fills: Vec<Color32> = rects(&out)
+                    .iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| r.fill)
+                    .collect();
+                assert_eq!(fills, [p.raised], "{theme:?} {kind:?}");
+                assert_ne!(p.raised, p.field, "{theme:?}: like a field");
+                let ratio = contrast(color, p.raised);
+                assert!(ratio >= 4.5, "{theme:?} {kind:?}: {ratio:.2}:1");
+            }
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum View {
         A,
@@ -2604,6 +2740,70 @@ pub(crate) mod tests {
                 out = run(&ctx, vec![], &mut add);
             }
             node(&out, Role::Label, image);
+        }
+    }
+
+    /// Os textos pintados depois de o ponteiro parar em `at` (0,5 s; cada
+    /// frame avança 1/60 s).
+    fn tooltip_at(ctx: &egui::Context, at: Pos2, add: &mut impl FnMut(&mut Ui)) -> Vec<String> {
+        let mut out = run(ctx, vec![egui::Event::PointerMoved(at)], &mut *add);
+        for _ in 0..45 {
+            out = run(ctx, vec![], &mut *add);
+        }
+        texts(&out).into_iter().map(|(t, _)| t).collect()
+    }
+    /// O retângulo do texto `text` pintado.
+    fn painted_at(out: &egui::FullOutput, text: &str) -> Rect {
+        let found: Vec<Rect> = text_rects(out)
+            .into_iter()
+            .filter(|(t, ..)| t == text)
+            .map(|(_, rect, _)| rect)
+            .collect();
+        match found[..] {
+            [one] => one,
+            _ => panic!("{text:?} painted once, got {found:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hint_shows_on_its_fact_and_on_the_meta_of_its_row_and_nowhere_else() {
+        let raw = "2026-11-03T19:03:14.938122Z";
+        // `facts`: a dica na linha dela; a outra linha, sem dica, nada.
+        let ctx = context(egui::Theme::Dark);
+        let mut add = |ui: &mut Ui| {
+            facts(
+                ui,
+                &[
+                    Fact::new("Último evento", "03/11 19:03").hint(raw),
+                    Fact::new("Eventos", "12"),
+                ],
+            );
+        };
+        let out = run(&ctx, vec![], &mut add);
+        let hinted = rect_of(&node(&out, Role::Label, "Último evento: 03/11 19:03"));
+        let plain = rect_of(&node(&out, Role::Label, "Eventos: 12"));
+        assert!(!texts(&out).iter().any(|(t, _)| t == raw), "precondition");
+        assert!(tooltip_at(&ctx, hinted.center(), &mut add).contains(&raw.to_owned()));
+        let elsewhere = tooltip_at(&ctx, plain.center(), &mut add);
+        assert!(!elsewhere.contains(&raw.to_owned()), "{elsewhere:?}");
+        // `disclosure_row_hinted`: só sobre o meta; `disclosure_row`, nunca.
+        for hinted in [true, false] {
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut Ui| {
+                let (title, meta) = ("stop · fim", "03/11 19:03");
+                if hinted {
+                    disclosure_row_hinted(ui, "e", title, meta, Some(raw), |_| ());
+                } else {
+                    disclosure_row(ui, "e", title, meta, |_| ());
+                }
+            };
+            let out = run(&ctx, vec![], &mut add);
+            let meta = painted_at(&out, "03/11 19:03");
+            let title = painted_at(&out, "stop · fim");
+            let on_meta = tooltip_at(&ctx, meta.center(), &mut add);
+            assert_eq!(on_meta.contains(&raw.to_owned()), hinted, "{on_meta:?}");
+            let on_title = tooltip_at(&ctx, title.center(), &mut add);
+            assert!(!on_title.contains(&raw.to_owned()), "{on_title:?}");
         }
     }
 
@@ -3476,6 +3676,144 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_preview_and_the_middle_of_a_short_sheet_show_their_scroll_bars_without_hover() {
+        // (altura da janela, linhas da prévia, barra na prévia?, barra no
+        // meio?): o meio só rola quando nem a prévia no mínimo cabe (a 300,
+        // ela quase some e a barra dela não conta).
+        for (height, lines, in_preview, in_middle) in [
+            (860., 2, Some(false), false),
+            (860., 200, Some(true), false),
+            (300., 200, None, true),
+        ] {
+            for (theme, p) in THEMES {
+                let ctx = context(theme);
+                let mut input = String::new();
+                let mut add = |ui: &mut Ui| {
+                    confirm_sheet(
+                        ui,
+                        &sheet_with(Some("acme / legado"), FIVE_MINUTES),
+                        &mut input,
+                        |ui| {
+                            ui.label("palavra ".repeat(80));
+                            for i in 0..lines {
+                                ui.label(format!("linha {i}"));
+                            }
+                        },
+                    );
+                };
+                // Sem ponteiro; a barra aparece com uma animação curta.
+                let mut out = open(&ctx, [800., height], &mut add);
+                for _ in 0..10 {
+                    out = run_sized(&ctx, [800., height], vec![], &mut add);
+                }
+                let case = format!("{theme:?} {height} × {lines}");
+                let frame = rects(&out)
+                    .into_iter()
+                    .find(|r| {
+                        r.corner_radius.se == 12 && r.corner_radius.nw == 0 && r.blur_width == 0.
+                    })
+                    .expect("the sheet")
+                    .rect;
+                let preview = preview_frame(&out, p);
+                // A da prévia: na margem direita dela (borda e margem 2, e 4).
+                let handles =
+                    scroll_handles(&out, preview.with_max_x(preview.right() - 6.), p.text2);
+                if let Some(want) = in_preview {
+                    assert_eq!(handles.len(), usize::from(want), "{case}: {handles:?}");
+                }
+                if let Some(handle) = handles.first() {
+                    // O texto termina antes dela, a 12 da borda, como à
+                    // esquerda.
+                    let text = texts_in(&out, preview);
+                    assert!(
+                        text.iter().all(|t| t.right() <= handle.left()),
+                        "{case}: {handle:?} covers {text:?}"
+                    );
+                }
+                // A do meio: na borda do conteúdo da folha (margem 22 + 1).
+                let middle = frame.with_max_x(frame.right() - 23.);
+                let handles: Vec<Rect> = scroll_handles(&out, middle, p.text2)
+                    .into_iter()
+                    .filter(|h| !preview.contains_rect(*h))
+                    .collect();
+                assert_eq!(handles.len(), usize::from(in_middle), "{case}: {handles:?}");
+            }
+        }
+    }
+    /// Os retângulos dos textos pintados dentro de `area`.
+    fn texts_in(out: &egui::FullOutput, area: Rect) -> Vec<Rect> {
+        text_rects(out)
+            .into_iter()
+            .map(|(_, rect, _)| rect)
+            .filter(|r| area.contains_rect(*r))
+            .collect()
+    }
+
+    #[test]
+    fn a_heavy_sheet_at_the_minimum_window_keeps_the_warning_and_the_field_above_the_footer() {
+        // A área de conteúdo da janela mínima (720 × 560): 642 × 480 no
+        // macOS. O aviso mais longo das operações, alvo e título longos.
+        let warning = "Mover para um destino existente pode perder histórico no processo de copiar e excluir. Mesclar workspace pode aplicar parte dos projetos antes de falhar. Conflitos de páginas bloqueiam a operação; leases ativos não são forçados. Faça backup antes. A prévia por inventário não é uma simulação transacional.";
+        let target = "default / acme-servicos-portal-coleta-zero-carbono-v2";
+        let facts = [
+            Fact::new("Operação", "Mover projeto para outro workspace"),
+            Fact::new("Alvo", format!("{target} → outro / {target}")).mono(),
+            Fact::new("Efeito", "Move páginas, sessões e vínculos"),
+            Fact::new("Reversível", "Não"),
+        ];
+        for n in [0, 2, 4] {
+            let ctx = context(egui::Theme::Dark);
+            let mut input = String::new();
+            let mut add = |ui: &mut Ui| {
+                confirm_sheet(
+                    ui,
+                    &Confirm {
+                        title: &format!("Mover o projeto “{target}” para outro workspace?"),
+                        subtitle: &format!("Projeto: {target}"),
+                        facts: &facts[..n],
+                        preview: "Prévia da alteração",
+                        warning,
+                        typed: Some(target),
+                        verb: "Mover",
+                        left: FIVE_MINUTES,
+                        ready: true,
+                    },
+                    &mut input,
+                    |ui| {
+                        for i in 0..200 {
+                            ui.label(format!("linha {i}"));
+                        }
+                    },
+                );
+            };
+            // A barra aparece com uma animação curta.
+            let mut out = open(&ctx, [642., 480.], &mut add);
+            for _ in 0..10 {
+                out = run_sized(&ctx, [642., 480.], vec![], &mut add);
+            }
+            let field = match &nodes(&out, Role::TextInput, "")[..] {
+                [one] => rect_of(one),
+                found => panic!("{n} facts: one field, got {}", found.len()),
+            };
+            let warning = rect_of(&node(&out, Role::Label, &format!("Atenção. {warning}")));
+            let cancel = rect_of(&node(&out, Role::Button, "Cancelar"));
+            let case = format!("{n} facts: {warning:?} {field:?} {cancel:?}");
+            assert!(warning.bottom() <= field.top(), "{case}");
+            assert!(field.bottom() <= cancel.top(), "{case}");
+            assert!(cancel.bottom() <= 480. - 16., "{case}");
+            // Nem a prévia no mínimo cabe: o meio rola, com a barra à vista
+            // na borda do conteúdo (a do campo).
+            let middle: Vec<Rect> = rects(&out)
+                .into_iter()
+                .filter(|r| r.fill == theme::DARK.text2 && r.rect.width() <= 10.)
+                .map(|r| r.rect)
+                .filter(|r| r.bottom() <= warning.top() && (r.right() - field.right()).abs() < 0.5)
+                .collect();
+            assert_eq!(middle.len(), 1, "{case}: {middle:?}");
+        }
+    }
+
+    #[test]
     fn in_a_short_window_the_footer_stays_inside_the_content_area() {
         for height in [300., 420., 600.] {
             let ctx = context(egui::Theme::Dark);
@@ -3795,6 +4133,49 @@ pub(crate) mod tests {
         click(&ctx, last.center(), &mut add);
         drop(add);
         assert_eq!(current, "Seis");
+    }
+
+    #[test]
+    fn a_select_popup_with_more_options_than_it_shows_has_its_scroll_bar_without_hover() {
+        // (opções, transborda os 300?)
+        for (count, overflows) in [(3, false), (40, true)] {
+            for (theme, p) in THEMES {
+                let ctx = context(theme);
+                let options: Vec<String> = (0..count).map(|i| format!("Opção {i}")).collect();
+                let mut add = |ui: &mut Ui| {
+                    select(ui, "Escolha", "Opção 0", 200., |ui| {
+                        for item in &options {
+                            option(ui, item == "Opção 0", item);
+                        }
+                    });
+                };
+                let out = run(&ctx, vec![], &mut add);
+                let combo = rect_of(&node(&out, Role::ComboBox, "Escolha"));
+                click(&ctx, combo.center(), &mut add);
+                // O ponteiro fica no seletor, fora da lista; a barra aparece
+                // com uma animação curta.
+                let mut out = run(&ctx, vec![], &mut add);
+                for _ in 0..10 {
+                    out = run(&ctx, vec![], &mut add);
+                }
+                let first = rect_of(&node(&out, Role::Button, "Opção 0"));
+                let handles: Vec<Rect> = rects(&out)
+                    .into_iter()
+                    .filter(|r| {
+                        r.fill == p.text2
+                            && r.rect.width() <= 10.
+                            && r.rect.top() >= first.top()
+                            && r.rect.left() > first.center().x
+                    })
+                    .map(|r| r.rect)
+                    .collect();
+                let case = format!("{theme:?} {count}");
+                assert_eq!(handles.len(), usize::from(overflows), "{case}: {handles:?}");
+                if let Some(handle) = handles.first() {
+                    assert_eq!(handle.width(), 4., "{case}");
+                }
+            }
+        }
     }
 
     #[test]
