@@ -35,6 +35,8 @@
 //!   (true = mudou). Fundo surf2, borda line, raio 7, itens de 24 px, texto 12;
 //!   o selecionado tem surf, sombra e SemiBold; `count` vai em text2.
 //!   AccessKit: um `Button` por item, rótulo "label count", marcado = selecionado.
+//!   `segmented_width(ui, &atual, &itens)`: a largura que ele ocupa, antes de
+//!   desenhar (para decidir a quebra de uma linha).
 //! - `switch(ui, &mut ligado, rótulo) -> Response`: interruptor 26 × 16 com
 //!   rótulo; `changed()` no clique. AccessKit: `CheckBox` marcado/desmarcado.
 //! - `disclosure_row(ui, id, título, meta, |ui| corpo) -> Option<R>`: linha de
@@ -44,9 +46,6 @@
 //!   o retorno do corpo quando aberto. AccessKit: `Button` com `expanded`.
 //!
 //! Estado e medidas
-//! - `chip(ui, Chip::{Ok, Late, Paused, Down}, texto) -> Response`: pílula de
-//!   24 px, raio 12 (ok = sel/acc, atraso = warn translúcido/warn, pausado =
-//!   surf2/text, indisponível = bad translúcido/bad). AccessKit: `Label`.
 //! - `strip(ui, Tone::{Warn, Bad, Info}, negrito, texto, ação) -> Option<Response>`:
 //!   faixa de aviso (fundo do tom a 8–10 %, ícone, trecho em negrito e texto).
 //!   `ação = Some(rótulo)` põe um `Button::secondary(..).small()` à direita e
@@ -66,6 +65,23 @@
 //! - `strokes(painter, rect, &[&[(x, y), …]], largura, cor)` e `dot(painter,
 //!   rect, (x, y), largura, cor)`: ícones a partir dos paths de 24 unidades dos
 //!   artboards (um traço que volta ao ponto inicial é fechado).
+//!
+//! Páginas
+//! - `one_line(ui, texto, fonte, cor, largura) -> Arc<Galley>`: uma linha, com
+//!   reticências além de `largura` (`galley.elided` diz se cortou).
+//! - `pane(ui, rect, rótulo)`: nó AccessKit `Pane` (o aria-label do artboard).
+//! - `empty(ui, título, subtítulo)`: mensagem centrada no fluxo (24 de
+//!   respiro, título Seção, subtítulo 12 text2 que quebra).
+//! - `search_field(ui, &mut texto, largura, dica)`: campo de busca de 12 px
+//!   com a lupa à esquerda e a `dica` como placeholder.
+//! - `split(ui, &[legenda], |ui| conteúdo) -> R`: dá ao conteúdo a altura que
+//!   sobra (mín. 120) e pinta as linhas da legenda (`caption`) embaixo.
+//! - `table(ui, id, &[Column { title, width, hint }], TableSize { head, row,
+//!   pad }, linhas, topo, |ui, linha, coluna| …)`: cabeçalho (11, text2; o
+//!   `hint` vai ao tooltip) e linhas de `row` com divisória, na largura e na
+//!   altura de `ui.max_rect()` a cada frame; `width: None` = a coluna que
+//!   estica (mín. 120). Só as linhas visíveis são montadas; `topo` volta a
+//!   rolagem ao início.
 use crate::theme;
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Galley, Layout, Pos2, Rect, Response,
@@ -137,7 +153,7 @@ pub(crate) fn card(ui: &Ui) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(16, 14))
 }
 
-#[allow(dead_code, reason = "API das passadas P2 e da Fase 4 (confirmações)")]
+#[allow(dead_code, reason = "Fase 4: confirmações")]
 pub(crate) fn sheet(ui: &Ui) -> egui::Frame {
     let p = theme::palette(ui.visuals());
     egui::Frame::new()
@@ -269,14 +285,14 @@ pub(crate) struct Button<'a> {
     small: bool,
 }
 impl<'a> Button<'a> {
-    #[allow(dead_code, reason = "API das passadas P2 e da Fase 4")]
+    #[allow(dead_code, reason = "Fase 4: confirmações")]
     pub(crate) fn primary(text: &'a str) -> Self {
         Self::new(text, Kind::Primary)
     }
     pub(crate) fn secondary(text: &'a str) -> Self {
         Self::new(text, Kind::Secondary)
     }
-    #[allow(dead_code, reason = "API das passadas P2 e da Fase 4")]
+    #[allow(dead_code, reason = "Fase 4: confirmações")]
     pub(crate) fn destructive(text: &'a str) -> Self {
         Self::new(text, Kind::Destructive)
     }
@@ -341,6 +357,53 @@ pub(crate) struct Segment<'a, T> {
     pub label: &'a str,
     pub count: Option<String>,
 }
+/// O texto de um item (o selecionado em SemiBold) e o rótulo falado.
+fn segment_text<T>(
+    p: &theme::Palette,
+    item: &Segment<'_, T>,
+    selected: bool,
+) -> (egui::text::LayoutJob, String) {
+    let font = FontId::new(
+        12.,
+        if selected {
+            theme::semibold()
+        } else {
+            FontFamily::Proportional
+        },
+    );
+    let mut job = egui::text::LayoutJob::default();
+    let color = if selected { p.text } else { p.text2 };
+    job.append(item.label, 0., egui::TextFormat::simple(font, color));
+    let label = match &item.count {
+        Some(count) => {
+            job.append(
+                &format!(" {count}"),
+                0.,
+                egui::TextFormat::simple(FontId::proportional(12.), p.text2),
+            );
+            format!("{} {count}", item.label)
+        }
+        None => item.label.to_owned(),
+    };
+    (job, label)
+}
+/// A largura de `segmented` com estes itens: os itens (texto + 24), a margem
+/// de 2 e a borda de 1 dos dois lados.
+pub(crate) fn segmented_width<T: PartialEq + Copy>(
+    ui: &Ui,
+    current: &T,
+    items: &[Segment<'_, T>],
+) -> f32 {
+    let p = theme::palette(ui.visuals());
+    let inner: f32 = items
+        .iter()
+        .map(|item| {
+            let (job, _) = segment_text(p, item, *current == item.value);
+            ui.painter().layout_job(job).size().x + 24.
+        })
+        .sum();
+    inner + 2. * 2. + 2. * 1.
+}
 pub(crate) fn segmented<T: PartialEq + Copy>(
     ui: &mut Ui,
     current: &mut T,
@@ -354,57 +417,44 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
         .corner_radius(7.)
         .inner_margin(2)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.;
-                for item in items {
-                    let selected = *current == item.value;
-                    let font = FontId::new(
-                        12.,
+            // Uma linha de 24 desde o início: o `horizontal` começa com a
+            // altura de interação (18) e, numa linha centrada, desceria e
+            // esticaria a moldura.
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 24.),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.;
+                    for item in items {
+                        let selected = *current == item.value;
+                        let color = if selected { p.text } else { p.text2 };
+                        let (job, label) = segment_text(p, item, selected);
+                        let galley = ui.painter().layout_job(job);
+                        let (rect, response) = ui
+                            .allocate_exact_size(vec2(galley.size().x + 24., 24.), Sense::click());
+                        response.widget_info(|| {
+                            WidgetInfo::selected(
+                                WidgetType::SelectableLabel,
+                                ui.is_enabled(),
+                                selected,
+                                &label,
+                            )
+                        });
                         if selected {
-                            theme::semibold()
-                        } else {
-                            FontFamily::Proportional
-                        },
-                    );
-                    let mut job = egui::text::LayoutJob::default();
-                    let color = if selected { p.text } else { p.text2 };
-                    job.append(item.label, 0., egui::TextFormat::simple(font, color));
-                    let label = match &item.count {
-                        Some(count) => {
-                            job.append(
-                                &format!(" {count}"),
-                                0.,
-                                egui::TextFormat::simple(FontId::proportional(12.), p.text2),
-                            );
-                            format!("{} {count}", item.label)
+                            ui.painter().add(shadow(p, 2, 1).as_shape(rect, 5.));
+                            ui.painter().rect_filled(rect, 5., p.surf);
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(rect, 5., tone(p.surf, 0.5));
                         }
-                        None => item.label.to_owned(),
-                    };
-                    let galley = ui.painter().layout_job(job);
-                    let (rect, response) =
-                        ui.allocate_exact_size(vec2(galley.size().x + 24., 24.), Sense::click());
-                    response.widget_info(|| {
-                        WidgetInfo::selected(
-                            WidgetType::SelectableLabel,
-                            ui.is_enabled(),
-                            selected,
-                            &label,
-                        )
-                    });
-                    if selected {
-                        ui.painter().add(shadow(p, 2, 1).as_shape(rect, 5.));
-                        ui.painter().rect_filled(rect, 5., p.surf);
-                    } else if response.hovered() {
-                        ui.painter().rect_filled(rect, 5., tone(p.surf, 0.5));
+                        ui.painter()
+                            .galley(rect.center() - galley.size() / 2., galley, color);
+                        if response.clicked() && !selected {
+                            *current = item.value;
+                            changed = true;
+                        }
                     }
-                    ui.painter()
-                        .galley(rect.center() - galley.size() / 2., galley, color);
-                    if response.clicked() && !selected {
-                        *current = item.value;
-                        changed = true;
-                    }
-                }
-            });
+                },
+            );
         });
     changed
 }
@@ -441,57 +491,6 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         pos2(track.right() + 8., rect.center().y - galley.size().y / 2.),
         galley,
         p.text,
-    );
-    response
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code, reason = "API das passadas P2 (barra superior e Docker)")]
-pub(crate) enum Chip {
-    Ok,
-    Late,
-    Paused,
-    Down,
-}
-#[allow(dead_code, reason = "API das passadas P2 (barra superior e Docker)")]
-pub(crate) fn chip(ui: &mut Ui, chip: Chip, text: &str) -> Response {
-    let p = theme::palette(ui.visuals());
-    let (fill, color) = match chip {
-        Chip::Ok => (p.sel, p.acc),
-        Chip::Late => (tone(p.warn, 0.12), p.warn),
-        Chip::Paused => (p.surf2, p.text),
-        Chip::Down => (tone(p.bad, 0.08), p.bad),
-    };
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), Type::Caption.font(), color);
-    let mark = if chip == Chip::Paused { 10. } else { 7. };
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(10. + mark + 6. + galley.size().x + 10., 24.),
-        Sense::hover(),
-    );
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, text));
-    let painter = ui.painter();
-    painter.rect_filled(rect, 12., fill);
-    let mark = Rect::from_min_size(
-        pos2(rect.left() + 10., rect.center().y - mark / 2.),
-        Vec2::splat(mark),
-    );
-    if chip == Chip::Paused {
-        strokes(
-            painter,
-            mark,
-            &[&[(9., 5.), (9., 19.)], &[(15., 5.), (15., 19.)]],
-            3.,
-            color,
-        );
-    } else {
-        painter.circle_filled(mark.center(), 3.5, color);
-    }
-    painter.galley(
-        pos2(mark.right() + 6., rect.center().y - galley.size().y / 2.),
-        galley,
-        color,
     );
     response
 }
@@ -712,8 +711,14 @@ impl<'a> Fact<'a> {
         self
     }
 }
-/// Uma linha cortada numa largura (`truncate_at_width`).
-fn single_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+/// Texto numa linha, com reticências além de `width`.
+pub(crate) fn one_line(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+) -> Arc<Galley> {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
     ui.painter().layout_job(job)
@@ -737,14 +742,14 @@ pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
                 .layout_no_wrap(fact.label.to_owned(), Type::Body.font(), p.text2)
                 .size()
                 .x;
-            let value = single_line(
+            let value = one_line(
                 ui,
                 &fact.value,
                 font,
                 value_color,
                 width - 12. - label_width.min(width * 0.4),
             );
-            let label = single_line(
+            let label = one_line(
                 ui,
                 fact.label,
                 Type::Body.font(),
@@ -783,6 +788,184 @@ pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
                 }
                 (false, false) => {}
             }
+        }
+    });
+}
+
+/// Nó AccessKit `Pane` com o rótulo do artboard (aria-label).
+pub(crate) fn pane(ui: &mut Ui, rect: Rect, label: &str) {
+    ui.interact(rect, ui.id().with(label), Sense::hover())
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, label));
+}
+
+/// Mensagem centrada no fluxo (o que vem depois segue abaixo dela).
+pub(crate) fn empty(ui: &mut Ui, title: &str, subtitle: &str) {
+    let p = theme::palette(ui.visuals());
+    ui.vertical_centered(|ui| {
+        ui.add_space(space::XL);
+        ui.label(egui::RichText::new(title).font(Type::Section.font()));
+        ui.add(egui::Label::new(egui::RichText::new(subtitle).size(12.).color(p.text2)).wrap());
+    });
+}
+
+pub(crate) fn search_field(ui: &mut Ui, text: &mut String, width: f32, hint: &str) {
+    let p = theme::palette(ui.visuals());
+    let response = ui.add(
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .font(FontId::proportional(12.))
+            .margin(egui::Margin {
+                left: 26,
+                right: 8,
+                top: 6,
+                bottom: 6,
+            })
+            .desired_width(width - 34.),
+    );
+    let icon = Rect::from_min_size(
+        pos2(response.rect.left() + 8., response.rect.center().y - 6.5),
+        Vec2::splat(13.),
+    );
+    let scale = icon.width() / 24.;
+    ui.painter().circle_stroke(
+        icon.min + vec2(11., 11.) * scale,
+        7. * scale,
+        Stroke::new(2. * scale, p.text2),
+    );
+    strokes(
+        ui.painter(),
+        icon,
+        &[&[(20., 20.), (16., 16.)]],
+        2.,
+        p.text2,
+    );
+}
+
+/// Mede a legenda, dá à página o resto da altura e pinta a legenda embaixo.
+pub(crate) fn split<R>(ui: &mut Ui, legend: &[String], content: impl FnOnce(&mut Ui) -> R) -> R {
+    let width = ui.available_width();
+    let gap = ui.spacing().item_spacing.y;
+    let legend_height: f32 = legend
+        .iter()
+        .map(|line| {
+            ui.painter()
+                .layout(
+                    line.clone(),
+                    FontId::proportional(12.),
+                    Color32::PLACEHOLDER,
+                    width,
+                )
+                .size()
+                .y
+                + gap
+        })
+        .sum();
+    let height = (ui.available_height() - legend_height).max(120.);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let mut area = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    let inner = content(&mut area);
+    for line in legend {
+        caption(ui, line);
+    }
+    inner
+}
+
+/// Largura mínima da coluna que estica numa `table`.
+const FLEX_MIN: f32 = 120.;
+pub(crate) struct Column {
+    pub title: &'static str,
+    /// `None` = a coluna que estica (o resto, com `FLEX_MIN` no mínimo).
+    pub width: Option<f32>,
+    /// Dica do cabeçalho (tooltip).
+    pub hint: Option<&'static str>,
+}
+/// Alturas do cabeçalho e das linhas, e o respiro de cada lado das células.
+#[derive(Clone, Copy)]
+pub(crate) struct TableSize {
+    pub head: f32,
+    pub row: f32,
+    pub pad: f32,
+}
+/// Cabeçalho (11 px, text2) e linhas de `size.row` com divisória; só as
+/// linhas visíveis são montadas. As larguras saem de `ui.max_rect()` a cada
+/// frame. `top` volta a rolagem ao início.
+pub(crate) fn table(
+    ui: &mut Ui,
+    id: &str,
+    columns: &[Column],
+    size: TableSize,
+    rows: usize,
+    top: bool,
+    mut cell: impl FnMut(&mut Ui, usize, usize),
+) {
+    let p = theme::palette(ui.visuals());
+    let rect = ui.max_rect();
+    let fixed: f32 = columns.iter().filter_map(|c| c.width).sum();
+    let flex = (rect.width() - fixed).max(FLEX_MIN);
+    let widths: Vec<f32> = columns.iter().map(|c| c.width.unwrap_or(flex)).collect();
+    let mut x = rect.left();
+    for (column, width) in columns.iter().zip(&widths) {
+        let at = Rect::from_min_size(pos2(x, rect.top()), vec2(*width, size.head))
+            .shrink2(vec2(size.pad, 0.));
+        let head = ui
+            .new_child(
+                UiBuilder::new()
+                    .max_rect(at)
+                    .layout(Layout::left_to_right(Align::Center)),
+            )
+            .add(
+                egui::Label::new(egui::RichText::new(column.title).size(11.).color(p.text2))
+                    .truncate(),
+            );
+        if let Some(hint) = column.hint {
+            head.on_hover_text(hint);
+        }
+        x += width;
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + size.head - 0.5,
+        Stroke::new(1.0_f32, p.line),
+    );
+    let body = Rect::from_min_max(pos2(rect.left(), rect.top() + size.head), rect.max);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(body)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false);
+    if top {
+        area = area.vertical_scroll_offset(0.);
+    }
+    area.show_viewport(&mut child, |ui, viewport| {
+        ui.set_height(size.row * rows as f32);
+        let content = ui.max_rect();
+        let first = (viewport.min.y / size.row).floor().max(0.) as usize;
+        let last = ((viewport.max.y / size.row).ceil().max(0.) as usize).min(rows);
+        for row in first..last {
+            let y = content.top() + row as f32 * size.row;
+            let mut x = content.left();
+            for (column, width) in widths.iter().enumerate() {
+                let at = Rect::from_min_size(pos2(x, y), vec2(*width, size.row))
+                    .shrink2(vec2(size.pad, 0.));
+                let mut cell_ui = ui.new_child(
+                    UiBuilder::new()
+                        .id_salt((row, column))
+                        .max_rect(at)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                cell(&mut cell_ui, row, column);
+                x += width;
+            }
+            ui.painter().hline(
+                content.x_range(),
+                y + size.row - 0.5,
+                Stroke::new(1.0_f32, p.line),
+            );
         }
     });
 }
@@ -959,7 +1142,23 @@ pub(crate) mod tests {
             pos2(b.x1 as f32, b.y1 as f32),
         )
     }
-    /// Clique completo (pressiona e solta) em `pos`, em dois frames.
+    /// Os eventos de um clique completo em `pos`, um frame por item: o
+    /// ponteiro chega, aperta e solta. Como o mouse: chegar e apertar no
+    /// mesmo frame, numa rolagem, vira arrasto e o clique se perde.
+    pub(crate) fn click_frames(pos: Pos2) -> [Vec<egui::Event>; 3] {
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![press(true)],
+            vec![press(false)],
+        ]
+    }
+    /// Clique completo em `pos` (`click_frames`).
     pub(crate) fn click(ctx: &egui::Context, pos: Pos2, add: impl FnMut(&mut Ui)) {
         click_sized(ctx, [800., 600.], pos, add);
     }
@@ -969,19 +1168,9 @@ pub(crate) mod tests {
         pos: Pos2,
         mut add: impl FnMut(&mut Ui),
     ) {
-        let press = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        run_sized(
-            ctx,
-            size,
-            vec![egui::Event::PointerMoved(pos), press(true)],
-            &mut add,
-        );
-        run_sized(ctx, size, vec![press(false)], &mut add);
+        for events in click_frames(pos) {
+            run_sized(ctx, size, events, &mut add);
+        }
     }
     /// Todas as formas pintadas, com os `Shape::Vec` abertos.
     pub(crate) fn shapes(out: &egui::FullOutput) -> Vec<egui::Shape> {
@@ -1232,6 +1421,101 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn segmented_width_is_the_drawn_width_whatever_is_selected() {
+        for (theme, _) in THEMES {
+            for selected in [View::A, View::B, View::C] {
+                let ctx = context(theme);
+                let items = [
+                    Segment {
+                        value: View::A,
+                        label: "CPU",
+                        count: None,
+                    },
+                    Segment {
+                        value: View::B,
+                        label: "Memória",
+                        count: Some("1.234".into()),
+                    },
+                    Segment {
+                        value: View::C,
+                        label: "10 min",
+                        count: None,
+                    },
+                ];
+                let (mut want, mut drawn) = (0., 0.);
+                run(&ctx, vec![], |ui| {
+                    let mut current = selected;
+                    want = segmented_width(ui, &current, &items);
+                    drawn = ui
+                        .scope(|ui| segmented(ui, &mut current, &items))
+                        .response
+                        .rect
+                        .width();
+                });
+                assert!(drawn > 100., "{theme:?} {selected:?}: precondition {drawn}");
+                assert_eq!(want, drawn, "{theme:?} {selected:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn segmented_is_a_30_px_frame_centered_in_any_row() {
+        for (theme, _) in THEMES {
+            for row in [24., 28., 30., 44.] {
+                let ctx = context(theme);
+                let (mut a, mut b) = (View::A, 1);
+                let mut frames = Vec::new();
+                let out = run(&ctx, vec![], |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(row);
+                        ui.label("Título");
+                        for _ in 0..2 {
+                            frames.push(
+                                ui.scope(|ui| {
+                                    segmented(
+                                        ui,
+                                        &mut a,
+                                        &[Segment {
+                                            value: View::A,
+                                            label: "CPU",
+                                            count: None,
+                                        }],
+                                    )
+                                })
+                                .response
+                                .rect,
+                            );
+                        }
+                        segmented(
+                            ui,
+                            &mut b,
+                            &[Segment {
+                                value: 1,
+                                label: "1 min",
+                                count: None,
+                            }],
+                        );
+                    });
+                });
+                let cpu = nodes(&out, Role::Button, "CPU");
+                let one = rect_of(&node(&out, Role::Button, "1 min"));
+                assert_eq!(cpu.len(), 2);
+                let tops: Vec<f32> = cpu.iter().map(|n| rect_of(n).top()).collect();
+                assert!(
+                    tops.iter().all(|&t| t == one.top()),
+                    "{theme:?} {row}: {tops:?} / {one:?}"
+                );
+                assert!(
+                    frames
+                        .iter()
+                        .all(|f| f.height() == 30. && f.top() + 3. == one.top()),
+                    "{theme:?} {row}: {frames:?} / {one:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn switch_toggles_and_reports_checked_state() {
         for (theme, p) in THEMES {
             let ctx = context(theme);
@@ -1259,36 +1543,6 @@ pub(crate) mod tests {
             click(&ctx, at, &mut add);
             drop(add);
             assert_eq!((on, changed), (false, 2));
-        }
-    }
-
-    #[test]
-    fn chip_tones_cover_every_state_in_both_themes() {
-        for (theme, p) in THEMES {
-            for chip_kind in [Chip::Ok, Chip::Late, Chip::Paused, Chip::Down] {
-                let (fill, color) = match chip_kind {
-                    Chip::Ok => (p.sel, p.acc),
-                    Chip::Late => (p.warn.gamma_multiply(0.12), p.warn),
-                    Chip::Paused => (p.surf2, p.text),
-                    Chip::Down => (p.bad.gamma_multiply(0.08), p.bad),
-                };
-                let ctx = context(theme);
-                let out = run(&ctx, vec![], |ui| {
-                    chip(ui, chip_kind, "Estado");
-                });
-                let r = rect_of(&node(&out, Role::Label, "Estado"));
-                assert_eq!(r.height(), 24., "{theme:?} {chip_kind:?}");
-                assert!(
-                    rects(&out)
-                        .iter()
-                        .any(|s| s.fill == fill && s.corner_radius == CornerRadius::same(12)),
-                    "{theme:?} {chip_kind:?}: fill"
-                );
-                assert!(
-                    texts(&out).contains(&("Estado".into(), color)),
-                    "{theme:?} {chip_kind:?}"
-                );
-            }
         }
     }
 

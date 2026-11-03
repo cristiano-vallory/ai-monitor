@@ -1,7 +1,6 @@
 use crate::{management_ui::Section, model::*, monitor::Shared, theme};
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
-use egui_extras::{Column, TableBuilder};
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::Ordering},
@@ -107,10 +106,9 @@ pub struct MonitorApp {
     sessions: crate::sessions_ui::Sessions,
     docker: crate::docker_ui::Docker,
     history: VecDeque<Sample>,
-    minutes: i64,
+    overview: crate::overview_ui::Overview,
     last_sync: Instant,
     settings_message: String,
-    selected_container: Option<String>,
     paused: bool,
     central: crate::console::Console,
     health: crate::health::Snapshot,
@@ -191,10 +189,9 @@ impl MonitorApp {
             sessions: Default::default(),
             docker: Default::default(),
             history: VecDeque::new(),
-            minutes: 5,
+            overview: Default::default(),
             last_sync: Instant::now() - Duration::from_secs(1),
             settings_message: String::new(),
-            selected_container: None,
             paused: false,
         }
     }
@@ -529,170 +526,6 @@ impl MonitorApp {
         }
     }
 
-    fn ai_cards(&self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        let usage = self.resources.ai_usage(&self.config.container);
-        ui.columns(4, |cols| {
-            metric(
-                &mut cols[0],
-                "CPU · AI-MEMORY",
-                usage.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
-                "100% = um núcleo",
-                p.acc,
-            );
-            metric(
-                &mut cols[1],
-                "MEMÓRIA · AI-MEMORY",
-                usage.as_ref().map(|u| bytes(u.memory)),
-                "Uso atual do serviço",
-                p.series2,
-            );
-            metric(
-                &mut cols[2],
-                "THREADS / TAREFAS",
-                usage.as_ref().and_then(|u| u.tasks.map(number_u64)),
-                "Processos + threads Linux",
-                p.text,
-            );
-            metric(
-                &mut cols[3],
-                "HANDOFFS ABERTOS",
-                self.api.at.map(|_| {
-                    format!(
-                        "{}{}",
-                        number(self.api.handoff_total.unwrap_or(self.api.handoffs.len())),
-                        if self.api.handoff_total.is_some() {
-                            ""
-                        } else {
-                            "+"
-                        }
-                    )
-                }),
-                "Visíveis para esta conexão",
-                p.warn,
-            );
-        });
-    }
-
-    fn overview(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        self.ai_cards(ui);
-        ui.add_space(14.);
-        ui.horizontal(|ui| {
-            section(ui, "Histórico de recursos");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                for n in [10, 5, 1] {
-                    ui.selectable_value(&mut self.minutes, n, format!("{n} min"));
-                }
-            });
-        });
-        let interval = self.config.resource_seconds;
-        ui.columns(2, |cols| {
-            chart(
-                &mut cols[0],
-                "CPU",
-                &self.history,
-                self.minutes,
-                false,
-                interval,
-            );
-            chart(
-                &mut cols[1],
-                "Memória",
-                &self.history,
-                self.minutes,
-                true,
-                interval,
-            );
-        });
-        ui.add_space(14.);
-        let total = self.resources.docker_total();
-        ui.columns(4, |cols| {
-            metric(
-                &mut cols[0],
-                "CPU · CONTÊINERES",
-                total.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
-                "Soma dos contêineres ativos",
-                p.series2,
-            );
-            metric(
-                &mut cols[1],
-                "MEMÓRIA · CONTÊINERES",
-                total.as_ref().map(|u| bytes(u.memory)),
-                "Inclui o ai-memory",
-                p.series2,
-            );
-            metric(
-                &mut cols[2],
-                "CONTÊINERES ATIVOS",
-                self.resources
-                    .at
-                    .filter(|_| self.resources.docker_error.is_none())
-                    .map(|_| {
-                        format!(
-                            "{} / {}",
-                            self.resources
-                                .containers
-                                .iter()
-                                .filter(|c| c.state == "running")
-                                .count(),
-                            self.resources.containers.len()
-                        )
-                    }),
-                "Em execução / existentes",
-                p.acc,
-            );
-            metric(
-                &mut cols[3],
-                "SESSÕES ABERTAS",
-                self.api.open_session_links().map(number_u64),
-                "Vínculos por projeto (API)",
-                p.text,
-            );
-        });
-        ui.add_space(14.);
-        ui.horizontal(|ui| {
-            section(ui, "Contêineres em execução");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Ver todos").clicked() {
-                    self.page = Page::Docker;
-                }
-            });
-        });
-        let running: Vec<_> = self
-            .resources
-            .containers
-            .iter()
-            .filter(|c| c.state == "running")
-            .collect();
-        let prev_selected = self.selected_container.clone();
-        container_table(ui, &running, &mut self.selected_container, 180.);
-        if self.selected_container != prev_selected
-            && let Some(id) = &self.selected_container
-        {
-            self.page = Page::Docker;
-            self.docker.open(id);
-        }
-        ui.add_space(16.);
-        panel(ui).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("ESTE MAC").small().color(p.text2));
-                ui.label(format!(
-                    "CPU {}%",
-                    decimal(self.resources.host_cpu.into(), 1)
-                ));
-                ui.separator();
-                ui.label(format!(
-                    "Memória {} / {}",
-                    bytes(self.resources.host_memory),
-                    bytes(self.resources.host_total)
-                ));
-                ui.separator();
-                ui.label(format!("{} projetos", number(self.api.projects.len())));
-            });
-        });
-    }
-
     fn reconnect(&mut self, mut config: Config) {
         // O tema é trocado à parte (choose_theme); uma config montada antes da
         // troca, como a do login humano em andamento, não pode revertê-lo.
@@ -709,7 +542,6 @@ impl MonitorApp {
         self.api = Default::default();
         self.sessions.reset();
         self.docker.reset();
-        self.selected_container = None;
         self.paused = false;
         self.last_sync = Instant::now() - Duration::from_secs(1);
     }
@@ -836,14 +668,35 @@ impl MonitorApp {
                         .show(ui, &self.resources, &self.config.container, Utc::now());
                     return;
                 }
-                // Na largura mínima, tabelas e linhas da Visão geral passam
-                // da área: rolam na horizontal em vez de cortar.
+                // Na largura mínima, o que passar da área rola na horizontal
+                // em vez de cortar.
                 egui::ScrollArea::both()
                     .id_salt("main-scroll")
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.page {
-                            Page::Overview => self.overview(ui),
+                            Page::Overview => {
+                                use crate::overview_ui::{Data, Go};
+                                let data = Data {
+                                    resources: &self.resources,
+                                    history: &self.history,
+                                    api: &self.api,
+                                    health: &self.health,
+                                    config: &self.config,
+                                    now: Utc::now(),
+                                };
+                                match self.overview.show(ui, &data) {
+                                    Some(Go::Health) => self.page = Page::Health,
+                                    Some(Go::Sessions) => self.page = Page::Sessions,
+                                    Some(Go::Docker(id)) => {
+                                        self.page = Page::Docker;
+                                        if let Some(id) = id {
+                                            self.docker.open(&id);
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
                             Page::Review | Page::Maintenance => {
                                 let section = if self.page == Page::Review {
                                     Section::Review
@@ -944,22 +797,6 @@ fn section(ui: &mut egui::Ui, text: &str) {
             .strong()
             .family(theme::semibold()),
     );
-}
-fn table_head(ui: &mut egui::Ui, text: &str) {
-    let p = theme::palette(ui.visuals());
-    ui.label(RichText::new(text).size(10.5).color(p.text2));
-}
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(text.to_owned(), egui::FontId::proportional(10.0), color);
-    let (rect, response) =
-        ui.allocate_exact_size(galley.size() + Vec2::new(14.0, 8.0), egui::Sense::hover());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
-    ui.painter()
-        .rect_filled(rect, 4.0, color.gamma_multiply(0.12));
-    ui.painter()
-        .galley(rect.min + Vec2::new(7.0, 4.0), galley, color);
 }
 /// Texto em uma linha só, com reticências se passar de `width`.
 fn one_line(
@@ -1331,35 +1168,6 @@ fn drag_window(response: &egui::Response) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
     }
 }
-fn empty(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    let p = theme::palette(ui.visuals());
-    panel(ui).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_space(30.);
-        ui.vertical_centered(|ui| {
-            ui.heading(title);
-            ui.label(RichText::new(subtitle).color(p.text2));
-        });
-        ui.add_space(30.);
-    });
-}
-fn metric(ui: &mut egui::Ui, title: &str, value: Option<String>, hint: &str, color: Color32) {
-    let p = theme::palette(ui.visuals());
-    panel(ui).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(title).size(10.5).color(p.text2));
-        ui.add_space(5.);
-        ui.label(
-            RichText::new(value.unwrap_or("—".into()))
-                .size(29.)
-                .color(color),
-        );
-        ui.label(RichText::new(hint).size(11.).color(p.text2));
-    });
-}
-fn number_u64(n: u64) -> String {
-    number(n as usize)
-}
 fn age(at: Option<DateTime<Utc>>) -> String {
     at.map(|a| ago((Utc::now() - a).num_seconds()))
         .unwrap_or("aguardando".into())
@@ -1491,242 +1299,6 @@ pub(crate) fn short_project(s: &str) -> &str {
     s.split(" / ").last().unwrap_or(s)
 }
 
-fn container_table(
-    ui: &mut egui::Ui,
-    cs: &[&Container],
-    selected: &mut Option<String>,
-    height: f32,
-) {
-    let p = theme::palette(ui.visuals());
-    if cs.is_empty() {
-        empty(
-            ui,
-            "Nenhum contêiner nesta lista",
-            "Os dados aparecem quando o Docker está disponível e há contêineres compatíveis com o filtro.",
-        );
-        return;
-    }
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .max_scroll_height(height)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::remainder().at_least(150.))
-        .column(Column::initial(120.))
-        .column(Column::initial(85.))
-        .column(Column::initial(110.))
-        .column(Column::initial(85.))
-        .header(30., |mut h| {
-            for title in ["CONTÊINER", "ESTADO", "CPU", "MEMÓRIA", "TAREFAS"] {
-                h.col(|ui| {
-                    table_head(ui, title);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(52., cs.len(), |mut row| {
-                let c = cs[row.index()];
-                row.col(|ui| {
-                    ui.vertical(|ui| {
-                        if ui
-                            .selectable_label(
-                                selected.as_ref() == Some(&c.id),
-                                RichText::new(&c.name).strong(),
-                            )
-                            .clicked()
-                        {
-                            *selected = Some(c.id.clone());
-                        }
-                        ui.label(RichText::new(&c.image).size(11.).color(p.text2))
-                            .on_hover_text(&c.image);
-                    });
-                });
-                row.col(|ui| {
-                    badge(
-                        ui,
-                        if c.state == "running" {
-                            "EM EXECUÇÃO"
-                        } else if c.state == "exited" {
-                            "PARADO"
-                        } else {
-                            &c.state
-                        },
-                        if c.state == "running" { p.acc } else { p.text2 },
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(
-                        c.usage
-                            .as_ref()
-                            .map(|u| format!("{}%", decimal(u.cpu, 1)))
-                            .unwrap_or("—".into()),
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(
-                        c.usage
-                            .as_ref()
-                            .map(|u| bytes(u.memory))
-                            .unwrap_or("—".into()),
-                    );
-                });
-                row.col(|ui| {
-                    ui.label(
-                        c.usage
-                            .as_ref()
-                            .and_then(|u| u.tasks.map(number_u64))
-                            .unwrap_or("—".into()),
-                    );
-                });
-            });
-        });
-}
-
-fn chart(
-    ui: &mut egui::Ui,
-    title: &str,
-    history: &VecDeque<Sample>,
-    minutes: i64,
-    memory: bool,
-    resource_seconds: u64,
-) {
-    let p = theme::palette(ui.visuals());
-    panel(ui).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section(ui, title);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Docker").small().color(p.series2));
-                ui.label(RichText::new("ai-memory").small().color(p.acc));
-            });
-        });
-        let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
-        let start = end - chrono::Duration::minutes(minutes);
-        let value = |u: &Usage| {
-            if memory {
-                u.memory as f64 / (1u64 << 20) as f64
-            } else {
-                u.cpu
-            }
-        };
-        let max = history
-            .iter()
-            .filter(|s| s.at >= start)
-            .flat_map(|s| [s.ai.as_ref(), s.docker.as_ref()])
-            .flatten()
-            .map(value)
-            .fold(if memory { 64. } else { 100. }, f64::max)
-            * 1.15;
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 152.), egui::Sense::hover());
-        let plot = rect.shrink2(Vec2::new(0., 12.));
-        let plot = egui::Rect::from_min_max(plot.min + Vec2::new(46., 0.), plot.max);
-        let painter = ui.painter();
-        for i in 0..3 {
-            let frac = i as f32 / 2.;
-            let y = plot.bottom() - plot.height() * frac;
-            painter.line_segment(
-                [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-                Stroke::new(1.0_f32, p.line),
-            );
-            painter.text(
-                egui::pos2(plot.left() - 8., y),
-                egui::Align2::RIGHT_CENTER,
-                format!(
-                    "{}{}",
-                    decimal(max * frac as f64, 0),
-                    if memory { "M" } else { "%" }
-                ),
-                egui::FontId::proportional(10.),
-                p.text2,
-            );
-        }
-        let plot_painter = painter.with_clip_rect(plot.expand(4.));
-        for (ai, color) in [(false, p.series2), (true, p.acc)] {
-            let (lines, dots) =
-                chart_segments(history, minutes, max, memory, ai, resource_seconds, plot);
-            for pts in lines {
-                plot_painter.add(egui::Shape::line(pts, Stroke::new(2.0_f32, color)));
-            }
-            for pt in dots {
-                plot_painter.circle_filled(pt, 3., color);
-            }
-        }
-        if history.is_empty() {
-            painter.text(
-                plot.center(),
-                egui::Align2::CENTER_CENTER,
-                "Aguardando amostras…",
-                egui::FontId::proportional(13.),
-                p.text2,
-            );
-        }
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("−{minutes} min"))
-                    .small()
-                    .color(p.text2),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("agora").small().color(p.text2));
-            });
-        });
-    });
-}
-
-fn chart_segments(
-    history: &VecDeque<Sample>,
-    minutes: i64,
-    max: f64,
-    memory: bool,
-    ai: bool,
-    resource_seconds: u64,
-    plot: egui::Rect,
-) -> (Vec<Vec<egui::Pos2>>, Vec<egui::Pos2>) {
-    let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
-    let start = end - chrono::Duration::minutes(minutes);
-    let value = |u: &Usage| {
-        if memory {
-            u.memory as f64 / (1u64 << 20) as f64
-        } else {
-            u.cpu
-        }
-    };
-    let gap_limit = (resource_seconds.saturating_mul(3).max(65)) as i64;
-    let mut lines = Vec::new();
-    let mut dots = Vec::new();
-    let mut points = Vec::new();
-    let mut previous = None;
-    for s in history.iter().filter(|s| s.at >= start) {
-        let usage = if ai { s.ai.as_ref() } else { s.docker.as_ref() };
-        if previous
-            .is_some_and(|at: DateTime<Utc>| (s.at - at).num_seconds() > gap_limit || s.at < at)
-            || usage.is_none()
-        {
-            if points.len() > 1 {
-                lines.push(std::mem::take(&mut points));
-            } else if let Some(p) = points.pop() {
-                dots.push(p);
-            }
-        }
-        if let Some(u) = usage {
-            let x = (plot.left()
-                + plot.width()
-                    * ((s.at - start).num_milliseconds() as f32 / (minutes * 60 * 1000) as f32))
-                .clamp(plot.left(), plot.right());
-            let y = (plot.bottom() - plot.height() * (value(u) / max) as f32)
-                .clamp(plot.top(), plot.bottom());
-            points.push(egui::pos2(x, y));
-        }
-        previous = Some(s.at);
-    }
-    if points.len() > 1 {
-        lines.push(points);
-    } else if let Some(p) = points.pop() {
-        dots.push(p);
-    }
-    (lines, dots)
-}
-
 pub(crate) fn handoff_matches(h: &Handoff, scope: &str, needle: &str) -> bool {
     let summary = if h.redacted {
         ""
@@ -1762,63 +1334,6 @@ pub(crate) fn process_matches(p: &HostProcess, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chart_preserves_isolated_samples_and_scales_gap_with_resource_interval() {
-        let base = Utc::now();
-        let u = Some(Usage {
-            cpu: 50.0,
-            memory: 128 << 20,
-            ..Default::default()
-        });
-        // 1) An isolated valid sample followed by a failed (None) sample must still render as a dot.
-        let history = VecDeque::from([
-            Sample {
-                at: base - chrono::Duration::seconds(10),
-                ai: u.clone(),
-                docker: None,
-            },
-            Sample {
-                at: base - chrono::Duration::seconds(8),
-                ai: None,
-                docker: None,
-            },
-        ]);
-        let plot = egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(200., 100.));
-        let (lines, dots) = chart_segments(&history, 5, 100.0, false, true, 2, plot);
-        assert!(lines.is_empty());
-        assert_eq!(
-            dots.len(),
-            1,
-            "isolated sample before a None gap must not be erased"
-        );
-
-        // 2) With resource_seconds = 60, samples 66s apart must connect as a line, not blank out.
-        let history_60s = VecDeque::from([
-            Sample {
-                at: base - chrono::Duration::seconds(132),
-                ai: u.clone(),
-                docker: None,
-            },
-            Sample {
-                at: base - chrono::Duration::seconds(66),
-                ai: u.clone(),
-                docker: None,
-            },
-            Sample {
-                at: base,
-                ai: u,
-                docker: None,
-            },
-        ]);
-        let (lines, _) = chart_segments(&history_60s, 5, 100.0, false, true, 60, plot);
-        assert_eq!(
-            lines.len(),
-            1,
-            "60s interval samples separated by 66s must form a connected line"
-        );
-        assert_eq!(lines[0].len(), 3);
-    }
 
     #[test]
     fn redacted_handoff_summary_is_not_searchable_and_short_project_is_neutral() {
@@ -2572,21 +2087,11 @@ mod tests {
         }
     }
 
-    /// Clique completo em `pos` (pressiona e solta em dois frames).
+    /// Clique completo em `pos` (`widgets::tests::click_frames`).
     fn click_at(app: &mut MonitorApp, ctx: &egui::Context, size: [f32; 2], pos: egui::Pos2) {
-        let press = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        frame(
-            app,
-            ctx,
-            size,
-            vec![egui::Event::PointerMoved(pos), press(true)],
-        );
-        frame(app, ctx, size, vec![press(false)]);
+        for events in crate::widgets::tests::click_frames(pos) {
+            frame(app, ctx, size, events);
+        }
     }
 
     #[test]
@@ -4023,35 +3528,301 @@ mod tests {
         }
     }
 
+    /// A linha `name` da tabela da Visão geral ("nome · CPU …").
+    fn overview_row(out: &egui::FullOutput, name: &str) -> egui::Rect {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        let found: Vec<egui::Rect> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == egui::accesskit::Role::Button
+                    && n.label()
+                        .is_some_and(|l| l.starts_with(&format!("{name} · CPU ")))
+            })
+            .filter_map(|(_, n)| n.bounds())
+            .map(|b| {
+                egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                )
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "overview row {name}");
+        found[0]
+    }
+
     #[test]
     fn a_container_clicked_in_the_overview_opens_in_the_docker_inspector() {
         use egui::accesskit::Role;
-        // Alta o bastante para a tabela da Visão geral aparecer sem rolar.
-        let size = [1320., 1400.];
+        // 1320: a tabela aparece sem rolar; 720: só depois de rolar a página.
+        for (size, scroll) in [([1320., 860.], false), ([720., 560.], true)] {
+            let mut app = app_with_unsaved_draft();
+            app.resources = docker_data();
+            app.docker.set_tab(crate::docker_ui::Tab::Images);
+            *app.docker.search_mut() = "redis".into();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let mut out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.page, Page::Overview);
+            let bottom = size[1] - 28. - 20.;
+            let row = overview_row(&out, "postgres-dev");
+            assert_eq!(row.bottom() > bottom, scroll, "{size:?}: precondition");
+            if scroll {
+                let strip = widget_rect(&out, Role::Pane, "Saúde");
+                out = wheel(&mut app, &ctx, size, strip.center(), -2000.);
+            }
+            let row = overview_row(&out, "postgres-dev");
+            assert!(
+                row.top() >= 52. && row.bottom() <= bottom + 0.5,
+                "{size:?}: on screen, {row:?}"
+            );
+            click_at(&mut app, &ctx, size, row.center());
+            assert_eq!(app.page, Page::Docker, "{size:?}");
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.docker.search_mut(), "", "the search would hide it");
+            assert_eq!(
+                app.docker.selected(),
+                Some(&*format!("postgres-dev-{}", "8f3c21a9d0e4".repeat(5)))
+            );
+            update_node(&out, Role::Button, "Contêineres 8");
+            if !scroll {
+                let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+                assert!(inspector.contains_rect(widget_rect(&out, Role::Label, "postgres-dev")));
+            }
+        }
+    }
+
+    /// Visão geral com Docker, API e saúde: os dados longos das outras
+    /// páginas, o ai-memory monitorado e um projeto vigiado.
+    fn overview_app() -> MonitorApp {
         let mut app = app_with_unsaved_draft();
+        app.config.container = "ai-memory".into();
         app.resources = docker_data();
-        app.docker.set_tab(crate::docker_ui::Tab::Images);
-        *app.docker.search_mut() = "redis".into();
+        app.api = sessions_data();
+        watching(&mut app, Some(3));
+        app
+    }
+    /// Os títulos dos quatro indicadores.
+    const KPIS: [&str; 4] = [
+        "ai-memory · CPU",
+        "ai-memory · Memória",
+        "Contêineres",
+        "Continuidade",
+    ];
+
+    #[test]
+    fn overview_card_values_stay_on_one_line_at_720_in_both_themes() {
+        use egui::accesskit::Role;
+        // (cartão, valor falado, texto pintado do valor e da unidade)
+        let want = [
+            ("ai-memory · CPU", "123,4 %", "123,4%"),
+            ("ai-memory · Memória", "1,1 GiB", "1,1GiB"),
+            ("Contêineres", "3 de 8 ativos", "3de 8 ativos"),
+            (
+                "Continuidade",
+                "1.234 handoffs abertos",
+                "1.234handoffs abertos",
+            ),
+        ];
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for size in [[720., 560.], [1320., 860.]] {
+                let mut app = overview_app();
+                let ctx = styled();
+                ctx.set_theme(theme);
+                ctx.enable_accesskit();
+                let out = frame(&mut app, &ctx, size, vec![]);
+                let case = format!("{theme:?} {size:?}");
+                for (card, spoken, painted) in want {
+                    let pane = widget_rect(&out, Role::Pane, card);
+                    let value = widget_rect(&out, Role::Label, spoken);
+                    assert!(pane.contains_rect(value), "{case}: {spoken} in {card}");
+                    let galleys: Vec<_> = out
+                        .shapes
+                        .iter()
+                        .filter_map(|c| match &c.shape {
+                            egui::Shape::Text(t)
+                                if t.galley.text() == painted && pane.contains(t.pos) =>
+                            {
+                                Some(t.galley.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(galleys.len(), 1, "{case}: {painted:?} painted in {card}");
+                    assert_eq!(
+                        (galleys[0].rows.len(), galleys[0].elided),
+                        (1, false),
+                        "{case}: {painted:?} is one whole line"
+                    );
+                    assert!(
+                        value.height() < 40.,
+                        "{case}: {spoken} one row tall, {value:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_overview_has_no_host_panel_and_no_project_count() {
+        use egui::accesskit::Role;
+        for size in [[720., 560.], [1320., 860.]] {
+            let mut app = overview_app();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let side = sidebar_width(&ctx);
+            let page = page_widgets(&out, side, size[1]);
+            // O cenário tem projetos: a barra de status os conta.
+            let status = widget_rect(&out, Role::Label, &host_status(&app.resources, &app.api));
+            assert!(status.top() >= size[1] - 28., "{size:?}: {status:?}");
+            assert!(host_status(&app.resources, &app.api).ends_with(" · 5 projetos"));
+            assert!(
+                page.iter().any(|(name, _)| name == "Recursos"),
+                "{size:?}: the page mounted"
+            );
+            let content =
+                egui::Rect::from_min_max(egui::pos2(side, 52.), egui::pos2(size[0], size[1] - 28.));
+            let painted: Vec<String> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if content.contains(t.pos) => {
+                        Some(t.galley.text().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(painted.iter().any(|t| t == "Recursos"), "{size:?}");
+            for text in page.iter().map(|(n, _)| n).chain(&painted) {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("este mac")
+                        && !lower.contains("este computador")
+                        && !lower.contains("projetos"),
+                    "{size:?}: {text:?} on the page"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_overview_follows_the_width_of_every_frame() {
+        use egui::accesskit::Role;
+        let mut app = overview_app();
         let ctx = styled();
         ctx.enable_accesskit();
-        let out = frame(&mut app, &ctx, size, vec![]);
-        assert_eq!(app.page, Page::Overview);
-        let row = widget_rect(&out, Role::Button, "postgres-dev");
-        assert!(
-            row.bottom() < size[1] - 28.,
-            "precondition: the row is on screen"
-        );
-        click_at(&mut app, &ctx, size, row.center());
-        assert_eq!(app.page, Page::Docker);
-        let out = frame(&mut app, &ctx, size, vec![]);
-        assert_eq!(app.docker.search_mut(), "", "the search would hide it");
-        assert_eq!(
-            app.docker.selected(),
-            Some(&*format!("postgres-dev-{}", "8f3c21a9d0e4".repeat(5)))
-        );
-        update_node(&out, Role::Button, "Contêineres 8");
-        let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
-        assert!(inspector.contains_rect(widget_rect(&out, Role::Label, "postgres-dev")));
+        // (janela, indicadores por linha, linha de baixo lado a lado?) — no
+        // mesmo contexto, nada guardado.
+        for (size, per_line, beside) in [
+            ([720., 560.], 2, false),
+            ([1320., 860.], 4, true),
+            ([1920., 1080.], 4, true),
+            ([720., 560.], 2, false),
+            ([1320., 860.], 4, true),
+        ] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let side = sidebar_width(&ctx);
+            let (left, right) = (side + 24., size[0] - 24.);
+            let spans =
+                |r: egui::Rect| (r.left() - left).abs() < 0.5 && (r.right() - right).abs() < 0.5;
+            for pane in ["Saúde", "Recursos"] {
+                let rect = widget_rect(&out, Role::Pane, pane);
+                assert!(
+                    spans(rect),
+                    "{size:?}: {pane} {rect:?} spans {left}..{right}"
+                );
+            }
+            let kpis: Vec<egui::Rect> = KPIS
+                .iter()
+                .map(|t| widget_rect(&out, Role::Pane, t))
+                .collect();
+            let lines = crate::overview_ui::flex_lines(right - left, &[(220., 1.); 4], 12.);
+            assert_eq!(lines[0].len(), per_line, "{size:?}");
+            for line in &lines {
+                let row: Vec<egui::Rect> = line.iter().map(|&(i, _)| kpis[i]).collect();
+                assert!((row[0].left() - left).abs() < 0.5, "{size:?}: {row:?}");
+                assert!(
+                    (row.last().unwrap().right() - right).abs() < 0.5,
+                    "{size:?}: {row:?}"
+                );
+                assert!(
+                    row.windows(2)
+                        .all(|w| (w[1].left() - w[0].right() - 12.).abs() < 0.5
+                            && (w[0].top() - w[1].top()).abs() < 0.5
+                            && (w[0].height() - w[1].height()).abs() < 0.5),
+                    "{size:?}: {row:?}"
+                );
+            }
+            let table = widget_rect(&out, Role::Pane, "Contêineres em execução");
+            let recent = widget_rect(&out, Role::Pane, "Handoffs recentes");
+            assert_eq!(recent.top() > table.bottom(), !beside, "{size:?}");
+            if beside {
+                assert!((table.left() - left).abs() < 0.5 && (recent.right() - right).abs() < 0.5);
+                assert!(
+                    (recent.left() - table.right() - 12.).abs() < 0.5,
+                    "{size:?}"
+                );
+                // flex 3 1 420 e 2 1 300: a sobra na proporção 3 : 2.
+                let free = right - left - 12. - 720.;
+                assert!(
+                    (table.width() - (420. + free * 0.6)).abs() < 0.5,
+                    "{size:?}"
+                );
+                assert_eq!(
+                    table.height(),
+                    recent.height(),
+                    "{size:?}: same line, same height"
+                );
+            } else {
+                assert!(
+                    spans(table) && spans(recent),
+                    "{size:?}: {table:?} {recent:?}"
+                );
+            }
+            // As linhas da tabela ocupam a largura do cartão (sem a borda).
+            for name in ["ai-memory", "postgres-dev", "redis-cache"] {
+                let row = overview_row(&out, name);
+                assert!(
+                    (row.left() - (table.left() + 1.)).abs() < 0.5
+                        && (row.right() - (table.right() - 1.)).abs() < 0.5,
+                    "{size:?}: {name} {row:?} spans {table:?}"
+                );
+            }
+            for (name, rect) in page_widgets(&out, side, size[1]) {
+                assert!(
+                    rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                    "{size:?}: {name:?} {rect:?} leaves the content ({left}..{right})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overview_links_open_health_docker_and_sessions() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for (link, page) in [
+            ("Ver saúde →", Page::Health),
+            ("Ver todos →", Page::Docker),
+            ("Abrir →", Page::Sessions),
+        ] {
+            let mut app = overview_app();
+            *app.docker.search_mut() = "redis".into();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            click_at(
+                &mut app,
+                &ctx,
+                size,
+                widget_rect(&out, Role::Link, link).center(),
+            );
+            assert_eq!(app.page, page, "{link}");
+            // "Ver todos" não escolhe contêiner nem limpa a busca.
+            assert_eq!(app.docker.search_mut(), "redis", "{link}");
+            assert_eq!(app.docker.selected(), None, "{link}");
+        }
     }
 
     #[test]

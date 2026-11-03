@@ -74,6 +74,8 @@ const UNITS: &str = "CPU: 100% = 1 núcleo · memória sem cache inativo";
 const IMAGES_NOTE: &str = "Imagens associadas a contêineres parados continuam em uso.";
 const SIZE_NOTE: &str = "Tamanho lógico por imagem; camadas compartilhadas impedem somar estes valores como espaço real em disco.";
 const ONLY_RUNNING: &str = "Só em execução";
+pub(crate) const TASKS_HINT: &str = "Processos + threads Linux";
+const IMAGES_HINT: &str = "IDs únicos; tags agrupadas";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Tab {
@@ -171,6 +173,12 @@ fn order(a: &Container, b: &Container, sort: Sort) -> Ordering {
     }
 }
 
+/// A ordem padrão da tabela (CPU decrescente; quem não tem a métrica no
+/// fim, por nome): a Visão geral lista os em execução nela.
+pub(crate) fn default_order(a: &Container, b: &Container) -> Ordering {
+    order(a, b, Sort::default())
+}
+
 /// Estado do Docker em pt-BR; um estado fora da lista do Docker vem como veio.
 fn state_label(state: &str) -> &str {
     match state {
@@ -213,6 +221,132 @@ fn io(raw: &str, first: &str, second: &str) -> String {
         Some((Some(a), Some(b))) => format!("{a} {first} · {b} {second}"),
         _ => raw.to_owned(),
     }
+}
+
+/// Uma publicação (IP do host, porta do host, destino) ou a entrada inteira,
+/// quando não é publicação.
+type PortEntry<'a> = Result<(Option<&'a str>, &'a str, &'a str), &'a str>;
+/// As entradas de `Ports` do `docker ps` (separadas por vírgula): a porta do
+/// host com o IP (`None` nos curingas 0.0.0.0, [::] e ::) e o destino de cada
+/// publicação; o que não é publicação vem inteiro em `Err`.
+fn port_entries(raw: &str) -> Vec<PortEntry<'_>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|entry| {
+            let Some((host, target)) = entry.split_once("->") else {
+                return Err(entry);
+            };
+            let (ip, port) = host.rsplit_once(':').unwrap_or(("", host));
+            let numeric = !port.is_empty() && port.chars().all(|c| c.is_ascii_digit() || c == '-');
+            if !numeric || target.is_empty() {
+                return Err(entry);
+            }
+            let ip = (!matches!(ip, "" | "0.0.0.0" | "::" | "[::]")).then_some(ip);
+            Ok((ip, port, target))
+        })
+        .collect()
+}
+fn unique(items: impl Iterator<Item = String>) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    for item in items {
+        if !seen.contains(&item) {
+            seen.push(item);
+        }
+    }
+    if seen.is_empty() {
+        "—".into()
+    } else {
+        seen.join(", ")
+    }
+}
+/// Portas na tabela: só as do host, sem repetir ("49374", e não a mesma em
+/// IPv4 e IPv6); a que não é publicada vem como veio ("5432/tcp").
+fn host_ports(raw: &str) -> String {
+    unique(port_entries(raw).into_iter().map(|e| match e {
+        Ok((_, port, _)) => port.to_owned(),
+        Err(entry) => entry.to_owned(),
+    }))
+}
+/// Portas no inspetor: "49374 → 49374/tcp" por publicação, sem repetir; um IP
+/// que não é curinga fica ("127.0.0.1:8080 → 80/tcp").
+fn port_mappings(raw: &str) -> String {
+    unique(port_entries(raw).into_iter().map(|e| match e {
+        Ok((Some(ip), port, target)) => format!("{ip}:{port} → {target}"),
+        Ok((None, port, target)) => format!("{port} → {target}"),
+        Err(entry) => entry.to_owned(),
+    }))
+}
+
+/// Duração do `docker ps` ("3 days", "About an hour") em pt-BR.
+fn duration(text: &str) -> Option<String> {
+    match text {
+        "Less than a second" => return Some("menos de um segundo".into()),
+        "About a minute" => return Some("cerca de um minuto".into()),
+        "About an hour" => return Some("cerca de uma hora".into()),
+        _ => {}
+    }
+    let (n, unit) = text.split_once(' ')?;
+    let n: usize = n.parse().ok()?;
+    let (one, many) = match unit.trim_end_matches('s') {
+        "second" => ("segundo", "segundos"),
+        "minute" => ("minuto", "minutos"),
+        "hour" => ("hora", "horas"),
+        "day" => ("dia", "dias"),
+        "week" => ("semana", "semanas"),
+        "month" => ("mês", "meses"),
+        "year" => ("ano", "anos"),
+        _ => return None,
+    };
+    Some(format!("{} {}", number(n), if n == 1 { one } else { many }))
+}
+/// "(0) 2 hours ago" de Exited e Restarting: "há 2 horas (código 0)".
+fn exited(rest: &str) -> Option<String> {
+    let (code, rest) = rest.strip_prefix('(')?.split_once(") ")?;
+    code.parse::<i64>().ok()?;
+    let ago = duration(rest.strip_suffix(" ago")?)?;
+    Some(format!("há {ago} (código {code})"))
+}
+/// O `Status` do `docker ps` em pt-BR ("Up 3 days" → "Em execução há 3
+/// dias"). Vazio = o estado; um formato desconhecido vem como veio.
+fn status_label(status: &str, state: &str) -> String {
+    let status = status.trim();
+    let known = match status {
+        "" => Some(state_label(state).to_owned()),
+        "Created" => Some("Criado".into()),
+        "Dead" => Some("Morto".into()),
+        "Removal In Progress" => Some("Removendo".into()),
+        _ => None,
+    };
+    if let Some(known) = known {
+        return known;
+    }
+    let translated = if let Some(up) = status.strip_prefix("Up ") {
+        let (up, note) = match up.rsplit_once(" (") {
+            Some((up, note)) => match note {
+                "Paused)" => (up, Some("pausado")),
+                "healthy)" => (up, Some("saudável")),
+                "unhealthy)" => (up, Some("não saudável")),
+                "health: starting)" => (up, Some("verificação de saúde em andamento")),
+                _ => (up, Some("")),
+            },
+            None => (up, None),
+        };
+        match (duration(up), note) {
+            (Some(d), None) => Some(format!("Em execução há {d}")),
+            (Some(d), Some(note)) if !note.is_empty() => {
+                Some(format!("Em execução há {d} · {note}"))
+            }
+            _ => None,
+        }
+    } else if let Some(rest) = status.strip_prefix("Exited ") {
+        exited(rest).map(|t| format!("Parado {t}"))
+    } else if let Some(rest) = status.strip_prefix("Restarting ") {
+        exited(rest).map(|t| format!("Reiniciando {t}"))
+    } else {
+        None
+    };
+    translated.unwrap_or_else(|| status.to_owned())
 }
 
 /// O ID curto do Docker (12 caracteres).
@@ -307,7 +441,7 @@ impl Docker {
                     .into_iter()
                     .filter(|c| !self.running_only || running(c))
                     .collect();
-                split(ui, &page, |ui| {
+                widgets::split(ui, &page, |ui| {
                     self.containers(ui, rows, hidden, r, monitored)
                 });
             }
@@ -332,7 +466,7 @@ impl Docker {
                     .collect();
                 let mut legend = vec![IMAGES_NOTE.to_owned(), SIZE_NOTE.to_owned()];
                 legend.extend(page);
-                split(ui, &legend, |ui| images_table(ui, &images, r));
+                widgets::split(ui, &legend, |ui| images_table(ui, &images, r));
             }
             Tab::Processes => {
                 let processes: Vec<&HostProcess> = r
@@ -342,7 +476,7 @@ impl Docker {
                     .collect();
                 let mut legend = vec![crate::platform::PROCESSES_CAPTION.to_owned()];
                 legend.extend(page);
-                split(ui, &legend, |ui| processes_table(ui, &processes, r));
+                widgets::split(ui, &legend, |ui| processes_table(ui, &processes, r));
             }
         }
     }
@@ -387,7 +521,7 @@ impl Docker {
             |ui| {
                 let width = ui.available_width().min(200.);
                 if width >= 140. {
-                    search_field(ui, search, width);
+                    widgets::search_field(ui, search, width, SEARCH);
                 } else {
                     below = true;
                 }
@@ -395,7 +529,7 @@ impl Docker {
         );
         if below {
             let width = ui.available_width().min(320.);
-            search_field(ui, &mut self.search, width);
+            widgets::search_field(ui, &mut self.search, width, SEARCH);
         }
     }
 
@@ -474,11 +608,15 @@ impl Docker {
             .horizontal(|ui| {
                 ui.set_min_height(SUMMARY);
                 ui.spacing_mut().item_spacing.x = gap;
-                for galley in galleys {
+                for (i, galley) in galleys.into_iter().enumerate() {
                     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
                     let spoken = galley.text().to_owned();
                     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
                     ui.painter().galley(rect.min, galley, p.text);
+                    // O 4º item é Tarefas.
+                    if i == 3 {
+                        response.on_hover_text(TASKS_HINT);
+                    }
                 }
                 if fits {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -524,7 +662,7 @@ impl Docker {
         } else {
             rect
         };
-        pane(ui, table, "Contêineres");
+        widgets::pane(ui, table, "Contêineres");
         let columns = columns(table.width());
         self.header(ui, table, &columns);
         rows.sort_by(|a, b| order(a, b, self.sort));
@@ -579,7 +717,7 @@ impl Docker {
                     } else {
                         "Nenhum contêiner corresponde à busca ou ao filtro."
                     };
-                    empty(ui, "Nenhum contêiner nesta lista", subtitle);
+                    widgets::empty(ui, "Nenhum contêiner nesta lista", subtitle);
                 } else {
                     ui.advance_cursor_after_rect(Rect::from_min_size(
                         origin,
@@ -611,7 +749,7 @@ impl Docker {
             });
         if side && let Some(c) = find(&clicked.clone().or(selected)) {
             let at = Rect::from_min_max(pos2(table.right() + 1., rect.top()), rect.max);
-            pane(ui, at, "Inspetor do contêiner");
+            widgets::pane(ui, at, "Inspetor do contêiner");
             ui.painter().rect_filled(at, 0., p.surf);
             ui.painter()
                 .vline(at.left() - 0.5, at.y_range(), Stroke::new(1.0_f32, p.line));
@@ -661,7 +799,7 @@ impl Docker {
                 (col.title().to_owned(), FontId::proportional(11.), p.text2)
             };
             let inner = cell.shrink2(vec2(PAD, 0.));
-            let galley = one_line(ui, &title, font, color, inner.width());
+            let galley = widgets::one_line(ui, &title, font, color, inner.width());
             let left = if col == Col::Tasks {
                 inner.right() - galley.size().x
             } else {
@@ -669,8 +807,11 @@ impl Docker {
             };
             let id = ui.id().with(("docker-head", col.title()));
             if col.sorts() {
-                let response = ui.interact(cell, id, Sense::click());
+                let mut response = ui.interact(cell, id, Sense::click());
                 response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, col.title()));
+                if col == Col::Tasks {
+                    response = response.on_hover_text(TASKS_HINT);
+                }
                 if active {
                     let direction = if self.sort.descending {
                         SortDirection::Descending
@@ -734,7 +875,7 @@ fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected:
     let tasks = usage
         .and_then(|u| u.tasks)
         .map_or_else(unknown, |t| number(t as usize));
-    let ports = dash(&c.ports);
+    let ports = host_ports(&c.ports);
     let state = state_label(&c.state);
     let second = format!("{} · {state}", dash(&c.image));
     let response = ui.interact(rect, ui.id().with(("container", &c.id)), Sense::click());
@@ -775,14 +916,14 @@ fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected:
                     if on { p.acc } else { p.text2 },
                 );
                 let left = cell.left() + 7. + 10.;
-                let name = one_line(
+                let name = widgets::one_line(
                     ui,
                     &c.name,
                     Type::Body.font(),
                     if on { p.text } else { p.text2 },
                     cell.right() - left,
                 );
-                let below = one_line(
+                let below = widgets::one_line(
                     ui,
                     &second,
                     FontId::proportional(11.),
@@ -819,7 +960,8 @@ fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected:
                 &format!("Memória de {}", c.name),
             ),
             Col::Tasks => {
-                let galley = one_line(ui, &tasks, Type::Body.font(), p.text2, cell.width());
+                let galley =
+                    widgets::one_line(ui, &tasks, Type::Body.font(), p.text2, cell.width());
                 ui.painter().galley(
                     pos2(
                         cell.right() - galley.size().x,
@@ -830,7 +972,8 @@ fn row(ui: &mut Ui, rect: Rect, c: &Container, columns: &[(Col, f32)], selected:
                 );
             }
             Col::Ports => {
-                let galley = one_line(ui, &ports, Type::Mono.font(), p.text2, cell.width());
+                let galley =
+                    widgets::one_line(ui, &ports, Type::Mono.font(), p.text2, cell.width());
                 elided |= galley.elided;
                 ui.painter().galley(
                     pos2(cell.left(), rect.center().y - galley.size().y / 2.),
@@ -924,11 +1067,7 @@ fn inspector(ui: &mut Ui, c: &Container, r: &ResourceSnapshot, monitored: &str) 
             .circle_filled(dot.center(), 4., if on { p.acc } else { p.text2 });
         ui.add(Label::new(RichText::new(&c.name).font(Type::Bar.font())).truncate());
     });
-    let mut status = if c.status.trim().is_empty() {
-        state_label(&c.state).to_owned()
-    } else {
-        c.status.clone()
-    };
+    let mut status = status_label(&c.status, &c.state);
     if ours {
         status.push_str(" · contêiner monitorado");
     }
@@ -943,7 +1082,7 @@ fn inspector(ui: &mut Ui, c: &Container, r: &ResourceSnapshot, monitored: &str) 
         ui,
         &[
             Fact::new("Imagem", dash(&c.image)),
-            Fact::new("Portas", dash(&c.ports)).mono(),
+            Fact::new("Portas", port_mappings(&c.ports)).mono(),
             Fact::new("Limite de memória", limit),
             Fact::new("Rede acumulada", io(&c.net_io, "↓", "↑")),
             Fact::new("Disco acumulado", io(&c.block_io, "lidos", "gravados")),
@@ -1030,121 +1169,55 @@ fn processes_in_container(ui: &mut Ui, rows: &[(String, String, u64)]) {
     });
 }
 
-struct Column {
-    title: &'static str,
-    /// `None` = a coluna que estica (o resto, com `FLEX_MIN` no mínimo).
-    width: Option<f32>,
-}
-const IMAGE_COLUMNS: [Column; 4] = [
-    Column {
+const IMAGE_COLUMNS: [widgets::Column; 4] = [
+    widgets::Column {
         title: "Imagem / tags",
         width: None,
+        hint: Some(IMAGES_HINT),
     },
-    Column {
+    widgets::Column {
         title: "Tamanho",
         width: Some(100.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Uso",
         width: Some(130.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Contêineres",
         width: Some(200.),
+        hint: None,
     },
 ];
-const PROCESS_COLUMNS: [Column; 5] = [
-    Column {
+const PROCESS_COLUMNS: [widgets::Column; 5] = [
+    widgets::Column {
         title: "PID",
         width: Some(80.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Processo",
         width: None,
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "CPU",
         width: Some(90.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Memória RSS",
         width: Some(110.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Threads",
         width: Some(90.),
+        hint: None,
     },
 ];
-
-/// Cabeçalho (11 px, text2) e linhas de `height` com divisória; só as linhas
-/// visíveis são montadas. As larguras saem de `ui.max_rect()` a cada frame.
-fn table(
-    ui: &mut Ui,
-    id: &str,
-    columns: &[Column],
-    rows: usize,
-    height: f32,
-    mut cell: impl FnMut(&mut Ui, usize, usize),
-) {
-    let p = theme::palette(ui.visuals());
-    let rect = ui.max_rect();
-    let fixed: f32 = columns.iter().filter_map(|c| c.width).sum();
-    let flex = (rect.width() - fixed).max(FLEX_MIN);
-    let widths: Vec<f32> = columns.iter().map(|c| c.width.unwrap_or(flex)).collect();
-    let mut x = rect.left();
-    for (column, width) in columns.iter().zip(&widths) {
-        let at =
-            Rect::from_min_size(pos2(x, rect.top()), vec2(*width, HEAD)).shrink2(vec2(PAD, 0.));
-        ui.new_child(
-            UiBuilder::new()
-                .max_rect(at)
-                .layout(Layout::left_to_right(Align::Center)),
-        )
-        .add(Label::new(RichText::new(column.title).size(11.).color(p.text2)).truncate());
-        x += width;
-    }
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top() + HEAD - 0.5,
-        Stroke::new(1.0_f32, p.line),
-    );
-    let body = Rect::from_min_max(pos2(rect.left(), rect.top() + HEAD), rect.max);
-    let mut child = ui.new_child(
-        UiBuilder::new()
-            .max_rect(body)
-            .layout(Layout::top_down(Align::Min)),
-    );
-    egui::ScrollArea::vertical()
-        .id_salt(id)
-        .auto_shrink(false)
-        .show_viewport(&mut child, |ui, viewport| {
-            ui.set_height(height * rows as f32);
-            let content = ui.max_rect();
-            let first = (viewport.min.y / height).floor().max(0.) as usize;
-            let last = ((viewport.max.y / height).ceil().max(0.) as usize).min(rows);
-            for row in first..last {
-                let y = content.top() + row as f32 * height;
-                let mut x = content.left();
-                for (column, width) in widths.iter().enumerate() {
-                    let at = Rect::from_min_size(pos2(x, y), vec2(*width, height))
-                        .shrink2(vec2(PAD, 0.));
-                    let mut cell_ui = ui.new_child(
-                        UiBuilder::new()
-                            .id_salt((row, column))
-                            .max_rect(at)
-                            .layout(Layout::left_to_right(Align::Center)),
-                    );
-                    cell(&mut cell_ui, row, column);
-                    x += width;
-                }
-                ui.painter().hline(
-                    content.x_range(),
-                    y + height - 0.5,
-                    Stroke::new(1.0_f32, p.line),
-                );
-            }
-        });
-}
 
 /// Tabela vazia: a mensagem embaixo do cabeçalho.
 fn empty_table(ui: &mut Ui, title: &str, subtitle: &str) {
@@ -1155,7 +1228,7 @@ fn empty_table(ui: &mut Ui, title: &str, subtitle: &str) {
             .max_rect(below)
             .layout(Layout::top_down(Align::Min)),
     );
-    empty(&mut child, title, subtitle);
+    widgets::empty(&mut child, title, subtitle);
 }
 
 fn cell_text(ui: &mut Ui, text: &str, color: Color32) -> Response {
@@ -1164,12 +1237,17 @@ fn cell_text(ui: &mut Ui, text: &str, color: Color32) -> Response {
 
 fn images_table(ui: &mut Ui, images: &[&DockerImage], r: &ResourceSnapshot) {
     let p = theme::palette(ui.visuals());
-    table(
+    widgets::table(
         ui,
         "docker-images",
         &IMAGE_COLUMNS,
+        widgets::TableSize {
+            head: HEAD,
+            row: ROW,
+            pad: PAD,
+        },
         images.len(),
-        ROW,
+        false,
         |ui, row, column| {
             let i = images[row];
             match column {
@@ -1241,12 +1319,17 @@ fn images_table(ui: &mut Ui, images: &[&DockerImage], r: &ResourceSnapshot) {
 
 fn processes_table(ui: &mut Ui, processes: &[&HostProcess], r: &ResourceSnapshot) {
     let p = theme::palette(ui.visuals());
-    table(
+    widgets::table(
         ui,
         "docker-processes",
         &PROCESS_COLUMNS,
+        widgets::TableSize {
+            head: HEAD,
+            row: PROCESS_ROW,
+            pad: PAD,
+        },
         processes.len(),
-        PROCESS_ROW,
+        false,
         |ui, row, column| {
             let process = processes[row];
             match column {
@@ -1290,106 +1373,13 @@ fn processes_table(ui: &mut Ui, processes: &[&HostProcess], r: &ResourceSnapshot
     }
 }
 
-/// Mede a legenda, dá à página o resto da altura e pinta a legenda embaixo.
-fn split<R>(ui: &mut Ui, legend: &[String], content: impl FnOnce(&mut Ui) -> R) -> R {
-    let width = ui.available_width();
-    let gap = ui.spacing().item_spacing.y;
-    let legend_height: f32 = legend
-        .iter()
-        .map(|line| {
-            ui.painter()
-                .layout(
-                    line.clone(),
-                    FontId::proportional(12.),
-                    Color32::PLACEHOLDER,
-                    width,
-                )
-                .size()
-                .y
-                + gap
-        })
-        .sum();
-    let height = (ui.available_height() - legend_height).max(120.);
-    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    let mut area = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::top_down(Align::Min)),
-    );
-    let inner = content(&mut area);
-    for line in legend {
-        widgets::caption(ui, line);
-    }
-    inner
-}
-
-fn search_field(ui: &mut Ui, text: &mut String, width: f32) {
-    let p = theme::palette(ui.visuals());
-    let response = ui.add(
-        egui::TextEdit::singleline(text)
-            .hint_text(SEARCH)
-            .font(FontId::proportional(12.))
-            .margin(egui::Margin {
-                left: 26,
-                right: 8,
-                top: 6,
-                bottom: 6,
-            })
-            .desired_width(width - 34.),
-    );
-    let icon = Rect::from_min_size(
-        pos2(response.rect.left() + 8., response.rect.center().y - 6.5),
-        Vec2::splat(13.),
-    );
-    let scale = icon.width() / 24.;
-    ui.painter().circle_stroke(
-        icon.min + vec2(11., 11.) * scale,
-        7. * scale,
-        Stroke::new(2. * scale, p.text2),
-    );
-    widgets::strokes(
-        ui.painter(),
-        icon,
-        &[&[(20., 20.), (16., 16.)]],
-        2.,
-        p.text2,
-    );
-}
-
-/// Texto numa linha, com reticências além de `width`.
-fn one_line(
-    ui: &Ui,
-    text: &str,
-    font: FontId,
-    color: Color32,
-    width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
-    ui.painter().layout_job(job)
-}
-
-/// Nó AccessKit `Pane` com o rótulo do artboard (aria-label).
-fn pane(ui: &mut Ui, rect: Rect, label: &str) {
-    ui.interact(rect, ui.id().with(label), Sense::hover())
-        .widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, label));
-}
-
-/// Mensagem centrada no fluxo (a linha dos ocultos pode vir depois).
-fn empty(ui: &mut Ui, title: &str, subtitle: &str) {
-    let p = theme::palette(ui.visuals());
-    ui.vertical_centered(|ui| {
-        ui.add_space(space::XL);
-        ui.label(RichText::new(title).font(Type::Section.font()));
-        ui.add(Label::new(RichText::new(subtitle).size(12.).color(p.text2)).wrap());
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Usage;
-    use crate::widgets::tests::{THEMES, context, node, nodes, rect_of, rects, run_sized, texts};
+    use crate::widgets::tests::{
+        THEMES, click_frames, context, node, nodes, rect_of, rects, run_sized, texts,
+    };
     use egui::{
         Event, Pos2,
         accesskit::{Role, Toggled},
@@ -1435,7 +1425,13 @@ mod tests {
     /// Os oito do artboard: três em execução (15,5% · 733 MiB · 64 tarefas).
     fn eight() -> Vec<Container> {
         vec![
-            running("ai-memory", 12.4, 421, 46, "0.0.0.0:49374->49374/tcp"),
+            running(
+                "ai-memory",
+                12.4,
+                421,
+                46,
+                "0.0.0.0:49374->49374/tcp, [::]:49374->49374/tcp",
+            ),
             running("postgres-dev", 2.7, 218, 12, "0.0.0.0:5432->5432/tcp"),
             running("redis-cache", 0.4, 94, 6, "6379/tcp"),
             stopped("minio", "exited"),
@@ -1487,19 +1483,13 @@ mod tests {
         fn show(&mut self) -> egui::FullOutput {
             self.frame(vec![])
         }
-        /// Clique completo, com o ponteiro já parado em `pos` (como o mouse:
-        /// mover e apertar no mesmo frame vira arrasto na rolagem); devolve o
-        /// frame em que ele acontece (o de soltar).
+        /// Clique completo (`click_frames`); devolve o frame em que ele
+        /// acontece (o de soltar).
         fn click(&mut self, pos: Pos2) -> egui::FullOutput {
-            let press = |pressed| Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
-            };
-            self.frame(vec![Event::PointerMoved(pos)]);
-            self.frame(vec![press(true)]);
-            self.frame(vec![press(false)])
+            let [arrive, press, release] = click_frames(pos);
+            self.frame(arrive);
+            self.frame(press);
+            self.frame(release)
         }
         fn click_on(&mut self, role: Role, text: &str) -> egui::FullOutput {
             let out = self.show();
@@ -1913,15 +1903,20 @@ mod tests {
 
     #[test]
     fn ports_are_mono_text2_and_appear_only_from_the_ports_width() {
-        let r = collected(vec![running("web", 1., 1, 1, "0.0.0.0:80->80/tcp")]);
+        let r = collected(vec![running(
+            "web",
+            1.,
+            1,
+            1,
+            "0.0.0.0:80->80/tcp, [::]:80->80/tcp",
+        )]);
         for (size, shown) in [(NARROW, false), (WIDE, true), ([1300., 800.], true)] {
             let mut page = Page::new(egui::Theme::Dark, size, r.clone());
             let out = page.show();
             let row = row_rect(&out, "web");
             let ports = out.shapes.iter().find_map(|c| match &c.shape {
                 egui::Shape::Text(t)
-                    if t.galley.text() == "0.0.0.0:80->80/tcp"
-                        && row.contains_rect(t.visual_bounding_rect()) =>
+                    if t.galley.text() == "80" && row.contains_rect(t.visual_bounding_rect()) =>
                 {
                     Some(t.clone())
                 }
@@ -1933,12 +1928,181 @@ mod tests {
                 assert_eq!(t.galley.job.sections[0].format.font_id, Type::Mono.font());
                 assert_eq!(t.galley.job.sections[0].format.color, theme::DARK.text2);
             }
-            // No inspetor, sempre.
-            node(&out, Role::Label, "Portas: 0.0.0.0:80->80/tcp");
+            // No inspetor, sempre, por publicação.
+            node(&out, Role::Label, "Portas: 80 → 80/tcp");
         }
         assert_eq!(PORTS_FROM, 710.);
         assert_eq!(columns(PORTS_FROM - 0.1).len(), 4);
         assert_eq!(columns(PORTS_FROM).len(), 5);
+    }
+
+    #[test]
+    fn ports_show_host_ports_in_the_table_and_each_mapping_in_the_inspector() {
+        // (Ports do `docker ps`, tabela, inspetor)
+        for (raw, table, inspector) in [
+            (
+                "0.0.0.0:49374->49374/tcp, [::]:49374->49374/tcp",
+                "49374",
+                "49374 → 49374/tcp",
+            ),
+            ("0.0.0.0:5432->5432/tcp", "5432", "5432 → 5432/tcp"),
+            ("6379/tcp", "6379/tcp", "6379/tcp"),
+            (
+                "0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp, :::80->80/tcp, :::443->443/tcp",
+                "80, 443",
+                "80 → 80/tcp, 443 → 443/tcp",
+            ),
+            ("127.0.0.1:8080->80/tcp", "8080", "127.0.0.1:8080 → 80/tcp"),
+            ("[::1]:8080->80/tcp", "8080", "[::1]:8080 → 80/tcp"),
+            (
+                "0.0.0.0:8000-8002->8000-8002/tcp",
+                "8000-8002",
+                "8000-8002 → 8000-8002/tcp",
+            ),
+            (
+                "0.0.0.0:53->53/tcp, 0.0.0.0:53->53/udp",
+                "53",
+                "53 → 53/tcp, 53 → 53/udp",
+            ),
+            (
+                "0.0.0.0:80->80/tcp, 443/tcp",
+                "80, 443/tcp",
+                "80 → 80/tcp, 443/tcp",
+            ),
+            ("", "—", "—"),
+            ("  ", "—", "—"),
+            (", ", "—", "—"),
+            ("algo estranho", "algo estranho", "algo estranho"),
+            ("0.0.0.0:->80/tcp", "0.0.0.0:->80/tcp", "0.0.0.0:->80/tcp"),
+            ("0.0.0.0:80->", "0.0.0.0:80->", "0.0.0.0:80->"),
+            (
+                "0.0.0.0:http->80/tcp",
+                "0.0.0.0:http->80/tcp",
+                "0.0.0.0:http->80/tcp",
+            ),
+        ] {
+            assert_eq!(
+                (host_ports(raw).as_str(), port_mappings(raw).as_str()),
+                (table, inspector),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_in_pt_br_for_every_docker_format_and_raw_when_unknown() {
+        // (Status, estado, texto)
+        for (status, state, want) in [
+            ("Up 3 days", "running", "Em execução há 3 dias"),
+            (
+                "Up 5 hours (healthy)",
+                "running",
+                "Em execução há 5 horas · saudável",
+            ),
+            (
+                "Up 2 minutes (unhealthy)",
+                "running",
+                "Em execução há 2 minutos · não saudável",
+            ),
+            (
+                "Up 10 seconds (health: starting)",
+                "running",
+                "Em execução há 10 segundos · verificação de saúde em andamento",
+            ),
+            (
+                "Up About an hour",
+                "running",
+                "Em execução há cerca de uma hora",
+            ),
+            (
+                "Up About a minute",
+                "running",
+                "Em execução há cerca de um minuto",
+            ),
+            (
+                "Up Less than a second",
+                "running",
+                "Em execução há menos de um segundo",
+            ),
+            ("Up 1 second", "running", "Em execução há 1 segundo"),
+            ("Up 1 minute", "running", "Em execução há 1 minuto"),
+            ("Up 1 hour", "running", "Em execução há 1 hora"),
+            ("Up 1 day", "running", "Em execução há 1 dia"),
+            ("Up 1 week", "running", "Em execução há 1 semana"),
+            ("Up 1 month", "running", "Em execução há 1 mês"),
+            ("Up 2 months", "running", "Em execução há 2 meses"),
+            ("Up 1 year", "running", "Em execução há 1 ano"),
+            ("Up 3 years", "running", "Em execução há 3 anos"),
+            ("Up 1234 days", "running", "Em execução há 1.234 dias"),
+            (
+                "Up 3 weeks (Paused)",
+                "paused",
+                "Em execução há 3 semanas · pausado",
+            ),
+            (
+                "Exited (0) 2 hours ago",
+                "exited",
+                "Parado há 2 horas (código 0)",
+            ),
+            (
+                "Exited (137) About a minute ago",
+                "exited",
+                "Parado há cerca de um minuto (código 137)",
+            ),
+            (
+                "Restarting (1) 5 seconds ago",
+                "restarting",
+                "Reiniciando há 5 segundos (código 1)",
+            ),
+            ("Created", "created", "Criado"),
+            ("Dead", "dead", "Morto"),
+            ("Removal In Progress", "removing", "Removendo"),
+            ("", "exited", "parado"),
+            (" ", "running", "em execução"),
+            ("", "", "—"),
+            // Formato desconhecido: como veio.
+            ("Up 3 fortnights", "running", "Up 3 fortnights"),
+            ("Up 3 days (sleepy)", "running", "Up 3 days (sleepy)"),
+            ("Up", "running", "Up"),
+            ("Exited (x) 2 hours ago", "exited", "Exited (x) 2 hours ago"),
+            ("Exited (0) 2 hours", "exited", "Exited (0) 2 hours"),
+            ("Restarting", "restarting", "Restarting"),
+            ("Em pausa", "paused", "Em pausa"),
+        ] {
+            assert_eq!(status_label(status, state), want, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn tasks_and_images_explain_what_they_count_on_hover() {
+        let r = ResourceSnapshot {
+            images_at: Some(Utc::now()),
+            images: vec![DockerImage {
+                id: format!("sha256:{LONG_ID}"),
+                tags: vec!["web:latest".into()],
+                ..Default::default()
+            }],
+            ..collected(eight())
+        };
+        let mut page = Page::new(egui::Theme::Dark, WIDE, r);
+        let out = page.show();
+        // Antes do ponteiro, nenhuma dica.
+        assert!(!has(&out, Role::Label, TASKS_HINT));
+        // (o que, papel, texto, dica)
+        for (role, text, hint) in [
+            (Role::Button, "Tarefas", TASKS_HINT),
+            (Role::Label, "Tarefas 64", TASKS_HINT),
+            (Role::Label, "Imagem / tags", IMAGES_HINT),
+        ] {
+            if text == "Imagem / tags" {
+                page.docker.tab = Tab::Images;
+            }
+            let out = page.show();
+            let at = rect_of(&node(&out, role, text)).center();
+            let out = page.rest(at);
+            node(&out, Role::Label, hint);
+            page.frame(vec![Event::PointerGone]);
+        }
     }
 
     #[test]
@@ -2122,7 +2286,11 @@ mod tests {
         let out = page.show();
         assert_eq!(names(&out)[0], "ai-memory", "precondition: not first");
         assert_eq!(selected(&out), ["redis-cache"]);
-        node(&out, Role::Label, "Up 3 days · contêiner monitorado");
+        node(
+            &out,
+            Role::Label,
+            "Em execução há 3 dias · contêiner monitorado",
+        );
         // Sem o monitorado na lista: o primeiro.
         let mut page = Page::new(egui::Theme::Dark, WIDE, collected(eight()));
         page.monitored = "nada".into();
@@ -2212,9 +2380,9 @@ mod tests {
                 "{theme:?}: surf"
             );
             for text in [
-                "Up 3 days · contêiner monitorado",
+                "Em execução há 3 dias · contêiner monitorado",
                 "Imagem: ai-memory:latest",
-                "Portas: 0.0.0.0:49374->49374/tcp",
+                "Portas: 49374 → 49374/tcp",
                 "Limite de memória: 8,0 GiB",
                 "Rede acumulada: 1,2 GB ↓ · 840 MB ↑",
                 "Disco acumulado: 3,4 GB lidos · 9,1 GB gravados",
@@ -2261,7 +2429,7 @@ mod tests {
         page.click_row("minio");
         let out = page.show();
         for text in [
-            "Exited (0) 2 hours ago · contêiner monitorado",
+            "Parado há 2 horas (código 0) · contêiner monitorado",
             "Limite de memória: —",
             "Rede acumulada: —",
             "Disco acumulado: —",
@@ -2271,7 +2439,7 @@ mod tests {
         }
         page.monitored = "outro".into();
         let out = page.show();
-        node(&out, Role::Label, "Exited (0) 2 hours ago");
+        node(&out, Role::Label, "Parado há 2 horas (código 0)");
         assert!(!has(&out, Role::Label, "Processos no contêiner"));
         assert!(has(&out, Role::Button, "Copiar ID"));
     }

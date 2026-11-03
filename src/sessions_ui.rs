@@ -7,9 +7,11 @@
 //!
 //! Regras desta tela:
 //! - Contadores do segmentado, sem filtro: Handoffs = total do servidor ("N+"
-//!   sem o total, "—" antes da 1ª coleta); Sessões abertas = linhas sem
-//!   encerramento na lista carregada (as que a aba mostra com "Só abertas" e
-//!   sem filtros); Projetos = projetos listados ("—" antes da 1ª coleta).
+//!   sem o total, "—" antes da 1ª coleta); Sessões abertas = vínculos
+//!   informados pela API (`open_session_links`, o mesmo número do cartão
+//!   Continuidade da Visão geral; "—" antes da 1ª coleta ou com algum projeto
+//!   sem a contagem), não as linhas da lista carregada (as últimas 100 por
+//!   projeto); Projetos = projetos listados ("—" antes da 1ª coleta).
 //! - Grupos na ordem do handoff mais recente de cada projeto (a coleta já vem
 //!   do mais novo ao mais velho); dentro do grupo, a mesma ordem.
 //! - Título e prévia: `handoff_text::outline` do texto limpo; restrito =
@@ -48,11 +50,15 @@ const LIST_FOOT: f32 = 34.;
 const TABLE_HEAD: f32 = 28.;
 const TABLE_ROW: f32 = 36.;
 const CELL_PAD: f32 = 6.;
+const TABLE: widgets::TableSize = widgets::TableSize {
+    head: TABLE_HEAD,
+    row: TABLE_ROW,
+    pad: CELL_PAD,
+};
 /// Altura do pé do detalhe: divisória, 12 de respiro e os botões.
 const FOOT: f32 = 1. + 12. + 28.;
 /// Abaixo desta altura útil o pé do detalhe rola junto com o texto.
 const PINNED: f32 = 360.;
-const FLEX_MIN: f32 = 120.;
 /// Largura máxima de um filtro (projeto, agente).
 const PICKER: f32 = 200.;
 const SEARCH: &str = "Projeto, agente, ID ou resumo";
@@ -115,57 +121,63 @@ impl Item<'_> {
     }
 }
 
-struct Column {
-    title: &'static str,
-    /// `None` = a coluna que estica (o resto, com `FLEX_MIN` no mínimo).
-    width: Option<f32>,
-}
-const SESSION_COLUMNS: [Column; 6] = [
-    Column {
+const SESSION_COLUMNS: [widgets::Column; 6] = [
+    widgets::Column {
         title: "Estado",
         width: Some(96.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Projeto / sessão",
         width: None,
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Agente",
         width: Some(96.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Eventos",
         width: Some(72.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Início",
         width: Some(96.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "ID",
         width: Some(72.),
+        hint: None,
     },
 ];
-const PROJECT_COLUMNS: [Column; 5] = [
-    Column {
+const PROJECT_COLUMNS: [widgets::Column; 5] = [
+    widgets::Column {
         title: "Projeto",
         width: None,
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Páginas",
         width: Some(80.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Abertas",
         width: Some(80.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Eventos",
         width: Some(96.),
+        hint: None,
     },
-    Column {
+    widgets::Column {
         title: "Atividade",
         width: Some(104.),
+        hint: None,
     },
 ];
 
@@ -245,7 +257,7 @@ impl Sessions {
                     ));
                 }
                 legend.push(LIMIT.into());
-                split(ui, &legend, |ui| {
+                widgets::split(ui, &legend, |ui| {
                     self.handoffs(ui, api, shown, &total, now, refilter)
                 })
             }
@@ -266,7 +278,7 @@ impl Sessions {
                     format!("{} registros", number(rows.len())),
                     SESSIONS_NOTE.into(),
                 ];
-                split(ui, &legend, |ui| sessions_table(ui, api, &rows, refilter));
+                widgets::split(ui, &legend, |ui| sessions_table(ui, api, &rows, refilter));
                 false
             }
             Tab::Projects => {
@@ -279,7 +291,7 @@ impl Sessions {
                             && scope.to_lowercase().contains(&needle)
                     })
                     .collect();
-                split(ui, &[PROJECTS_NOTE.into()], |ui| {
+                widgets::split(ui, &[PROJECTS_NOTE.into()], |ui| {
                     projects_table(ui, api, &rows, refilter)
                 });
                 false
@@ -298,7 +310,9 @@ impl Sessions {
     fn toolbar(&mut self, ui: &mut Ui, api: &ApiSnapshot, total: &str) {
         let collected = api.at.is_some();
         let known = |n: usize| if collected { number(n) } else { "—".into() };
-        let open = known(api.sessions.iter().filter(|s| s.ended_at.is_none()).count());
+        let open = api
+            .open_session_links()
+            .map_or_else(|| "—".into(), |n| number(n as usize));
         let projects = known(api.projects.len());
         let mut below = false;
         let (tab, search) = (&mut self.tab, &mut self.search);
@@ -330,7 +344,7 @@ impl Sessions {
             |ui| {
                 let width = ui.available_width().min(220.);
                 if width >= 140. {
-                    search_field(ui, search, width);
+                    widgets::search_field(ui, search, width, SEARCH);
                 } else {
                     below = true;
                 }
@@ -338,7 +352,7 @@ impl Sessions {
         );
         if below {
             let width = ui.available_width().min(320.);
-            search_field(ui, &mut self.search, width);
+            widgets::search_field(ui, &mut self.search, width, SEARCH);
         }
     }
 
@@ -498,7 +512,7 @@ impl Sessions {
         refilter: bool,
     ) -> Option<(String, String)> {
         let p = theme::palette(ui.visuals());
-        pane(ui, rect, "Lista de handoffs");
+        widgets::pane(ui, rect, "Lista de handoffs");
         let mut items = Vec::new();
         let mut height = 0.;
         for (scope, rows) in groups {
@@ -615,14 +629,15 @@ impl Sessions {
         } else {
             format!("{agent} · {preview}")
         };
-        let title_galley = one_line(
+        let title_galley = widgets::one_line(
             ui,
             &title,
             Type::Body.font(),
             p.text,
             right - left - age_galley.size().x - 8.,
         );
-        let second_galley = one_line(ui, &second, Type::Caption.font(), p.text2, right - left);
+        let second_galley =
+            widgets::one_line(ui, &second, Type::Caption.font(), p.text2, right - left);
         let elided = title_galley.elided || second_galley.elided;
         let top = rect.top() + 9.;
         let title_height = title_galley.size().y;
@@ -656,7 +671,7 @@ impl Sessions {
         back: bool,
     ) -> bool {
         let p = theme::palette(ui.visuals());
-        pane(ui, rect, "Detalhe do handoff");
+        widgets::pane(ui, rect, "Detalhe do handoff");
         let inner = rect.shrink2(if back { vec2(0., 8.) } else { vec2(28., 22.) });
         let mut column = ui.new_child(
             UiBuilder::new()
@@ -820,39 +835,6 @@ fn footer(ui: &mut Ui, h: &Handoff, copy: Option<String>) -> bool {
     .inner
 }
 
-/// Mede a legenda, dá à página o resto da altura e pinta a legenda embaixo.
-fn split<R>(ui: &mut Ui, legend: &[String], content: impl FnOnce(&mut Ui) -> R) -> R {
-    let width = ui.available_width();
-    let gap = ui.spacing().item_spacing.y;
-    let legend_height: f32 = legend
-        .iter()
-        .map(|line| {
-            ui.painter()
-                .layout(
-                    line.clone(),
-                    FontId::proportional(12.),
-                    Color32::PLACEHOLDER,
-                    width,
-                )
-                .size()
-                .y
-                + gap
-        })
-        .sum();
-    let height = (ui.available_height() - legend_height).max(120.);
-    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    let mut area = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::top_down(Align::Min)),
-    );
-    let inner = content(&mut area);
-    for line in legend {
-        widgets::caption(ui, line);
-    }
-    inner
-}
-
 /// Os agentes presentes, em ordem, mais o filtro ativo se não estiver entre eles.
 fn present<'a>(names: impl Iterator<Item = &'a str>, current: &str) -> Vec<String> {
     let mut agents: Vec<String> = names
@@ -917,39 +899,6 @@ fn picker(
     );
 }
 
-fn search_field(ui: &mut Ui, text: &mut String, width: f32) {
-    let p = theme::palette(ui.visuals());
-    let response = ui.add(
-        egui::TextEdit::singleline(text)
-            .hint_text(SEARCH)
-            .font(FontId::proportional(12.))
-            .margin(egui::Margin {
-                left: 26,
-                right: 8,
-                top: 6,
-                bottom: 6,
-            })
-            .desired_width(width - 34.),
-    );
-    let icon = Rect::from_min_size(
-        pos2(response.rect.left() + 8., response.rect.center().y - 6.5),
-        Vec2::splat(13.),
-    );
-    let scale = icon.width() / 24.;
-    ui.painter().circle_stroke(
-        icon.min + vec2(11., 11.) * scale,
-        7. * scale,
-        Stroke::new(2. * scale, p.text2),
-    );
-    widgets::strokes(
-        ui.painter(),
-        icon,
-        &[&[(20., 20.), (16., 16.)]],
-        2.,
-        p.text2,
-    );
-}
-
 fn key(h: &Handoff) -> (String, String) {
     (h.scope.clone(), h.id.clone())
 }
@@ -968,8 +917,8 @@ fn group(handoffs: Vec<&Handoff>) -> Vec<(&str, Vec<&Handoff>)> {
     groups
 }
 
-/// Título e prévia de uma linha.
-fn headline(h: &Handoff) -> (String, String) {
+/// Título e prévia de uma linha (também os handoffs recentes da Visão geral).
+pub(crate) fn headline(h: &Handoff) -> (String, String) {
     if h.redacted {
         return ("Resumo restrito".into(), String::new());
     }
@@ -1005,7 +954,7 @@ fn avatar(agent: &str, p: &theme::Palette, dark: bool) -> (String, Color32, Colo
 
 /// Idade de um handoff: a da lista ("12 min", "ontem") e a do detalhe.
 #[derive(Clone, Debug, PartialEq)]
-enum Age {
+pub(crate) enum Age {
     Now,
     Minutes(i64),
     Hours(i64),
@@ -1013,7 +962,7 @@ enum Age {
     Date(String),
 }
 impl Age {
-    fn short(&self) -> String {
+    pub(crate) fn short(&self) -> String {
         match self {
             Age::Now => "agora".into(),
             Age::Minutes(n) => format!("{n} min"),
@@ -1023,7 +972,7 @@ impl Age {
         }
     }
     /// O parêntese depois da data no detalhe; a data já diz o resto.
-    fn long(&self) -> Option<String> {
+    pub(crate) fn long(&self) -> Option<String> {
         match self {
             Age::Now => Some("agora".into()),
             Age::Minutes(n) => Some(format!("há {n} min")),
@@ -1036,7 +985,7 @@ impl Age {
 /// Abaixo de 1 min = agora (o futuro, por relógio adiantado, também); até
 /// 24 h, em min ou h; depois, "ontem" se foi no dia anterior (fuso local) e
 /// senão a data ("dd/mm", com o ano se for outro). `None` = data ilegível.
-fn age(at: &str, now: DateTime<Utc>) -> Option<Age> {
+pub(crate) fn age(at: &str, now: DateTime<Utc>) -> Option<Age> {
     let at = DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc);
     let secs = (now - at).num_seconds().max(0);
     Some(match secs {
@@ -1187,25 +1136,6 @@ fn body_text(ui: &mut Ui, text: &str, color: Color32) {
     );
 }
 
-/// Texto numa linha, com reticências além de `width`.
-fn one_line(
-    ui: &Ui,
-    text: &str,
-    font: FontId,
-    color: Color32,
-    width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
-    ui.painter().layout_job(job)
-}
-
-/// Nó AccessKit `Pane` com o rótulo do artboard (aria-label).
-fn pane(ui: &mut Ui, rect: Rect, label: &str) {
-    ui.interact(rect, ui.id().with(label), Sense::hover())
-        .widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, label));
-}
-
 fn group_head(ui: &mut Ui, rect: Rect, scope: &str, n: usize) {
     let p = theme::palette(ui.visuals());
     let painter = ui.painter();
@@ -1218,7 +1148,7 @@ fn group_head(ui: &mut Ui, rect: Rect, scope: &str, n: usize) {
     let font = FontId::new(11., theme::semibold());
     let count = painter.layout_no_wrap(number(n), font.clone(), p.text2);
     let right = rect.right() - 16.;
-    let name = one_line(
+    let name = widgets::one_line(
         ui,
         scope,
         font,
@@ -1247,86 +1177,12 @@ fn group_head(ui: &mut Ui, rect: Rect, scope: &str, n: usize) {
 
 /// Mensagem no centro de uma área vazia.
 fn empty(ui: &mut Ui, rect: Rect, title: &str, subtitle: &str) {
-    let p = theme::palette(ui.visuals());
     let mut child = ui.new_child(
         UiBuilder::new()
             .max_rect(rect.shrink(space::L))
             .layout(Layout::top_down(Align::Center)),
     );
-    child.add_space(space::XL);
-    child.label(RichText::new(title).font(Type::Section.font()));
-    child.add(Label::new(RichText::new(subtitle).size(12.).color(p.text2)).wrap());
-}
-
-/// Cabeçalho (11 px, text2) e linhas de 36 px com divisória; só as linhas
-/// visíveis são montadas. As larguras saem de `ui.max_rect()` a cada frame.
-fn table(
-    ui: &mut Ui,
-    id: &str,
-    columns: &[Column],
-    rows: usize,
-    top: bool,
-    mut cell: impl FnMut(&mut Ui, usize, usize),
-) {
-    let p = theme::palette(ui.visuals());
-    let rect = ui.max_rect();
-    let fixed: f32 = columns.iter().filter_map(|c| c.width).sum();
-    let flex = (rect.width() - fixed).max(FLEX_MIN);
-    let widths: Vec<f32> = columns.iter().map(|c| c.width.unwrap_or(flex)).collect();
-    let mut x = rect.left();
-    for (column, width) in columns.iter().zip(&widths) {
-        let at = Rect::from_min_size(pos2(x, rect.top()), vec2(*width, TABLE_HEAD))
-            .shrink2(vec2(CELL_PAD, 0.));
-        ui.new_child(
-            UiBuilder::new()
-                .max_rect(at)
-                .layout(Layout::left_to_right(Align::Center)),
-        )
-        .add(Label::new(RichText::new(column.title).size(11.).color(p.text2)).truncate());
-        x += width;
-    }
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top() + TABLE_HEAD - 0.5,
-        Stroke::new(1.0_f32, p.line),
-    );
-    let body = Rect::from_min_max(pos2(rect.left(), rect.top() + TABLE_HEAD), rect.max);
-    let mut child = ui.new_child(
-        UiBuilder::new()
-            .max_rect(body)
-            .layout(Layout::top_down(Align::Min)),
-    );
-    let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false);
-    if top {
-        area = area.vertical_scroll_offset(0.);
-    }
-    area.show_viewport(&mut child, |ui, viewport| {
-        ui.set_height(TABLE_ROW * rows as f32);
-        let content = ui.max_rect();
-        let first = (viewport.min.y / TABLE_ROW).floor().max(0.) as usize;
-        let last = ((viewport.max.y / TABLE_ROW).ceil().max(0.) as usize).min(rows);
-        for row in first..last {
-            let y = content.top() + row as f32 * TABLE_ROW;
-            let mut x = content.left();
-            for (column, width) in widths.iter().enumerate() {
-                let at = Rect::from_min_size(pos2(x, y), vec2(*width, TABLE_ROW))
-                    .shrink2(vec2(CELL_PAD, 0.));
-                let mut cell_ui = ui.new_child(
-                    UiBuilder::new()
-                        .id_salt((row, column))
-                        .max_rect(at)
-                        .layout(Layout::left_to_right(Align::Center)),
-                );
-                cell(&mut cell_ui, row, column);
-                x += width;
-            }
-            ui.painter().hline(
-                content.x_range(),
-                y + TABLE_ROW - 0.5,
-                Stroke::new(1.0_f32, p.line),
-            );
-        }
-    });
+    widgets::empty(&mut child, title, subtitle);
 }
 
 /// Tabela vazia: a mensagem embaixo do cabeçalho.
@@ -1359,10 +1215,11 @@ fn sessions_table(ui: &mut Ui, api: &ApiSnapshot, rows: &[&Session], top: bool) 
             .y
     };
     let two_lines = height(FontId::proportional(13.)) + height(Type::Mono.font());
-    table(
+    widgets::table(
         ui,
         "sessions-table",
         &SESSION_COLUMNS,
+        TABLE,
         rows.len(),
         top,
         |ui, row, column| {
@@ -1415,10 +1272,11 @@ fn sessions_table(ui: &mut Ui, api: &ApiSnapshot, rows: &[&Session], top: bool) 
 
 fn projects_table(ui: &mut Ui, api: &ApiSnapshot, rows: &[&Project], top: bool) {
     let dash = |n: Option<u64>| n.map_or_else(|| "—".to_owned(), |n| number(n as usize));
-    table(
+    widgets::table(
         ui,
         "projects-table",
         &PROJECT_COLUMNS,
+        TABLE,
         rows.len(),
         top,
         |ui, row, column| {
@@ -1456,7 +1314,9 @@ fn projects_table(ui: &mut Ui, api: &ApiSnapshot, rows: &[&Project], top: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::tests::{THEMES, context, node, nodes, rect_of, rects, run_sized, texts};
+    use crate::widgets::tests::{
+        THEMES, click_frames, context, node, nodes, rect_of, rects, run_sized, texts,
+    };
     use chrono::TimeZone;
     use egui::{
         Event, Pos2,
@@ -1547,16 +1407,13 @@ mod tests {
         fn show(&mut self) -> egui::FullOutput {
             self.frame(vec![])
         }
-        /// Clique completo; devolve o frame em que ele acontece (o de soltar).
+        /// Clique completo (`click_frames`); devolve o frame em que ele
+        /// acontece (o de soltar).
         fn click(&mut self, pos: Pos2) -> egui::FullOutput {
-            let press = |pressed| Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
-            };
-            self.frame(vec![Event::PointerMoved(pos), press(true)]);
-            self.frame(vec![press(false)])
+            let [arrive, press, release] = click_frames(pos);
+            self.frame(arrive);
+            self.frame(press);
+            self.frame(release)
         }
         fn click_on(&mut self, role: Role, text: &str) -> egui::FullOutput {
             let out = self.show();
@@ -1641,30 +1498,59 @@ mod tests {
             session("s-b", "ws / p1", true),
             session("s-c", "ws / p1", false),
         ];
-        let projects = vec![Project::default(); 14];
+        // Sessões abertas = a soma dos vínculos por projeto da API (14 × 5),
+        // não as 3 linhas abertas da lista carregada.
+        let projects = vec![
+            Project {
+                open_session_count: Some(5),
+                ..Default::default()
+            };
+            14
+        ];
+        let mut one_unknown = projects.clone();
+        one_unknown[7].open_session_count = None;
         let listed = |n: usize| vec![Handoff::default(); n];
-        // (caso, coleta?, total do servidor, listados, [Handoffs, Sessões abertas, Projetos])
-        for (case, at, total, handoffs, want) in [
-            ("no collection", None, None, 3, ["—", "—", "—"]),
+        // (caso, coleta?, total do servidor, listados, projetos, [Handoffs,
+        // Sessões abertas, Projetos])
+        for (case, at, total, handoffs, projects, want) in [
+            (
+                "no collection",
+                None,
+                None,
+                3,
+                projects.clone(),
+                ["—", "—", "—"],
+            ),
             (
                 "server total",
                 Some(now),
                 Some(1234),
                 3,
-                ["1.234", "3", "14"],
+                projects.clone(),
+                ["1.234", "70", "14"],
             ),
             (
                 "list only, may be cut",
                 Some(now),
                 None,
                 200,
-                ["200+", "3", "14"],
+                projects.clone(),
+                ["200+", "70", "14"],
+            ),
+            (
+                "a project without the open count",
+                Some(now),
+                Some(1234),
+                3,
+                one_unknown,
+                ["1.234", "—", "14"],
             ),
             (
                 "total before the collection flag",
                 None,
                 Some(5),
                 0,
+                projects.clone(),
                 ["5", "—", "—"],
             ),
         ] {
@@ -1673,7 +1559,7 @@ mod tests {
                 handoff_total: total,
                 handoffs: listed(handoffs),
                 sessions: sessions.clone(),
-                projects: projects.clone(),
+                projects,
                 ..Default::default()
             };
             let mut page = Page::new(egui::Theme::Dark, WIDE, api, now);
@@ -1700,10 +1586,16 @@ mod tests {
         let now = Utc::now();
         for (theme, _) in THEMES {
             let mut api = collected(abc(now));
-            api.projects = vec![Project::default(); 2];
+            api.projects = vec![
+                Project {
+                    open_session_count: Some(4),
+                    ..Default::default()
+                };
+                2
+            ];
             let mut page = Page::new(theme, WIDE, api, now);
             for (segment, tab) in [
-                ("Sessões abertas 0", Tab::Sessions),
+                ("Sessões abertas 8", Tab::Sessions),
                 ("Projetos 2", Tab::Projects),
                 ("Handoffs 3", Tab::Handoffs),
             ] {

@@ -22,6 +22,7 @@ mod menu_bar;
 mod model;
 mod monitor;
 mod operations_ui;
+mod overview_ui;
 mod platform;
 #[cfg(target_os = "linux")]
 mod portal;

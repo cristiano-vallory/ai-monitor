@@ -60,6 +60,16 @@ impl Overall {
             Overall::Healthy => "Saudável",
         }
     }
+    /// Fundo e cor do ícone do estado (também a faixa de saúde da Visão
+    /// geral).
+    pub(crate) fn tone(&self, p: &theme::Palette) -> (Color32, Color32) {
+        match self {
+            Overall::Healthy => (p.sel, p.acc),
+            Overall::Alerts(_) | Overall::Stale => (widgets::tone(p.warn, 0.12), p.warn),
+            Overall::Unavailable(_) => (widgets::tone(p.bad, 0.08), p.bad),
+            Overall::Waiting => (p.surf2, p.text2),
+        }
+    }
     pub(crate) fn subtitle(&self) -> String {
         let hint = crate::platform::HEALTH_ALERT_HINT;
         match self {
@@ -231,12 +241,7 @@ fn size(v: &Value) -> String {
 /// Ícone de estado num círculo de 40 px, título, subtítulo e a identidade.
 fn status_card(ui: &mut Ui, state: &Overall, identity: Option<&health::Identity>) {
     let p = theme::palette(ui.visuals());
-    let (fill, color) = match state {
-        Overall::Healthy => (p.sel, p.acc),
-        Overall::Alerts(_) | Overall::Stale => (widgets::tone(p.warn, 0.12), p.warn),
-        Overall::Unavailable(_) => (widgets::tone(p.bad, 0.08), p.bad),
-        Overall::Waiting => (p.surf2, p.text2),
-    };
+    let (fill, color) = state.tone(p);
     let dash = |v: &str| {
         if v.is_empty() {
             "—".to_owned()
@@ -324,7 +329,12 @@ fn identity_grid(ui: &mut Ui, rows: &[(&str, String); 3]) {
             }
         });
 }
-fn state_icon(painter: &egui::Painter, rect: egui::Rect, state: &Overall, color: Color32) {
+pub(crate) fn state_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    state: &Overall,
+    color: Color32,
+) {
     let clock = |painter: &egui::Painter| {
         painter.circle_stroke(
             rect.center(),
