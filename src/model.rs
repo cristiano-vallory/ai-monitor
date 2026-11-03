@@ -16,6 +16,29 @@ pub struct Config {
     pub human: Option<crate::auth::Session>,
     pub remember_token: bool,
     pub proposal_watch: Option<crate::client::Scope>,
+    pub theme: Appearance,
+}
+
+/// Aparência escolhida em Conexão. Um valor desconhecido ou de tipo errado
+/// no disco vira `System` sem derrubar a leitura do resto da configuração.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+impl<'de> Deserialize<'de> for Appearance {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match serde_json::Value::deserialize(deserializer)?.as_str() {
+                Some("light") => Self::Light,
+                Some("dark") => Self::Dark,
+                _ => Self::System,
+            },
+        )
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -66,6 +89,7 @@ impl Default for Config {
             human: None,
             remember_token: false,
             proposal_watch: None,
+            theme: Appearance::System,
         }
     }
 }
@@ -187,36 +211,191 @@ impl Config {
         self.save_to(&Self::path())
     }
     pub fn save_to(&self, path: &std::path::Path) -> Result<(), String> {
-        let Some(parent) = path.parent().filter(|_| path.is_absolute()) else {
-            return Err("Diretório HOME indisponível para salvar a configuração.".into());
-        };
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         let mut normalized = self.clone();
         normalized.normalize();
-        let bytes = serde_json::to_vec_pretty(&normalized).unwrap();
-        #[cfg(unix)]
-        {
-            use std::{
-                io::Write,
-                os::unix::fs::{OpenOptionsExt, PermissionsExt},
-            };
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .mode(0o600)
-                .open(&tmp)
-                .map_err(|e| e.to_string())?;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-            file.write_all(&bytes).map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
-        }
-        #[cfg(not(unix))]
-        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(tmp, path).map_err(|e| e.to_string())
+        write_private(path, &serde_json::to_vec_pretty(&normalized).unwrap())
     }
+}
+
+const NO_HOME: &str = "Diretório HOME indisponível para salvar a configuração.";
+
+/// Gravação atômica (tmp + rename) com permissão 0600, para a config inteira
+/// e para a troca de tema.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let Some(parent) = path.parent().filter(|_| path.is_absolute()) else {
+        return Err(NO_HOME.into());
+    };
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    #[cfg(unix)]
+    {
+        use std::{
+            io::Write,
+            os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+}
+
+pub fn save_theme(theme: Appearance) -> Result<(), String> {
+    save_theme_to(&Config::path(), theme)
+}
+
+/// Grava só a chave `theme`: os demais bytes do arquivo ficam como estão,
+/// inclusive chaves desconhecidas e um endpoint vindo do ambiente nunca vai
+/// para o disco por aqui. Arquivo ilegível, JSON inválido ou que não seja
+/// objeto não é tocado; o erro volta para a tela e o tema vale só na sessão.
+pub fn save_theme_to(path: &std::path::Path, theme: Appearance) -> Result<(), String> {
+    use serde_json::Value;
+    if !path.is_absolute() {
+        return Err(NO_HOME.into());
+    }
+    let value = serde_json::to_string(&theme).unwrap();
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let fresh = serde_json::json!({ "theme": theme });
+            return write_private(path, &serde_json::to_vec_pretty(&fresh).unwrap());
+        }
+        Err(e) => {
+            return Err(format!(
+                "Tema aplicado só nesta sessão: não foi possível ler a configuração ({e})."
+            ));
+        }
+    };
+    let invalid = || {
+        "Tema aplicado só nesta sessão: a configuração em disco não é um objeto JSON válido e não foi alterada."
+            .to_owned()
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(invalid());
+    };
+    let Ok(Value::Object(mut expected)) = serde_json::from_str::<Value>(&text) else {
+        return Err(invalid());
+    };
+    expected.insert("theme".into(), serde_json::to_value(theme).unwrap());
+    // A edição é textual; antes de gravar, o resultado tem de ler como o
+    // objeto original com o tema trocado.
+    match patch_theme(&text, &value) {
+        Some(patched)
+            if serde_json::from_str::<Value>(&patched).ok() == Some(Value::Object(expected)) =>
+        {
+            write_private(path, patched.as_bytes())
+        }
+        _ => Err("Tema aplicado só nesta sessão: não foi possível trocar só o tema sem alterar o resto da configuração; nada foi gravado.".into()),
+    }
+}
+
+/// Troca o valor de todo membro `"theme"` do objeto de topo, ou insere um no
+/// fim, mexendo só nesses bytes. Supõe JSON já validado; `None` se não for.
+fn patch_theme(text: &str, value: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let skip_ws = |mut i: usize| {
+        while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    let string_end = |mut i: usize| -> Option<usize> {
+        i += 1;
+        loop {
+            match *b.get(i)? {
+                b'"' => return Some(i + 1),
+                b'\\' => i += 2,
+                _ => i += 1,
+            }
+        }
+    };
+    let value_end = |mut i: usize| -> Option<usize> {
+        match *b.get(i)? {
+            b'"' => string_end(i),
+            b'{' | b'[' => {
+                let mut depth = 0usize;
+                loop {
+                    match *b.get(i)? {
+                        b'"' => {
+                            i = string_end(i)?;
+                            continue;
+                        }
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth = depth.checked_sub(1)?;
+                            if depth == 0 {
+                                return Some(i + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            _ => {
+                while b
+                    .get(i)
+                    .is_some_and(|c| !matches!(c, b',' | b'}' | b']') && !c.is_ascii_whitespace())
+                {
+                    i += 1;
+                }
+                Some(i)
+            }
+        }
+    };
+    let open = skip_ws(0);
+    if b.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut i = open + 1;
+    let mut spans = Vec::new();
+    let mut last_value_end = None;
+    loop {
+        i = skip_ws(i);
+        match *b.get(i)? {
+            b'}' => break,
+            b'"' => {}
+            _ => return None,
+        }
+        let key_end = string_end(i)?;
+        let key: String = serde_json::from_str(text.get(i..key_end)?).ok()?;
+        i = skip_ws(key_end);
+        if b.get(i) != Some(&b':') {
+            return None;
+        }
+        let start = skip_ws(i + 1);
+        i = value_end(start)?;
+        if key == "theme" {
+            spans.push((start, i));
+        }
+        last_value_end = Some(i);
+        i = skip_ws(i);
+        if b.get(i) == Some(&b',') {
+            i += 1;
+        }
+    }
+    let mut out = text.to_owned();
+    if spans.is_empty() {
+        match last_value_end {
+            Some(end) => out.insert_str(end, &format!(",\n  \"theme\": {value}")),
+            None => out.insert_str(open + 1, &format!("\"theme\": {value}")),
+        }
+    } else {
+        for (start, end) in spans.into_iter().rev() {
+            out.replace_range(start..end, value);
+        }
+    }
+    Some(out)
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -411,17 +590,78 @@ pub fn bytes(n: u64) -> String {
     } else if n >= 1 << 10 {
         (n as f64 / 1024., "KiB")
     } else {
-        return format!("{n} B");
+        return format!("{} B", number(n as usize));
     };
-    format!("{n:.1} {suffix}")
+    format!("{} {suffix}", decimal(n, 1))
 }
 
 pub fn number(n: usize) -> String {
-    let s = n.to_string();
-    s.chars()
+    group(&n.to_string())
+}
+
+/// Decimal em pt-BR: vírgula decimal e ponto de milhar. O arredondamento é
+/// feito antes de agrupar, então 999,95 com uma casa vira `1.000,0`.
+pub fn decimal(x: f64, places: usize) -> String {
+    if !x.is_finite() {
+        return "—".into();
+    }
+    let fixed = format!("{:.*}", places, x.abs());
+    let (int, frac) = fixed.split_once('.').unwrap_or((&fixed, ""));
+    // Sem "-0,0": o sinal só aparece se sobrar algum dígito diferente de zero.
+    let negative = x < 0. && fixed.bytes().any(|b| matches!(b, b'1'..=b'9'));
+    let mut out = String::from(if negative { "-" } else { "" });
+    out.push_str(&group(int));
+    if !frac.is_empty() {
+        out.push(',');
+        out.push_str(frac);
+    }
+    out
+}
+
+/// Como `decimal`, com até `max_places` casas e sem zeros à direita: inteiros
+/// saem sem vírgula (`1.000`), frações curtas (`1.234,5`).
+pub fn decimal_up_to(x: f64, max_places: usize) -> String {
+    let s = decimal(x, max_places);
+    match s.split_once(',') {
+        Some((int, frac)) => match frac.trim_end_matches('0') {
+            "" => int.to_owned(),
+            frac => format!("{int},{frac}"),
+        },
+        None => s,
+    }
+}
+
+/// Valor de métrica em pt-BR: até 3 casas a partir de 1; abaixo de 1, 3
+/// algarismos significativos; nunca mostra um valor não nulo como zero.
+pub fn metric_value(x: f64) -> String {
+    if !x.is_finite() {
+        return "—".into();
+    }
+    let a = x.abs();
+    if a == 0. {
+        return "0".into();
+    }
+    if a >= 1. {
+        return decimal_up_to(x, 3);
+    }
+    if a >= 1e-9 {
+        // 3 algarismos significativos: 2 casas além da primeira não nula.
+        return decimal_up_to(x, (2. - a.log10().floor()) as usize);
+    }
+    // Abaixo de 1e-9 a forma decimal passaria de 11 casas: usa a científica.
+    let sci = format!("{x:.2e}");
+    let (mantissa, exponent) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let mantissa = mantissa.replace('.', ",");
+    let mantissa = mantissa.trim_end_matches('0').trim_end_matches(',');
+    format!("{mantissa}e{exponent}")
+}
+
+fn group(digits: &str) -> String {
+    digits
+        .chars()
         .enumerate()
         .fold(String::new(), |mut out, (i, c)| {
-            if i > 0 && (s.len() - i).is_multiple_of(3) {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
                 out.push('.');
             }
             out.push(c);
@@ -719,5 +959,340 @@ mod tests {
             ),
             PathBuf::from("/Users/u/Library/Application Support/AI Monitor/config.json")
         );
+    }
+
+    // Campos fora do padrão: se a config do disco cair inteira no default,
+    // endpoint, contêiner e intervalos denunciam.
+    const CUSTOM: &str = r#""endpoint":"http://192.168.0.10:49374","container":"custom-ai","resource_seconds":7,"api_seconds":42"#;
+    fn assert_custom_fields_kept(loaded: &Config, case: &str) {
+        assert_eq!(loaded.endpoint, "http://192.168.0.10:49374", "{case}");
+        assert_eq!(loaded.container, "custom-ai", "{case}");
+        assert_eq!(loaded.resource_seconds, 7, "{case}");
+        assert_eq!(loaded.api_seconds, 42, "{case}");
+    }
+
+    #[test]
+    fn theme_defaults_to_system_and_each_choice_roundtrips() {
+        assert_eq!(Config::default().theme, Appearance::System);
+        let old = format!("{{{CUSTOM}}}");
+        let loaded = Config::from_sources(Some(old.as_bytes()), None, None);
+        assert_custom_fields_kept(&loaded, "config without theme");
+        assert_eq!(loaded.theme, Appearance::System, "missing field → System");
+
+        for (theme, wire) in [
+            (Appearance::System, "system"),
+            (Appearance::Light, "light"),
+            (Appearance::Dark, "dark"),
+        ] {
+            // Um membro novo do enum tem de aparecer nesta matriz.
+            match theme {
+                Appearance::System | Appearance::Light | Appearance::Dark => {}
+            }
+            let config = Config {
+                theme,
+                ..Config::from_sources(Some(old.as_bytes()), None, None)
+            };
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["theme"], wire);
+            let bytes = serde_json::to_vec(&config).unwrap();
+            let loaded = Config::from_sources(Some(&bytes), None, None);
+            assert_custom_fields_kept(&loaded, wire);
+            assert_eq!(loaded.theme, theme, "{wire} must roundtrip");
+        }
+    }
+
+    #[test]
+    fn invalid_theme_becomes_system_without_discarding_the_rest_of_the_config() {
+        for bad in [
+            r#""purple""#,
+            "42",
+            "null",
+            "true",
+            "[]",
+            r#"{"a":1}"#,
+            r#""Dark""#,
+        ] {
+            let disk = format!(r#"{{{CUSTOM},"theme":{bad}}}"#);
+            let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+            assert_custom_fields_kept(&loaded, bad);
+            assert_eq!(loaded.theme, Appearance::System, "theme={bad}");
+        }
+        // Valor válido ao lado dos mesmos campos: prova que o teste acima não
+        // passa só porque o tema nunca é lido.
+        let disk = format!(r#"{{{CUSTOM},"theme":"light"}}"#);
+        let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+        assert_eq!(loaded.theme, Appearance::Light);
+    }
+
+    #[test]
+    fn decimal_uses_pt_br_separators_rounding_carry_and_sign() {
+        for (x, places, want) in [
+            (0., 1, "0,0"),
+            (0., 0, "0"),
+            (0.04, 1, "0,0"),
+            (0.05, 1, "0,1"),
+            (159.24, 1, "159,2"),
+            (999.95, 1, "1.000,0"),
+            (999.5, 0, "1.000"),
+            (1234.5, 1, "1.234,5"),
+            (-1234.5, 1, "-1.234,5"),
+            (-0.04, 1, "0,0"),
+            (-0.0, 1, "0,0"),
+            (1e12, 1, "1.000.000.000.000,0"),
+            (1234.567, 2, "1.234,57"),
+            (f64::NAN, 1, "—"),
+            (f64::INFINITY, 1, "—"),
+            (f64::NEG_INFINITY, 0, "—"),
+        ] {
+            assert_eq!(decimal(x, places), want, "decimal({x}, {places})");
+        }
+    }
+
+    #[test]
+    fn bytes_and_number_group_thousands_in_pt_br() {
+        for (n, want) in [
+            (0, "0 B"),
+            (1023, "1.023 B"),
+            (1024, "1,0 KiB"),
+            (3 << 29, "1,5 GiB"),
+            (u64::MAX, "17.179.869.184,0 GiB"),
+        ] {
+            assert_eq!(bytes(n), want, "bytes({n})");
+        }
+        for (n, want) in [
+            (0, "0"),
+            (999, "999"),
+            (1000, "1.000"),
+            (1_000_000, "1.000.000"),
+            (usize::MAX, "18.446.744.073.709.551.615"),
+        ] {
+            assert_eq!(number(n), want, "number({n})");
+        }
+    }
+
+    #[test]
+    fn decimal_up_to_trims_zeros_and_groups_integers() {
+        for (x, want) in [
+            (0., "0"),
+            (1000., "1.000"),
+            (1234.5, "1.234,5"),
+            (0.1 + 0.2, "0,3"),
+            (1e-7, "0"),
+            (-1e-7, "0"),
+            (-1234.5, "-1.234,5"),
+            (0.125, "0,125"),
+            (2.0005, "2,001"),
+            (999.9996, "1.000"),
+            (1e21, "1.000.000.000.000.000.000.000"),
+            (f64::NAN, "—"),
+            (f64::INFINITY, "—"),
+            (f64::NEG_INFINITY, "—"),
+        ] {
+            assert_eq!(decimal_up_to(x, 3), want, "decimal_up_to({x:e}, 3)");
+        }
+    }
+
+    #[test]
+    fn metric_value_table_never_shows_a_nonzero_value_as_zero() {
+        for (x, want) in [
+            (0., "0"),
+            (-0., "0"),
+            (1., "1"),
+            (1234.5, "1.234,5"),
+            (-1234.5, "-1.234,5"),
+            (1e21, "1.000.000.000.000.000.000.000"),
+            (0.5, "0,5"),
+            (0.1 + 0.2, "0,3"),
+            (0.123456, "0,123"),
+            (0.0012345, "0,00123"),
+            (0.001, "0,001"),
+            (0.0003, "0,0003"),
+            (-0.00042, "-0,00042"),
+            (1e-7, "0,0000001"),
+            (1e-9, "0,000000001"),
+            (0.99996, "1"),
+            (0.0009996, "0,001"),
+            (9.99e-10, "9,99e-10"),
+            (1.5e-12, "1,5e-12"),
+            (-1.5e-12, "-1,5e-12"),
+            (f64::MIN_POSITIVE, "2,23e-308"),
+            // Menor subnormal (4,9406…e-324): `{:.2e}` dá 4,94.
+            (5e-324, "4,94e-324"),
+            (f64::NAN, "—"),
+            (f64::INFINITY, "—"),
+            (f64::NEG_INFINITY, "—"),
+        ] {
+            assert_eq!(metric_value(x), want, "metric_value({x:e})");
+        }
+    }
+
+    #[test]
+    fn metric_value_invariants_hold_for_every_decade() {
+        let parse = |s: String| s.parse::<f64>().unwrap();
+        let mut samples = Vec::new();
+        for k in -323..=20 {
+            samples.push(parse(format!("1e{k}")));
+        }
+        for k in -300..=-1 {
+            samples.push(parse(format!("3e{k}")));
+            samples.push(parse(format!("9.99e{k}")));
+        }
+        // Entrada que arredonda para zero no parse não provaria nada.
+        assert!(samples.iter().all(|x| *x > 0.));
+        assert_eq!(samples.len(), 344 + 2 * 300);
+        for x in samples.into_iter().flat_map(|x| [x, -x]) {
+            let out = metric_value(x);
+            // Algum dígito 1-9 na mantissa descarta "0", "-0" e "0,0…".
+            let mantissa = out.split('e').next().unwrap();
+            assert!(
+                mantissa.bytes().any(|b| matches!(b, b'1'..=b'9')),
+                "metric_value({x:e}) = {out:?} parece zero"
+            );
+            if x.abs() < 1. {
+                assert!(
+                    !out.contains('.'),
+                    "metric_value({x:e}) = {out:?} agrupa milhar abaixo de 1"
+                );
+            }
+            assert_eq!(
+                out.contains('e'),
+                x.abs() < 1e-9,
+                "metric_value({x:e}) = {out:?}: notação científica só abaixo de 1e-9"
+            );
+        }
+    }
+
+    /// Diretório temporário só deste teste; apagado ao sair.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("ai-monitor-theme-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // Formatação fora do padrão do serde_json (espaços, 2.50, \u00e9, chave
+    // desconhecida e ordem própria): qualquer regravação via Value a mudaria.
+    const HAND_EDITED: &str = "{\n  \"endpoint\" : \"http://192.168.0.10:49374\",\n  \"future_key\": {\"nested\": [1, 2.50, \"\\u00e9\"]},\n  \"theme\": \"light\",\n  \"api_seconds\": 42\n}\n";
+
+    #[test]
+    fn save_theme_replaces_only_the_theme_bytes() {
+        let dir = TempDir::new("replace");
+        let path = dir.0.join("config.json");
+        std::fs::write(&path, HAND_EDITED).unwrap();
+        save_theme_to(&path, Appearance::Dark).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            HAND_EDITED.replace("\"theme\": \"light\"", "\"theme\": \"dark\"")
+        );
+    }
+
+    #[test]
+    fn save_theme_inserts_the_key_and_keeps_every_other_byte() {
+        let dir = TempDir::new("insert");
+        let path = dir.0.join("config.json");
+        let without = HAND_EDITED.replace("  \"theme\": \"light\",\n", "");
+        std::fs::write(&path, &without).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        save_theme_to(&path, Appearance::Light).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            without.replace(
+                "\"api_seconds\": 42\n}",
+                "\"api_seconds\": 42,\n  \"theme\": \"light\"\n}"
+            )
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "same permissions as save_to");
+        }
+        let loaded = Config::from_sources(Some(&std::fs::read(&path).unwrap()), None, None);
+        assert_eq!(loaded.endpoint, "http://192.168.0.10:49374");
+        assert_eq!(loaded.api_seconds, 42);
+        assert_eq!(loaded.theme, Appearance::Light);
+
+        for (seed, want) in [
+            ("{}", "{\"theme\": \"dark\"}"),
+            (" { } ", " {\"theme\": \"dark\" } "),
+            (
+                r#"{"theme":"light","x":1,"theme":"system"}"#,
+                r#"{"theme":"dark","x":1,"theme":"dark"}"#,
+            ),
+            (
+                r#"{"a":"}\"{","theme":null}"#,
+                r#"{"a":"}\"{","theme":"dark"}"#,
+            ),
+        ] {
+            std::fs::write(&path, seed).unwrap();
+            save_theme_to(&path, Appearance::Dark).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn save_theme_creates_a_missing_file_with_only_the_theme() {
+        let dir = TempDir::new("missing");
+        let path = dir.0.join("nested/config.json");
+        save_theme_to(&path, Appearance::Dark).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"theme\": \"dark\"\n}"
+        );
+        assert!(
+            save_theme_to(
+                std::path::Path::new("relative/config.json"),
+                Appearance::Dark
+            )
+            .is_err()
+        );
+        assert!(!std::path::Path::new("relative/config.json").exists());
+    }
+
+    #[test]
+    fn save_theme_never_overwrites_an_unreadable_invalid_or_non_object_file() {
+        let dir = TempDir::new("invalid");
+        let path = dir.0.join("config.json");
+        for seed in [
+            &b"[]"[..],
+            b"\"x\"",
+            b"42",
+            b"null",
+            b"",
+            b"{\"endpoint\": ",
+            b"{\"a\":1} trailing",
+            b"\xEF\xBB\xBF{\"a\":1}",
+            b"{\"a\":\"\xff\"}",
+        ] {
+            std::fs::write(&path, seed).unwrap();
+            let result = save_theme_to(&path, Appearance::Dark);
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                seed,
+                "file must stay intact: {}",
+                String::from_utf8_lossy(seed)
+            );
+            let err = result.unwrap_err();
+            assert!(err.contains("só nesta sessão"), "{err}");
+        }
+        // Um diretório no lugar do arquivo: ilegível como texto.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = save_theme_to(&path, Appearance::Dark).unwrap_err();
+        assert!(err.contains("não foi possível ler"), "{err}");
+        assert!(path.is_dir());
     }
 }

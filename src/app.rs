@@ -1,4 +1,4 @@
-use crate::{model::*, monitor::Shared};
+use crate::{model::*, monitor::Shared, theme};
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use egui_extras::{Column, TableBuilder};
@@ -35,15 +35,6 @@ fn keychain_change<'a>(current: &'a Config, draft: &'a Config) -> KeychainChange
         KeychainChange::Keep
     }
 }
-
-const BG: Color32 = Color32::from_rgb(15, 18, 24);
-const PANEL: Color32 = Color32::from_rgb(23, 28, 36);
-const LINE: Color32 = Color32::from_rgb(43, 51, 63);
-const TEXT: Color32 = Color32::from_rgb(229, 235, 242);
-const MUTED: Color32 = Color32::from_rgb(139, 153, 171);
-const GREEN: Color32 = Color32::from_rgb(102, 224, 184);
-const BLUE: Color32 = Color32::from_rgb(116, 164, 255);
-const AMBER: Color32 = Color32::from_rgb(244, 190, 103);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -84,34 +75,53 @@ pub struct MonitorApp {
     management: crate::management_ui::Management,
     authentication: crate::auth::Panel,
     operations: crate::operations_ui::Panel,
+    /// Último `SetTheme` enviado à janela nativa; `None` = nada enviado ao
+    /// contexto atual.
+    window_theme: Option<egui::SystemTheme>,
 }
 
 impl MonitorApp {
-    pub(crate) fn apply_style(ctx: &egui::Context) {
-        let mut style = (*ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = BG;
-        style.visuals.window_fill = PANEL;
-        style.visuals.extreme_bg_color = BG;
-        style.visuals.faint_bg_color = Color32::from_rgb(27, 32, 41);
-        style.visuals.override_text_color = Some(TEXT);
-        style.visuals.selection.bg_fill = Color32::from_rgb(39, 70, 65);
-        style.visuals.selection.stroke = Stroke::new(1.0_f32, GREEN);
-        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(33, 40, 51);
-        style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(33, 40, 51);
-        style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, LINE);
-        style.spacing.item_spacing = Vec2::new(10., 10.);
-        style.spacing.button_padding = Vec2::new(12., 8.);
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.));
-        ctx.set_style(style);
+    /// Aplica o tema resolvido a `ctx` e à janela nativa (barra de título;
+    /// decorações CSD no Linux). Cada um só é enviado quando muda.
+    pub(crate) fn apply_theme(&mut self, ctx: &egui::Context) {
+        let platform = theme::platform_theme();
+        let wanted = theme::resolve(self.config.theme, platform);
+        if ctx.options(|o| o.theme_preference) != wanted {
+            ctx.set_theme(wanted);
+        }
+        let window = theme::window_theme(self.config.theme, platform);
+        if self.window_theme != Some(window) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(window));
+            self.window_theme = Some(window);
+        }
+    }
+    /// Janela nova no Linux: o contexto é outro e ainda não recebeu nada.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attach(&mut self, ctx: &egui::Context) {
+        self.window_theme = None;
+        self.apply_theme(ctx);
+    }
+    /// Troca de aparência: vale na hora, grava só o tema (`save_theme`) sem
+    /// reconectar e não mexe no rascunho do usuário além do próprio tema.
+    fn choose_theme(
+        &mut self,
+        choice: Appearance,
+        save: impl FnOnce(Appearance) -> Result<(), String>,
+    ) {
+        self.config.theme = choice;
+        self.draft.theme = choice;
+        self.shared.config.write().unwrap().theme = choice;
+        if let Err(e) = save(choice) {
+            self.settings_message = e;
+        }
+    }
+    fn restore_defaults(&mut self) {
+        self.draft = Config {
+            theme: self.config.theme,
+            ..Config::default()
+        };
+        self.settings_message =
+            "Campos restaurados ao padrão. Clique em Salvar e conectar para aplicar.".into();
     }
     fn build(config: Config, shared: Arc<Shared>) -> Self {
         let central = crate::console::Console::new(shared.clone());
@@ -120,6 +130,7 @@ impl MonitorApp {
         Self {
             management,
             operations,
+            window_theme: None,
             authentication: crate::auth::Panel::new(),
             central,
             health: Default::default(),
@@ -148,9 +159,10 @@ impl MonitorApp {
     }
     #[cfg(target_os = "macos")]
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
-        Self::apply_style(&cc.egui_ctx);
+        theme::install(&cc.egui_ctx);
         let shared = Shared::start(config.clone());
         let mut app = Self::build(config, shared.clone());
+        app.apply_theme(&cc.egui_ctx);
         app.menu_bar = crate::menu_bar::MenuBar::new(
             cc.egui_ctx.clone(),
             shared,
@@ -159,8 +171,8 @@ impl MonitorApp {
         app
     }
     /// Construtor Linux: reutiliza o Shared já iniciado (a janela é criada e
-    /// destruída sob demanda; o app e os coletores vivem no processo). O
-    /// estilo de cada janela é aplicado por linux::prepare_window.
+    /// destruída sob demanda; o app e os coletores vivem no processo). Fontes,
+    /// estilos e tema de cada janela são aplicados por linux::prepare_window.
     #[cfg(target_os = "linux")]
     pub fn for_shared(shared: Arc<Shared>) -> Self {
         let config = shared.config.read().unwrap().clone();
@@ -193,19 +205,16 @@ impl MonitorApp {
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
+        let p = theme::palette(&ctx.style().visuals);
         egui::SidePanel::left("sidebar")
             .exact_width(198.)
             .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(19, 23, 30))
-                    .inner_margin(20),
-            )
+            .frame(egui::Frame::new().fill(p.side).inner_margin(20))
             .show(ctx, |ui| {
                 ui.add_space(12.);
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(30.), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 8., GREEN);
+                    ui.painter().rect_filled(r, 8., p.acc);
                     let pts = [
                         (4., 16.),
                         (10., 16.),
@@ -215,14 +224,20 @@ impl MonitorApp {
                         (27., 13.),
                     ]
                     .map(|(x, y)| r.min + Vec2::new(x, y));
-                    ui.painter()
-                        .add(egui::Shape::line(pts.to_vec(), Stroke::new(2.0_f32, BG)));
+                    ui.painter().add(egui::Shape::line(
+                        pts.to_vec(),
+                        Stroke::new(2.0_f32, p.on_acc),
+                    ));
                     ui.label(RichText::new("AI Monitor").size(21.).strong());
                 });
                 ui.add_space(6.);
-                ui.label(RichText::new("LOCAL OBSERVABILITY").size(9.5).color(MUTED));
+                ui.label(
+                    RichText::new("LOCAL OBSERVABILITY")
+                        .size(9.5)
+                        .color(p.text2),
+                );
                 ui.add_space(38.);
-                ui.label(RichText::new("MONITORAMENTO").size(10.).color(MUTED));
+                ui.label(RichText::new("MONITORAMENTO").size(10.).color(p.text2));
                 ui.add_space(8.);
                 for (page, label) in [
                     (Page::Overview, "Visão geral"),
@@ -235,12 +250,12 @@ impl MonitorApp {
                 ] {
                     let selected = self.page == page;
                     let button = egui::Button::new(RichText::new(label).color(if selected {
-                        GREEN
+                        p.acc
                     } else {
-                        MUTED
+                        p.text2
                     }))
                     .fill(if selected {
-                        Color32::from_rgb(30, 54, 49)
+                        p.sel
                     } else {
                         Color32::TRANSPARENT
                     })
@@ -259,7 +274,7 @@ impl MonitorApp {
                             crate::platform::OS
                         ))
                         .size(11.)
-                        .color(MUTED),
+                        .color(p.text2),
                     );
                     ui.add_space(8.);
                     ui.separator();
@@ -275,12 +290,13 @@ impl MonitorApp {
                         self.api.at.is_some() && self.api.error.is_none(),
                     );
                     ui.add_space(6.);
-                    ui.label(RichText::new("FONTES CONECTADAS").size(10.).color(MUTED));
+                    ui.label(RichText::new("FONTES CONECTADAS").size(10.).color(p.text2));
                 });
             });
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(ui.visuals());
         let (title, subtitle) = match self.page {
             Page::Overview => (
                 "Visão geral",
@@ -311,7 +327,7 @@ impl MonitorApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading(RichText::new(title).size(29.).strong());
-                ui.label(RichText::new(subtitle).color(MUTED));
+                ui.label(RichText::new(subtitle).color(p.text2));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -330,7 +346,7 @@ impl MonitorApp {
                 badge(
                     ui,
                     if self.paused { "PAUSADO" } else { "AO VIVO" },
-                    if self.paused { AMBER } else { GREEN },
+                    if self.paused { p.warn } else { p.acc },
                 );
             });
         });
@@ -343,7 +359,7 @@ impl MonitorApp {
                     age(self.api.at)
                 ))
                 .small()
-                .color(MUTED),
+                .color(p.text2),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
@@ -352,16 +368,16 @@ impl MonitorApp {
                         self.config.resource_seconds, self.config.api_seconds
                     ))
                     .small()
-                    .color(MUTED),
+                    .color(p.text2),
                 );
             });
         });
         ui.add_space(8.);
         if let Some(e) = &self.resources.docker_error {
-            notice(ui, e, AMBER);
+            notice(ui, e, p.warn);
         }
         if let Some(e) = &self.api.error {
-            notice(ui, e, AMBER);
+            notice(ui, e, p.warn);
         }
         if !self.api.errors.is_empty() {
             notice(
@@ -370,7 +386,7 @@ impl MonitorApp {
                     "Dados parciais: {} aviso(s). Consulte Conexão.",
                     self.api.errors.len()
                 ),
-                AMBER,
+                p.warn,
             );
         }
         if let Some(at) = self.api.at
@@ -380,34 +396,35 @@ impl MonitorApp {
             notice(
                 ui,
                 "A atualização da API está atrasada. Os horários indicam a última coleta concluída.",
-                AMBER,
+                p.warn,
             );
         }
     }
 
     fn ai_cards(&self, ui: &mut egui::Ui) {
+        let p = theme::palette(ui.visuals());
         let usage = self.resources.ai_usage(&self.config.container);
         ui.columns(4, |cols| {
             metric(
                 &mut cols[0],
                 "CPU · AI-MEMORY",
-                usage.as_ref().map(|u| format!("{:.1}%", u.cpu)),
+                usage.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
                 "100% = um núcleo",
-                GREEN,
+                p.acc,
             );
             metric(
                 &mut cols[1],
                 "MEMÓRIA · AI-MEMORY",
                 usage.as_ref().map(|u| bytes(u.memory)),
                 "Uso atual do serviço",
-                BLUE,
+                p.series2,
             );
             metric(
                 &mut cols[2],
                 "THREADS / TAREFAS",
                 usage.as_ref().and_then(|u| u.tasks.map(number_u64)),
                 "Processos + threads Linux",
-                TEXT,
+                p.text,
             );
             metric(
                 &mut cols[3],
@@ -424,12 +441,13 @@ impl MonitorApp {
                     )
                 }),
                 "Visíveis para esta conexão",
-                AMBER,
+                p.warn,
             );
         });
     }
 
     fn overview(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(ui.visuals());
         self.ai_cards(ui);
         ui.add_space(14.);
         ui.horizontal(|ui| {
@@ -465,16 +483,16 @@ impl MonitorApp {
             metric(
                 &mut cols[0],
                 "CPU · CONTÊINERES",
-                total.as_ref().map(|u| format!("{:.1}%", u.cpu)),
+                total.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
                 "Soma dos contêineres ativos",
-                BLUE,
+                p.series2,
             );
             metric(
                 &mut cols[1],
                 "MEMÓRIA · CONTÊINERES",
                 total.as_ref().map(|u| bytes(u.memory)),
                 "Inclui o ai-memory",
-                BLUE,
+                p.series2,
             );
             metric(
                 &mut cols[2],
@@ -494,14 +512,14 @@ impl MonitorApp {
                         )
                     }),
                 "Em execução / existentes",
-                GREEN,
+                p.acc,
             );
             metric(
                 &mut cols[3],
                 "SESSÕES ABERTAS",
                 self.api.open_session_links().map(number_u64),
                 "Vínculos por projeto (API)",
-                TEXT,
+                p.text,
             );
         });
         ui.add_space(14.);
@@ -526,10 +544,13 @@ impl MonitorApp {
             self.docker_tab = 0;
         }
         ui.add_space(16.);
-        panel().show(ui, |ui| {
+        panel(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("ESTE MAC").small().color(MUTED));
-                ui.label(format!("CPU {:.1}%", self.resources.host_cpu));
+                ui.label(RichText::new("ESTE MAC").small().color(p.text2));
+                ui.label(format!(
+                    "CPU {}%",
+                    decimal(self.resources.host_cpu.into(), 1)
+                ));
                 ui.separator();
                 ui.label(format!(
                     "Memória {} / {}",
@@ -537,12 +558,13 @@ impl MonitorApp {
                     bytes(self.resources.host_total)
                 ));
                 ui.separator();
-                ui.label(format!("{} projetos", self.api.projects.len()));
+                ui.label(format!("{} projetos", number(self.api.projects.len())));
             });
         });
     }
 
     fn sessions(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(ui.visuals());
         let previous_filter = (self.filter.clone(), self.scope.clone());
         ui.horizontal(|ui| {
             ui.selectable_value(
@@ -598,7 +620,7 @@ impl MonitorApp {
                     "Handoffs permanecem abertos até serem aceitos. Esta tela apenas consulta.",
                 )
                 .small()
-                .color(MUTED),
+                .color(p.text2),
             );
             if !self.api.warnings.is_empty() {
                 ui.label(
@@ -606,7 +628,7 @@ impl MonitorApp {
                         self.api.handoffs.len(),
                         self.api.handoff_total,
                     ))
-                    .color(AMBER),
+                    .color(p.warn),
                 );
             }
             let hs: Vec<_> = self
@@ -638,7 +660,7 @@ impl MonitorApp {
                             pages
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(p.text2),
                     );
                     if ui
                         .add_enabled(self.handoff_page > 0, egui::Button::new("Anterior"))
@@ -655,18 +677,18 @@ impl MonitorApp {
                 });
             }
             for h in hs.into_iter().skip(self.handoff_page * 20).take(20) {
-                panel().show(ui, |ui| {
+                panel(ui).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        badge(ui, "ABERTO", AMBER);
+                        badge(ui, "ABERTO", p.warn);
                         ui.label(RichText::new(&h.scope).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(date(&h.at)).small().color(MUTED));
+                            ui.label(RichText::new(date(&h.at)).small().color(p.text2));
                         });
                     });
                     ui.label(
                         RichText::new(format!("{} · {}", h.agent, h.id))
                             .small()
-                            .color(MUTED),
+                            .color(p.text2),
                     );
                     if h.redacted {
                         ui.label("Resumo restrito pelas permissões do servidor.");
@@ -691,7 +713,7 @@ impl MonitorApp {
                 ui.add_space(4.);
             }
         } else if self.session_tab == 1 {
-            ui.label(RichText::new("Últimas 100 sessões por projeto. Aberta = sem encerramento registrado; não comprova atividade atual. Vínculos entre projetos podem se repetir.").small().color(MUTED));
+            ui.label(RichText::new("Últimas 100 sessões por projeto. Aberta = sem encerramento registrado; não comprova atividade atual. Vínculos entre projetos podem se repetir.").small().color(p.text2));
             let ss: Vec<_> = self
                 .api
                 .sessions
@@ -707,7 +729,7 @@ impl MonitorApp {
             ui.label(
                 RichText::new(format!("{} registros", number(ss.len())))
                     .small()
-                    .color(MUTED),
+                    .color(p.text2),
             );
             TableBuilder::new(ui)
                 .striped(true)
@@ -744,14 +766,16 @@ impl MonitorApp {
                                 } else {
                                     "ENCERRADA"
                                 },
-                                if s.ended_at.is_none() { GREEN } else { MUTED },
+                                if s.ended_at.is_none() { p.acc } else { p.text2 },
                             );
                         });
                         row.col(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(short_project(&s.scope)).on_hover_text(&s.scope);
                                 ui.label(
-                                    RichText::new(short_id(&s.session_id)).small().color(MUTED),
+                                    RichText::new(short_id(&s.session_id))
+                                        .small()
+                                        .color(p.text2),
                                 )
                                 .on_hover_text(s.cwd.as_deref().unwrap_or(""));
                             });
@@ -773,7 +797,7 @@ impl MonitorApp {
                     });
                 });
         } else {
-            ui.label(RichText::new("Atividade = último evento ou atualização informado pela API. Contagens por projeto podem compartilhar sessões.").small().color(MUTED));
+            ui.label(RichText::new("Atividade = último evento ou atualização informado pela API. Contagens por projeto podem compartilhar sessões.").small().color(p.text2));
             TableBuilder::new(ui)
                 .striped(true)
                 .column(Column::remainder().at_least(200.))
@@ -821,28 +845,29 @@ impl MonitorApp {
     }
 
     fn docker(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(ui.visuals());
         let total = self.resources.docker_total();
         ui.columns(4, |cols| {
             metric(
                 &mut cols[0],
                 "CPU · CONTÊINERES",
-                total.as_ref().map(|u| format!("{:.1}%", u.cpu)),
+                total.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
                 "100% = um núcleo",
-                BLUE,
+                p.series2,
             );
             metric(
                 &mut cols[1],
                 "MEMÓRIA · CONTÊINERES",
                 total.as_ref().map(|u| bytes(u.memory)),
                 "Cache inativo excluído pelo Docker",
-                BLUE,
+                p.series2,
             );
             metric(
                 &mut cols[2],
                 "THREADS / TAREFAS",
                 total.as_ref().and_then(|u| u.tasks.map(number_u64)),
                 "Processos + threads Linux",
-                TEXT,
+                p.text,
             );
             metric(
                 &mut cols[3],
@@ -851,7 +876,7 @@ impl MonitorApp {
                     .images_at
                     .map(|_| number(self.resources.images.len())),
                 "IDs únicos; tags agrupadas",
-                GREEN,
+                p.acc,
             );
         });
         ui.add_space(16.);
@@ -895,9 +920,9 @@ impl MonitorApp {
                 .find(|c| Some(&c.id) == self.selected_container.as_ref())
             {
                 ui.add_space(10.);
-                panel().show(ui, |ui| {
+                panel(ui).show(ui, |ui| {
                     section(ui, &c.name);
-                    ui.label(RichText::new(&c.image).color(MUTED));
+                    ui.label(RichText::new(&c.image).color(p.text2));
                     ui.label(format!("Status: {}", c.status));
                     ui.label(format!(
                         "Portas: {}",
@@ -920,7 +945,10 @@ impl MonitorApp {
                             ui.label(e);
                         }
                         for (pid, name, threads) in &self.resources.ai_processes {
-                            ui.label(format!("PID {pid}    {name}    {threads} threads"));
+                            ui.label(format!(
+                                "PID {pid}    {name}    {} threads",
+                                number_u64(*threads)
+                            ));
                         }
                     }
                     if ui.small_button("Copiar ID").clicked() {
@@ -930,7 +958,7 @@ impl MonitorApp {
             }
         } else if self.docker_tab == 1 {
             if let Some(e) = &self.resources.inventory_error {
-                notice(ui, e, AMBER);
+                notice(ui, e, p.warn);
             }
             ui.label(
                 RichText::new(format!(
@@ -938,9 +966,9 @@ impl MonitorApp {
                     age(self.resources.images_at)
                 ))
                 .small()
-                .color(MUTED),
+                .color(p.text2),
             );
-            ui.label(RichText::new("Tamanho lógico por imagem; camadas compartilhadas impedem somar estes valores como espaço real em disco.").small().color(MUTED));
+            ui.label(RichText::new("Tamanho lógico por imagem; camadas compartilhadas impedem somar estes valores como espaço real em disco.").small().color(p.text2));
             let images: Vec<_> = self
                 .resources
                 .images
@@ -972,7 +1000,7 @@ impl MonitorApp {
                             ui.vertical(|ui| {
                                 ui.label(i.tags.first().map(String::as_str).unwrap_or("<sem tag>"))
                                     .on_hover_text(i.tags.join("\n"));
-                                ui.label(RichText::new(short_id(&i.id)).small().color(MUTED));
+                                ui.label(RichText::new(short_id(&i.id)).small().color(p.text2));
                             });
                         });
                         row.col(|ui| {
@@ -988,7 +1016,7 @@ impl MonitorApp {
                                 } else {
                                     "SEM VÍNCULO"
                                 },
-                                if i.running > 0 { GREEN } else { MUTED },
+                                if i.running > 0 { p.acc } else { p.text2 },
                             );
                         });
                         row.col(|ui| {
@@ -1004,7 +1032,7 @@ impl MonitorApp {
             ui.label(
                 RichText::new(crate::platform::PROCESSES_CAPTION)
                     .small()
-                    .color(MUTED),
+                    .color(p.text2),
             );
             TableBuilder::new(ui)
                 .striped(true)
@@ -1035,7 +1063,7 @@ impl MonitorApp {
                                 ui.label(&p.name).on_hover_text(&p.group);
                             });
                             row.col(|ui| {
-                                ui.label(format!("{:.1}%", p.usage.cpu));
+                                ui.label(format!("{}%", decimal(p.usage.cpu, 1)));
                             });
                             row.col(|ui| {
                                 ui.label(bytes(p.usage.memory));
@@ -1049,7 +1077,10 @@ impl MonitorApp {
         }
     }
 
-    fn reconnect(&mut self, config: Config) {
+    fn reconnect(&mut self, mut config: Config) {
+        // O tema é trocado à parte (choose_theme); uma config montada antes da
+        // troca, como a do login humano em andamento, não pode revertê-lo.
+        config.theme = self.config.theme;
         self.config = config.clone();
         self.draft = config.clone();
         self.shared.apply(config);
@@ -1067,7 +1098,25 @@ impl MonitorApp {
         self.last_sync = Instant::now() - Duration::from_secs(1);
     }
     fn settings(&mut self, ui: &mut egui::Ui) {
-        panel().show(ui,|ui| {
+        let p = theme::palette(ui.visuals());
+        panel(ui).show(ui, |ui| {
+            section(ui, "Aparência");
+            let mut choice = self.config.theme;
+            ui.horizontal(|ui| {
+                for (value, label) in [
+                    (Appearance::System, "Sistema"),
+                    (Appearance::Light, "Claro"),
+                    (Appearance::Dark, "Escuro"),
+                ] {
+                    ui.selectable_value(&mut choice, value, label);
+                }
+            });
+            if choice != self.config.theme {
+                self.choose_theme(choice, save_theme);
+            }
+        });
+        ui.add_space(12.);
+        panel(ui).show(ui,|ui| {
             section(ui,"Fontes de dados");
             egui::Grid::new("config").num_columns(2).spacing([28.,16.]).show(ui,|ui| {
                 ui.label("Servidor ai-memory");if ui.add(egui::TextEdit::singleline(&mut self.draft.endpoint).desired_width(400.)).changed(){self.draft.token.clear();self.draft.human=None;self.draft.proposal_watch=None;self.settings_message="Servidor alterado. Informe o token desse endereço ou use login humano após conectar.".into();}ui.end_row();
@@ -1083,7 +1132,7 @@ impl MonitorApp {
                 for p in &self.api.projects {let scope=crate::client::Scope{workspace:p.workspace_name.clone(),project:p.project_name.clone()};let label=scope.label();if ui.selectable_value(&mut self.draft.proposal_watch,Some(scope),label).clicked(){ui.close();}}
             });
             ui.add_space(12.);ui.checkbox(&mut self.draft.remember_token,format!("Guardar o Bearer no {} para este servidor (opcional)",crate::platform::SECRET_STORE));
-            ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(MUTED));
+            ui.label(RichText::new("Sem essa opção, o token fica somente em memória. Senhas e sessões humanas nunca são persistidas.").small().color(p.text2));
             if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy,egui::Button::new(format!("Carregar Bearer do {} deste endereço",crate::platform::SECRET_STORE))).clicked(){
                 self.draft.normalize();
                 match crate::keychain::load(&self.draft.endpoint){
@@ -1094,7 +1143,7 @@ impl MonitorApp {
             }
 
             ui.horizontal(|ui| {
-                if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy, egui::Button::new(RichText::new("Salvar e conectar").color(GREEN))).clicked() {
+                if ui.add_enabled(!self.management.busy&&!self.authentication.busy&&!self.operations.busy, egui::Button::new(RichText::new("Salvar e conectar").color(p.acc))).clicked() {
                     self.draft.normalize();
                     match self.draft.validate().and_then(|_|{
                         match keychain_change(&self.config,&self.draft) {
@@ -1108,12 +1157,12 @@ impl MonitorApp {
                         Err(e)=>self.settings_message=e,
                     }
                 }
-                if ui.button("Restaurar campos padrão").clicked(){self.draft=Config::default();self.settings_message="Campos restaurados ao padrão. Clique em Salvar e conectar para aplicar.".into();}
+                if ui.button("Restaurar campos padrão").clicked(){self.restore_defaults();}
             });
             if !self.settings_message.is_empty(){ui.label(&self.settings_message);}
         });
         ui.add_space(12.);
-        panel().show(ui, |ui| {
+        panel(ui).show(ui, |ui| {
             self.authentication.show(
                 ui,
                 &self.shared,
@@ -1121,19 +1170,20 @@ impl MonitorApp {
             )
         });
         ui.add_space(12.);
-        panel().show(ui,|ui| {
+        panel(ui).show(ui,|ui| {
             section(ui,"Diagnóstico da conexão");ui.label(format!("ai-memory {}",{let v=server_version(&self.api,&self.health);if v.is_empty(){"—"}else{v}}));
             ui.label(format!("Recursos: {} · API: {}",age(self.resources.at),age(self.api.at)));
             ui.label("As consultas respeitam o usuário do token. Handoffs de outros usuários podem não estar visíveis.");
-            if self.api.errors.is_empty()&&self.api.error.is_none(){ui.label(RichText::new(if self.api.at.is_some(){"Última coleta da API concluída sem erros."}else{"Conectando…"}).color(GREEN));}
-            for e in &self.api.errors{ui.label(RichText::new(e).color(AMBER));}
-            if let Some(e)=&self.resources.inventory_error{ui.label(RichText::new(e).color(AMBER));}
+            if self.api.errors.is_empty()&&self.api.error.is_none(){ui.label(RichText::new(if self.api.at.is_some(){"Última coleta da API concluída sem erros."}else{"Conectando…"}).color(p.acc));}
+            for e in &self.api.errors{ui.label(RichText::new(e).color(p.warn));}
+            if let Some(e)=&self.resources.inventory_error{ui.label(RichText::new(e).color(p.warn));}
         });
     }
 }
 
 impl eframe::App for MonitorApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.apply_theme(ctx);
         if let Some(config) = self.authentication.poll(&self.shared) {
             self.reconnect(config);
         }
@@ -1162,7 +1212,11 @@ impl eframe::App for MonitorApp {
         ctx.request_repaint_after(Duration::from_millis(500));
         self.sidebar(ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(26))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::palette(&ctx.style().visuals).bg)
+                    .inner_margin(26),
+            )
             .show(ctx, |ui| {
                 self.header(ui);
                 egui::ScrollArea::vertical()
@@ -1205,18 +1259,25 @@ impl Drop for MonitorApp {
     }
 }
 
-fn panel() -> egui::Frame {
+fn panel(ui: &egui::Ui) -> egui::Frame {
+    let p = theme::palette(ui.visuals());
     egui::Frame::new()
-        .fill(PANEL)
-        .stroke(Stroke::new(1.0_f32, LINE))
+        .fill(p.surf)
+        .stroke(Stroke::new(1.0_f32, p.line))
         .corner_radius(10.)
         .inner_margin(16)
 }
 fn section(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(17.).strong());
+    ui.label(
+        RichText::new(text)
+            .size(17.)
+            .strong()
+            .family(theme::semibold()),
+    );
 }
 fn table_head(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(10.5).color(MUTED));
+    let p = theme::palette(ui.visuals());
+    ui.label(RichText::new(text).size(10.5).color(p.text2));
 }
 fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     let galley =
@@ -1231,11 +1292,12 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         .galley(rect.min + Vec2::new(7.0, 4.0), galley, color);
 }
 fn status(ui: &mut egui::Ui, text: &str, ok: bool) {
+    let p = theme::palette(ui.visuals());
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 14.0), egui::Sense::hover());
         ui.painter()
-            .circle_filled(rect.center(), 3.0, if ok { GREEN } else { MUTED });
-        ui.label(RichText::new(text).size(12.0).color(MUTED));
+            .circle_filled(rect.center(), 3.0, if ok { p.acc } else { p.text2 });
+        ui.label(RichText::new(text).size(12.0).color(p.text2));
     });
 }
 fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
@@ -1250,27 +1312,29 @@ fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
     ui.add_space(4.);
 }
 fn empty(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    panel().show(ui, |ui| {
+    let p = theme::palette(ui.visuals());
+    panel(ui).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.add_space(30.);
         ui.vertical_centered(|ui| {
             ui.heading(title);
-            ui.label(RichText::new(subtitle).color(MUTED));
+            ui.label(RichText::new(subtitle).color(p.text2));
         });
         ui.add_space(30.);
     });
 }
 fn metric(ui: &mut egui::Ui, title: &str, value: Option<String>, hint: &str, color: Color32) {
-    panel().show(ui, |ui| {
+    let p = theme::palette(ui.visuals());
+    panel(ui).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(title).size(10.5).color(MUTED));
+        ui.label(RichText::new(title).size(10.5).color(p.text2));
         ui.add_space(5.);
         ui.label(
             RichText::new(value.unwrap_or("—".into()))
                 .size(29.)
                 .color(color),
         );
-        ui.label(RichText::new(hint).size(11.).color(MUTED));
+        ui.label(RichText::new(hint).size(11.).color(p.text2));
     });
 }
 fn number_u64(n: u64) -> String {
@@ -1298,6 +1362,7 @@ fn container_table(
     selected: &mut Option<String>,
     height: f32,
 ) {
+    let p = theme::palette(ui.visuals());
     if cs.is_empty() {
         empty(
             ui,
@@ -1337,7 +1402,7 @@ fn container_table(
                         {
                             *selected = Some(c.id.clone());
                         }
-                        ui.label(RichText::new(&c.image).size(11.).color(MUTED))
+                        ui.label(RichText::new(&c.image).size(11.).color(p.text2))
                             .on_hover_text(&c.image);
                     });
                 });
@@ -1351,14 +1416,14 @@ fn container_table(
                         } else {
                             &c.state
                         },
-                        if c.state == "running" { GREEN } else { MUTED },
+                        if c.state == "running" { p.acc } else { p.text2 },
                     );
                 });
                 row.col(|ui| {
                     ui.label(
                         c.usage
                             .as_ref()
-                            .map(|u| format!("{:.1}%", u.cpu))
+                            .map(|u| format!("{}%", decimal(u.cpu, 1)))
                             .unwrap_or("—".into()),
                     );
                 });
@@ -1390,12 +1455,13 @@ fn chart(
     memory: bool,
     resource_seconds: u64,
 ) {
-    panel().show(ui, |ui| {
+    let p = theme::palette(ui.visuals());
+    panel(ui).show(ui, |ui| {
         ui.horizontal(|ui| {
             section(ui, title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Docker").small().color(BLUE));
-                ui.label(RichText::new("ai-memory").small().color(GREEN));
+                ui.label(RichText::new("Docker").small().color(p.series2));
+                ui.label(RichText::new("ai-memory").small().color(p.acc));
             });
         });
         let end = history.back().map(|s| s.at).unwrap_or_else(Utc::now);
@@ -1425,18 +1491,22 @@ fn chart(
             let y = plot.bottom() - plot.height() * frac;
             painter.line_segment(
                 [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-                Stroke::new(1.0_f32, LINE),
+                Stroke::new(1.0_f32, p.line),
             );
             painter.text(
                 egui::pos2(plot.left() - 8., y),
                 egui::Align2::RIGHT_CENTER,
-                format!("{:.0}{}", max * frac as f64, if memory { "M" } else { "%" }),
+                format!(
+                    "{}{}",
+                    decimal(max * frac as f64, 0),
+                    if memory { "M" } else { "%" }
+                ),
                 egui::FontId::proportional(10.),
-                MUTED,
+                p.text2,
             );
         }
         let plot_painter = painter.with_clip_rect(plot.expand(4.));
-        for (ai, color) in [(false, BLUE), (true, GREEN)] {
+        for (ai, color) in [(false, p.series2), (true, p.acc)] {
             let (lines, dots) =
                 chart_segments(history, minutes, max, memory, ai, resource_seconds, plot);
             for pts in lines {
@@ -1452,17 +1522,17 @@ fn chart(
                 egui::Align2::CENTER_CENTER,
                 "Aguardando amostras…",
                 egui::FontId::proportional(13.),
-                MUTED,
+                p.text2,
             );
         }
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("−{minutes} min"))
                     .small()
-                    .color(MUTED),
+                    .color(p.text2),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("agora").small().color(MUTED));
+                ui.label(RichText::new("agora").small().color(p.text2));
             });
         });
     });
@@ -1727,5 +1797,136 @@ mod tests {
         assert_eq!(server_version(&api, &health), "");
         let health = crate::health::Snapshot::default();
         assert_eq!(server_version(&api, &health), "");
+    }
+
+    fn app_with_unsaved_draft() -> MonitorApp {
+        let config = Config {
+            endpoint: "https://connected.example".into(),
+            ..Default::default()
+        };
+        let mut app = MonitorApp::build(config.clone(), Shared::unstarted(config));
+        app.draft.endpoint = "https://draft.example".into();
+        app.draft.container = "draft-ai".into();
+        app
+    }
+
+    #[test]
+    fn theme_change_applies_and_saves_only_the_theme_without_reconnecting() {
+        let mut app = app_with_unsaved_draft();
+        let mut saved = None;
+        app.choose_theme(Appearance::Light, |theme| {
+            saved = Some(theme);
+            Ok(())
+        });
+        assert_eq!(app.config.theme, Appearance::Light);
+        assert_eq!(app.draft.theme, Appearance::Light);
+        assert_eq!(app.shared.config.read().unwrap().theme, Appearance::Light);
+        assert_eq!(
+            saved,
+            Some(Appearance::Light),
+            "theme change must be saved right away"
+        );
+        assert_eq!(app.config.endpoint, "https://connected.example");
+        assert_eq!(app.draft.endpoint, "https://draft.example");
+        assert_eq!(app.draft.container, "draft-ai");
+        assert_eq!(
+            app.shared.generation.load(Ordering::Acquire),
+            0,
+            "a theme change must not reconnect"
+        );
+        assert!(app.settings_message.is_empty());
+
+        app.choose_theme(Appearance::Dark, |_| Err("disco cheio".into()));
+        assert_eq!(app.settings_message, "disco cheio");
+        assert_eq!(
+            app.config.theme,
+            Appearance::Dark,
+            "a failed save keeps the theme for the session"
+        );
+        assert_eq!(app.shared.config.read().unwrap().theme, Appearance::Dark);
+    }
+
+    #[test]
+    fn theme_change_never_writes_the_in_memory_endpoint_to_disk() {
+        // Endpoint em memória vindo de AI_MEMORY_SERVER_URL, diferente do disco.
+        let dir = std::env::temp_dir().join(format!("ai-monitor-app-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let disk =
+            "{\n  \"endpoint\": \"http://192.168.0.10:49374\",\n  \"container\": \"custom-ai\"\n}";
+        std::fs::write(&path, disk).unwrap();
+        let mut app = app_with_unsaved_draft();
+        app.choose_theme(Appearance::Dark, |theme| save_theme_to(&path, theme));
+        let written = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(app.settings_message.is_empty(), "{}", app.settings_message);
+        assert_eq!(
+            written,
+            disk.replace(
+                "\"custom-ai\"\n}",
+                "\"custom-ai\",\n  \"theme\": \"dark\"\n}"
+            )
+        );
+        assert_eq!(app.config.endpoint, "https://connected.example");
+    }
+
+    #[test]
+    fn native_window_theme_is_sent_once_per_change() {
+        fn set_theme(out: &egui::FullOutput) -> Vec<egui::SystemTheme> {
+            out.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::ViewportCommand::SetTheme(t) => Some(*t),
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut app = app_with_unsaved_draft();
+        let ctx = egui::Context::default();
+        // Enviado antes do primeiro frame (como no CreationContext), chega a ele.
+        app.apply_theme(&ctx);
+        app.apply_theme(&ctx);
+        let out = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(
+            set_theme(&out),
+            vec![theme::window_theme(
+                Appearance::System,
+                theme::platform_theme()
+            )]
+        );
+        app.choose_theme(Appearance::Light, |_| Ok(()));
+        app.apply_theme(&ctx);
+        let out = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(set_theme(&out), vec![egui::SystemTheme::Light]);
+        app.apply_theme(&ctx);
+        let out = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(set_theme(&out), vec![], "unchanged theme must not resend");
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::Light
+        );
+    }
+
+    #[test]
+    fn restore_defaults_and_reconnect_keep_the_theme() {
+        let mut app = app_with_unsaved_draft();
+        app.choose_theme(Appearance::Light, |_| Ok(()));
+        app.restore_defaults();
+        assert_eq!(app.draft.container, "ai-memory", "the draft was restored");
+        assert_eq!(app.draft.endpoint, Config::default().endpoint);
+        assert_eq!(
+            app.draft.theme,
+            Appearance::Light,
+            "restore keeps the theme"
+        );
+
+        // Config montada antes da troca (ex.: login humano em voo).
+        app.reconnect(Config::default());
+        assert_eq!(app.config.theme, Appearance::Light);
+        assert_eq!(app.draft.theme, Appearance::Light);
+        assert_eq!(app.shared.config.read().unwrap().theme, Appearance::Light);
+        assert_eq!(app.shared.generation.load(Ordering::Acquire), 1);
     }
 }

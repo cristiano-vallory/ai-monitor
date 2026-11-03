@@ -1,6 +1,6 @@
 //! Status-bar presentation is independent of the dashboard's paint loop.
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
-use crate::model::{ResourceSnapshot, Usage, bytes};
+use crate::model::{ResourceSnapshot, Usage, bytes, decimal, number};
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 use chrono::{DateTime, Utc};
 
@@ -67,7 +67,7 @@ impl MenuReading {
                 a.at.filter(|at| (now - *at).num_seconds() <= (config.api_seconds * 3) as i64)
                     .and(a.handoff_total)
             })
-            .map(|n| n.to_string())
+            .map(number)
             .unwrap_or("—".into());
         let p = if let Some(health) = health {
             if let Some(scope) = &config.proposal_watch {
@@ -101,21 +101,27 @@ impl MenuReading {
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn compact(usage: Option<&Usage>) -> String {
     usage
-        .map(|u| format!("{:.0}% {}", u.cpu, compact_bytes(u.memory)))
+        .map(|u| format!("{}% {}", decimal(u.cpu, 0), compact_bytes(u.memory)))
         .unwrap_or("—% —".into())
 }
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn compact_bytes(n: u64) -> String {
     if n >= 1 << 30 {
-        format!("{:.1}G", n as f64 / (1u64 << 30) as f64)
+        format!("{}G", decimal(n as f64 / (1u64 << 30) as f64, 1))
     } else {
-        format!("{:.0}M", n as f64 / (1u64 << 20) as f64)
+        format!("{}M", decimal(n as f64 / (1u64 << 20) as f64, 0))
     }
 }
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn detail(name: &str, usage: Option<&Usage>) -> String {
     usage
-        .map(|u| format!("{name} · CPU {:.1}% · memória {}", u.cpu, bytes(u.memory)))
+        .map(|u| {
+            format!(
+                "{name} · CPU {}% · memória {}",
+                decimal(u.cpu, 1),
+                bytes(u.memory)
+            )
+        })
         .unwrap_or_else(|| format!("{name} · métricas indisponíveis"))
 }
 
@@ -474,9 +480,25 @@ mod tests {
     fn shows_both_sources_without_capping_multicore_cpu() {
         let snapshot = snapshot();
         let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", 2, Utc::now());
-        assert_eq!(reading.title, "AI 235% 512M  |  Docker 247% 1.5G");
-        assert!(reading.ai.contains("235.1%"));
-        assert!(reading.docker.contains("1.5 GiB"));
+        assert_eq!(reading.title, "AI 235% 512M  |  Docker 247% 1,5G");
+        assert!(reading.ai.contains("CPU 235,1%"), "{}", reading.ai);
+        assert!(reading.docker.contains("1,5 GiB"), "{}", reading.docker);
+    }
+    #[test]
+    fn compact_bytes_switches_unit_at_one_gib_with_pt_br_separators() {
+        assert_eq!(compact_bytes((1 << 30) - 1), "1.024M");
+        assert_eq!(compact_bytes(1 << 30), "1,0G");
+        assert_eq!(compact_bytes(0), "0M");
+        let usage = Usage {
+            cpu: 1234.56,
+            memory: 3 << 29,
+            ..Default::default()
+        };
+        assert_eq!(compact(Some(&usage)), "1.235% 1,5G");
+        assert_eq!(
+            detail("ai-memory", Some(&usage)),
+            "ai-memory · CPU 1.234,6% · memória 1,5 GiB"
+        );
     }
     #[test]
     fn failures_and_old_samples_do_not_masquerade_as_current_numbers() {
@@ -543,6 +565,26 @@ mod tests {
             "Handoffs abertos 3 · Propostas 200+ · ws / proj"
         );
         assert!(reading.freshness.contains("Consolidações com falha"));
+    }
+
+    #[test]
+    fn open_handoffs_group_thousands() {
+        let now = Utc::now();
+        let api = crate::model::ApiSnapshot {
+            at: Some(now),
+            handoff_total: Some(1234),
+            ..Default::default()
+        };
+        let reading = MenuReading::from_snapshot(&snapshot(), "ai-memory", 2, now).with_context(
+            Some(&api),
+            None,
+            &crate::model::Config::default(),
+            now,
+        );
+        assert_eq!(
+            reading.activity,
+            "Handoffs abertos 1.234 · Propostas: aguardando"
+        );
     }
 
     #[test]

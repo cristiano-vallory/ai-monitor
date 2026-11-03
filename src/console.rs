@@ -5,14 +5,13 @@ use crate::{
     model::{Project, bytes},
     monitor::Shared,
     queries::{Query, Worker},
+    theme,
 };
 use chrono::{Local, Utc};
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use serde_json::Value;
 use std::sync::{Arc, atomic::Ordering};
 
-const ACCENT: Color32 = Color32::from_rgb(102, 224, 184);
-const WARN: Color32 = Color32::from_rgb(244, 190, 103);
 #[derive(Default, Clone, Copy, PartialEq)]
 enum Tab {
     #[default]
@@ -166,7 +165,7 @@ impl Console {
             });
         }
         if let Some(e) = &self.error {
-            ui.colored_label(WARN, e);
+            ui.colored_label(theme::palette(ui.visuals()).warn, e);
         }
         if let Some(at) = self.at {
             ui.small(format!(
@@ -254,6 +253,7 @@ impl Console {
         ui.small("Pesquisa com escopo pode usar embeddings/reranking do servidor. As páginas são exibidas como texto histórico.");
     }
     fn render(&mut self, ui: &mut egui::Ui, shared: &Shared, query: &Query, data: &Value) {
+        let p = theme::palette(ui.visuals());
         match query {
             Query::Sessions {
                 scope,
@@ -439,7 +439,7 @@ impl Console {
                 }
                 if text(data, "body_markdown").len() > 100_000 {
                     ui.colored_label(
-                        WARN,
+                        p.warn,
                         "Prévia limitada a 100 KiB; o conteúdo no servidor permanece completo.",
                     );
                 }
@@ -532,7 +532,7 @@ impl Console {
                 ui.strong(format!("Comparação: {}", text(diff, "status")));
                 if diff["truncated"].as_bool() == Some(true) || diff["status"] == "too_large" {
                     ui.colored_label(
-                        WARN,
+                        p.warn,
                         "Comparação parcial ou grande demais. Consulte versões menores.",
                     );
                 }
@@ -547,8 +547,8 @@ impl Console {
                                 ))
                                 .monospace()
                                 .color(match text(line, "op") {
-                                    "+" => ACCENT,
-                                    "-" => WARN,
+                                    "+" => p.acc,
+                                    "-" => p.warn,
                                     _ => ui.visuals().text_color(),
                                 }),
                             )
@@ -596,7 +596,7 @@ impl Console {
             }
             Query::Graph(scope) => {
                 if data["truncated"] == true {
-                    ui.colored_label(WARN, "Grafo parcial: o servidor limita a 120 páginas.");
+                    ui.colored_label(p.warn, "Grafo parcial: o servidor limita a 120 páginas.");
                 }
                 draw_graph(ui, data);
                 self.page_list(ui, shared, scope, array(&data["nodes"]));
@@ -676,12 +676,7 @@ impl Console {
         query: impl Fn(usize) -> Query,
     ) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "Página {} · {} registros{}",
-                offset / 50 + 1,
-                count,
-                total.map(|n| format!(" de {n}")).unwrap_or_default()
-            ));
+            ui.label(page_label(offset, count, total));
             if ui
                 .add_enabled(!self.busy && offset > 0, egui::Button::new("Anterior"))
                 .clicked()
@@ -716,17 +711,33 @@ fn bounded_text(text: &str, max: usize) -> &str {
     }
     &text[..end]
 }
+fn page_label(offset: usize, count: usize, total: Option<u64>) -> String {
+    let number = crate::model::number;
+    format!(
+        "Página {} · {} registros{}",
+        number(offset / 50 + 1),
+        number(count),
+        total
+            .map(|n| format!(" de {}", number(n as usize)))
+            .unwrap_or_default()
+    )
+}
+fn range_label(offset: usize, total: usize) -> String {
+    let number = crate::model::number;
+    format!(
+        "{}–{} de {}",
+        number(offset + 1),
+        number((offset + 100).min(total)),
+        number(total)
+    )
+}
 fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
     let id = ui.id().with("local-page");
     let mut offset = ui.data(|d| d.get_temp::<usize>(id).unwrap_or(0));
     offset = offset.min(total.saturating_sub(1) / 100 * 100);
     if total > 100 {
         ui.horizontal(|ui| {
-            ui.small(format!(
-                "{}–{} de {total}",
-                offset + 1,
-                (offset + 100).min(total)
-            ));
+            ui.small(range_label(offset, total));
             if ui
                 .add_enabled(offset > 0, egui::Button::new("← 100"))
                 .clicked()
@@ -761,7 +772,9 @@ pub(crate) fn row_key(
     }
 }
 fn number(v: &Value) -> String {
-    v.as_u64().map(|n| n.to_string()).unwrap_or("—".into())
+    v.as_u64()
+        .map(|n| crate::model::number(n as usize))
+        .unwrap_or("—".into())
 }
 fn show_usage(ui: &mut egui::Ui, usage: &Value) {
     if usage.is_null() {
@@ -798,14 +811,11 @@ fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
         ));
     }
     if let Some(i) = &s.identity {
-        ui.label(format!(
-            "Versão {} · acesso {} · distingue operadores: {}",
-            i.version, i.level, i.distinguishes_operators
-        ));
+        ui.label(identity_line(i));
     }
     if let Some(v) = &s.status {
         for alert in s.alerts() {
-            ui.colored_label(WARN, alert);
+            ui.colored_label(theme::palette(ui.visuals()).warn, alert);
         }
         ui.separator();
         ui.strong("Captura e consolidação");
@@ -890,13 +900,13 @@ fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
         ui.small("Campo ausente = desconhecido. Ausência de embeddings pode ser normal quando o recurso não está configurado.");
     }
     for e in &s.auxiliary_errors {
-        ui.colored_label(WARN, e);
+        ui.colored_label(theme::palette(ui.visuals()).warn, e);
     }
     egui::CollapsingHeader::new("Métricas acumuladas desde o início do servidor").show(ui, |ui| {
         for m in &s.metrics {
             ui.horizontal_wrapped(|ui| {
                 ui.monospace(&m.series);
-                ui.label(m.value.to_string());
+                ui.label(crate::model::metric_value(m.value));
             });
         }
         if s.metrics.is_empty() {
@@ -909,6 +919,21 @@ fn show_health(ui: &mut egui::Ui, s: &health::Snapshot) {
         });
     }
 }
+fn identity_line(i: &health::Identity) -> String {
+    format!(
+        "Versão {} · acesso {} · distingue operadores: {}",
+        i.version,
+        match i.level.as_str() {
+            "anonymous" => "anônimo",
+            level => level,
+        },
+        if i.distinguishes_operators {
+            "sim"
+        } else {
+            "não"
+        }
+    )
+}
 pub(crate) fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
     if depth > 10 {
         ui.small(
@@ -919,7 +944,7 @@ pub(crate) fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
     match value {
         Value::Object(map) => {
             if map.len() > 200 {
-                ui.colored_label(Color32::from_rgb(244, 190, 103), "Objeto parcial: somente os primeiros 200 campos. Consulte a fonte completa antes de decidir.");
+                ui.colored_label(theme::palette(ui.visuals()).warn, "Objeto parcial: somente os primeiros 200 campos. Consulte a fonte completa antes de decidir.");
             }
             for (key, v) in map.iter().take(200) {
                 if v.is_object() || v.is_array() {
@@ -970,6 +995,7 @@ pub(crate) fn show_values(ui: &mut egui::Ui, value: &Value, depth: usize) {
     }
 }
 fn draw_graph(ui: &mut egui::Ui, data: &Value) {
+    let p = theme::palette(ui.visuals());
     let nodes = array(&data["nodes"]);
     if nodes.is_empty() {
         ui.label("Nenhuma relação disponível.");
@@ -991,12 +1017,12 @@ fn draw_graph(ui: &mut egui::Ui, data: &Value) {
         if let (Some(a), Some(b)) = (from, to) {
             ui.painter().line_segment(
                 [positions[a], positions[b]],
-                egui::Stroke::new(1.0_f32, Color32::from_gray(65)),
+                egui::Stroke::new(1.0_f32, p.line),
             );
         }
     }
     for (i, pos) in positions.iter().enumerate() {
-        ui.painter().circle_filled(*pos, 5., ACCENT);
+        ui.painter().circle_filled(*pos, 5., p.acc);
         ui.interact(
             egui::Rect::from_center_size(*pos, egui::vec2(16., 16.)),
             ui.id().with(("node", i)),
@@ -1086,6 +1112,52 @@ mod tests {
         inspector.reset();
         assert!(inspector.result.is_none());
         assert!(inspector.search.is_empty());
+    }
+
+    #[test]
+    fn counts_group_thousands_and_identity_is_in_pt_br() {
+        assert_eq!(number(&json!(1234567)), "1.234.567");
+        assert_eq!(number(&json!(999)), "999");
+        assert_eq!(number(&json!(0)), "0");
+        for missing in [json!(null), json!(-1), json!(1.5), json!("12")] {
+            assert_eq!(number(&missing), "—", "{missing}");
+        }
+        for (level, distinguishes, want) in [
+            (
+                "anonymous",
+                false,
+                "Versão 3.3.1 · acesso anônimo · distingue operadores: não",
+            ),
+            (
+                "user",
+                true,
+                "Versão 3.3.1 · acesso user · distingue operadores: sim",
+            ),
+            (
+                "human:admin",
+                false,
+                "Versão 3.3.1 · acesso human:admin · distingue operadores: não",
+            ),
+        ] {
+            let identity = health::Identity {
+                version: "3.3.1".into(),
+                level: level.into(),
+                distinguishes_operators: distinguishes,
+            };
+            assert_eq!(identity_line(&identity), want);
+        }
+    }
+
+    #[test]
+    fn pager_and_range_labels_group_thousands() {
+        assert_eq!(page_label(0, 50, None), "Página 1 · 50 registros");
+        assert_eq!(page_label(0, 0, Some(0)), "Página 1 · 0 registros de 0");
+        assert_eq!(
+            page_label(49_950, 50, Some(1_234_567)),
+            "Página 1.000 · 50 registros de 1.234.567"
+        );
+        assert_eq!(range_label(0, 5_000), "1–100 de 5.000");
+        assert_eq!(range_label(1_200, 1_234), "1.201–1.234 de 1.234");
     }
 
     #[test]

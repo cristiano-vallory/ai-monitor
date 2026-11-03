@@ -318,7 +318,7 @@ impl Panel {
             ui.spinner();
         }
         if let Some(e) = &self.error {
-            ui.colored_label(egui::Color32::from_rgb(244, 190, 103), e);
+            ui.colored_label(crate::theme::palette(ui.visuals()).bad, e);
         }
         if let Some(v) = &self.info {
             crate::console::show_values(ui, v, 0);
