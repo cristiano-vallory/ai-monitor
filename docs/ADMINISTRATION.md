@@ -99,12 +99,13 @@ direto. Uma escrita abre a prévia numa folha de confirmação, descrita em
 projeto, as abas e os campos ficam sob o véu; **Cancelar** (ou Esc) a fecha e
 libera os campos, que mantêm o que foi preenchido. Um resultado, um erro ou o
 aviso de prévia vencida ficam na página até **Limpar**, trocar de aba ou de
-projeto. As duas páginas usam o mesmo painel: com uma operação em andamento,
-uma prévia ou um resultado na tela de uma delas, a outra não descarta nada
-sozinha; avisa e oferece **Ir para** a página da operação ou **Descartar e
-abrir** a atual. Uma confirmação expira em cinco minutos e não pode ser
-reaproveitada após mudar a conexão. Salvar outra conexão fica indisponível
-durante uma operação administrativa.
+projeto. Depois de aplicar uma escrita, o cartão **Resultado** traz o aviso
+“Resposta recebida. Confira os detalhes abaixo.”. As duas páginas usam o mesmo
+painel: com uma operação em andamento, uma prévia ou um resultado na tela de
+uma delas, a outra não descarta nada sozinha; avisa e oferece **Ir para** a
+página da operação ou **Descartar e abrir** a atual. Uma confirmação expira em
+cinco minutos e não pode ser reaproveitada após mudar a conexão. Salvar outra
+conexão fica indisponível durante uma operação administrativa.
 
 **Gerenciar em Revisão →**, no detalhe de um handoff em **Sessões e handoffs**,
 abre Revisão · Handoffs com o projeto e o handoff selecionados. Se o painel
@@ -113,7 +114,7 @@ página Revisão mostra o que o prende.
 
 | Área | Operações e limites |
 | --- | --- |
-| Propostas | A lista carrega sozinha ao escolher o projeto ou o estado (pendentes/aprovadas/rejeitadas/em conflito/com falha) e ao abrir a aba, até 200; **Atualizar** a recarrega. O detalhe fica ao lado; **Ver detalhes** busca uma proposta pelo ID, inclusive fora da lista (evidências e corpo). **Aprovar…** e **Rejeitar…** abrem a folha com o alvo, o efeito, se é reversível e a comparação entre a página atual e a proposta; com uma resposta fora do formato esperado, mostram os valores recebidos. O servidor verifica conflito da página ao aprovar. |
+| Propostas | A lista carrega sozinha ao escolher o projeto ou o estado (pendentes/aprovadas/rejeitadas/em conflito/com falha) e ao abrir a aba, até 200. Ao selecionar uma proposta (clique na linha, ou ID digitado e confirmado com Enter, Tab ou clique fora, inclusive um ID fora da lista), o detalhe é buscado sozinho (GET, só leitura) e mostra “Proposta <estado> · criada por <agente> há N”, o título, a justificativa e as evidências. O campo de ID e **Ver detalhes** ficam no pé da coluna da lista; **Ver detalhes** mostra a resposta inteira no cartão **Resultado**. Na tela estreita, o campo de ID fica no pé da lista e Enter abre o detalhe. **Atualizar** relê a lista e o detalhe selecionado; depois de aprovar ou rejeitar com sucesso, os dois são relidos sozinhos (com falha, nada é relido). **Rejeitar…** e **Aprovar…** ficam na linha do título do detalhe, e o motivo da rejeição, no pé do detalhe. A folha traz o alvo, o efeito, se é reversível (só em Aprovar) e a comparação entre a página atual e a proposta; com uma resposta fora do formato esperado, mostra os valores recebidos. O servidor verifica conflito da página ao aprovar. |
 | Handoffs | A lista mostra os abertos da última coleta do monitor, sem consulta nova; **Carregar histórico** consulta até 200, sem consumir. **Cancelar handoff…** vale para um ID visível na lista de abertos; **Expirar antigos…** usa a idade mínima escolhida. Zero dias abrange todos os abertos próprios/compartilhados no projeto. |
 | Auditoria | Prévia com `dry_run=true` e `no_llm=true`; aplicação grava o relatório, sem LLM. |
 | Curadoria | Prévia somente leitura; aplicação cria proposta de relatório para revisão, sem autoaprovação. |
@@ -170,8 +171,8 @@ mostra **Digite … para confirmar** com o texto pedido.
 A folha desce do topo da área de conteúdo, sobre um véu; a lateral e a barra
 superior seguem clicáveis. Mostra a pergunta como título, o projeto (ou
 **Servidor · administração**, ou **Serviço deste Mac**), os fatos **Operação** e
-**Alvo** (mais **Efeito** e **Reversível** em Aprovar e Rejeitar, e **Motivo** em
-Rejeitar e Feedback), a prévia (**Prévia da alteração** em Revisão e Manutenção
+**Alvo** (mais **Efeito** e **Reversível** em Aprovar; só **Efeito** em Rejeitar;
+**Motivo** em Rejeitar e Feedback), a prévia (**Prévia da alteração** em Revisão e Manutenção
 e backup; **Prévia de impacto** na Administração, sempre com credenciais
 ocultas), a faixa **Atenção.** com o aviso da operação e, com digitação, o
 campo. No rodapé, **Prévia válida por m:ss**, **Cancelar** e o botão com o verbo
@@ -184,8 +185,8 @@ prévia e o texto digitado, sem enviar nada.
 
 ### Backup e exportação privada
 
-Escolha **Backup global** ou **Exportar projeto (OKF)**, informe um **arquivo
-novo com caminho absoluto** e use **Revisar download privado**. A folha mostra
+No segmentado, escolha **Backup global** ou **Exportar projeto (OKF)**, informe
+um **arquivo novo com caminho absoluto** e use **Revisar download privado**. A folha mostra
 o alvo (“Toda a instalação” no backup global; o projeto no OKF) e confirma com
 um clique (**Salvar backup** ou **Exportar**).
 O backup inclui SQLite consistente, wiki com histórico e `config.toml` da área

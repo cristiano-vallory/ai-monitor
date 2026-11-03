@@ -16,11 +16,20 @@
 //!   seleção anterior é ignorada. Não prende o painel, e a lista, o recibo e
 //!   o resultado não o apagam (nem ele a eles); trocar de aba ou de projeto,
 //!   sim.
+//! - Atualizar relê a lista e a proposta selecionada; Aprovar e Rejeitar
+//!   executados com sucesso também (só leitura). Com falha, nada é relido.
+//! - Propostas: o campo de ID (com "Ver detalhes") fica no pé da coluna da
+//!   lista; Rejeitar… e Aprovar…, na linha do título do detalhe, à direita, e
+//!   o motivo da rejeição no pé do detalhe. Nada disso se move quando o
+//!   detalhe chega: a linha de estado tem a altura reservada e o corpo rola
+//!   entre as duas.
 //! - Handoffs: a lista são os handoffs abertos do projeto na coleta do monitor
 //!   (`ApiSnapshot`); nenhuma consulta nova.
 //! - A seleção é o campo de ID: clicar numa linha o preenche; um ID fora da
 //!   lista continua valendo. Largura de conteúdo ≥ `SIDE_BY_SIDE`: lista e
-//!   detalhe lado a lado; abaixo, um de cada vez, com "← Voltar".
+//!   detalhe lado a lado; abaixo, um de cada vez, com "← Voltar". Na tela
+//!   estreita, Propostas abre o detalhe com um clique na linha ou com Enter
+//!   no campo de ID; Handoffs, com "Informar ID…".
 //! - Um resultado, um erro ou o aviso de prévia vencida ficam na página até
 //!   "Limpar", trocar de aba ou de projeto; uma operação em andamento prende o
 //!   painel até a resposta.
@@ -266,6 +275,8 @@ pub struct Management {
     /// O campo de ID da proposta tinha o foco no último frame: o ID ainda
     /// está sendo digitado e não pede o detalhe.
     editing: bool,
+    /// A operação em voo é Aprovar ou Rejeitar: com sucesso, `refresh`.
+    reread: bool,
     /// Tela estreita: o detalhe no lugar da lista.
     open: bool,
     /// O frame em que a aba Propostas foi mostrada pela última vez: um
@@ -303,6 +314,7 @@ impl Management {
             list: List::proposals(shared.clone()),
             detail: Detail::proposal(shared),
             editing: false,
+            reread: false,
             open: false,
             seen: None,
         }
@@ -430,8 +442,10 @@ impl Management {
     pub fn poll(&mut self, shared: &Shared) {
         self.list.poll(shared);
         self.detail.poll(shared);
+        let mut refresh = false;
         while let Ok(reply) = self.worker.replies.try_recv() {
             self.busy = false;
+            let reread = std::mem::take(&mut self.reread);
             if reply.ticket != self.ticket
                 || reply.generation != shared.generation.load(Ordering::Acquire)
             {
@@ -439,10 +453,11 @@ impl Management {
             }
             match reply.result {
                 Ok(v) => {
+                    refresh |= reread;
                     self.result = Some(v);
                     self.receipt = reply.receipt;
                     self.notice = if reply.applying {
-                        "Resposta recebida. Confira os detalhes abaixo e atualize a listagem para verificar o estado final."
+                        "Resposta recebida. Confira os detalhes abaixo."
                     } else if self.receipt.is_some() {
                         // A prévia abre na folha, que já é o aviso.
                         ""
@@ -458,6 +473,9 @@ impl Management {
                     }
                 }
             }
+        }
+        if refresh {
+            self.refresh(shared);
         }
         if self
             .receipt
@@ -512,7 +530,9 @@ impl Management {
             let opened = self.seen.is_none_or(|seen| frame > seen + 1);
             self.seen = Some(frame);
             let key = (scope.clone(), self.status.clone());
-            if opened || ask == Some(Ask::Refresh) || self.list.key.as_ref() != Some(&key) {
+            if ask == Some(Ask::Refresh) {
+                self.refresh(shared);
+            } else if opened || self.list.key.as_ref() != Some(&key) {
                 self.list.request(shared, key);
             }
         }
@@ -735,9 +755,28 @@ impl Management {
             },
         );
         match answer {
-            Some(Answer::Confirm) => self.begin(shared, Work::Apply(receipt)),
+            Some(Answer::Confirm) => {
+                let changes = matches!(
+                    receipt.action.intent,
+                    Intent::Approve { .. } | Intent::Reject { .. }
+                );
+                self.begin(shared, Work::Apply(receipt));
+                // Só o que entrou em voo é relido na resposta.
+                self.reread = self.busy && changes;
+            }
             Some(Answer::Cancel) => self.clear(),
             None => {}
+        }
+    }
+    /// Relê a lista e a proposta selecionada: Atualizar, e Aprovar ou
+    /// Rejeitar executados com sucesso. `Fetch::request` troca a senha: uma
+    /// resposta anterior ainda em voo é ignorada e não sobrescreve a nova.
+    fn refresh(&mut self, shared: &Shared) {
+        if let Some(scope) = self.scope.clone() {
+            self.list.request(shared, (scope, self.status.clone()));
+        }
+        if let Some(key) = self.detail.key.clone() {
+            self.detail.request(shared, key);
         }
     }
     /// "Gerenciar em Revisão →" (Sessões e handoffs): Revisão · Handoffs com
@@ -792,18 +831,27 @@ impl Management {
     fn proposals(&mut self, ui: &mut Ui, shared: &Shared, s: &Scope, now: DateTime<Utc>) {
         let key = (s.clone(), self.status.clone());
         let singular = status_label(&self.status).2.to_owned();
+        let mut ask = None;
         widgets::split(ui, &[REVIEW_NOTE.into()], |ui| {
             let rect = ui.max_rect();
             let wide = rect.width() >= SIDE_BY_SIDE;
             if !wide && self.open {
-                self.proposal(ui, shared, s, rect, true, now);
+                // O campo de ID fica na lista: nada está sendo digitado.
+                self.editing = false;
+                self.select(shared, s);
+                ask = self.proposal(ui, s, rect, true, now);
                 return;
             }
-            let list = list_rect(rect, wide);
+            let column = list_rect(rect, wide);
+            // O pé antes da lista: o campo guarda o id (e o foco) quando ela
+            // muda.
+            let (foot, entered) = self.id_foot(ui, column, &mut ask);
+            let list = Rect::from_min_max(column.min, pos2(column.right(), foot.top()));
+            let mut area = ui.new_child(UiBuilder::new().max_rect(list));
             let picked = match (&self.list.value, self.list.loaded(&key)) {
                 (_, Some([])) => {
                     empty_in(
-                        ui,
+                        &mut area,
                         list,
                         &format!("Nenhuma proposta {singular}"),
                         "Nenhum resultado visível para este estado e as permissões atuais.",
@@ -811,12 +859,12 @@ impl Management {
                     None
                 }
                 (_, Some(rows)) => rows_view(
-                    ui,
+                    &mut area,
                     list,
                     "Lista de propostas",
                     "proposals",
                     rows.len(),
-                    !wide,
+                    false,
                     |ui, rect, i| {
                         let row = &rows[i];
                         let id = row["id"].as_str().unwrap_or_default();
@@ -832,7 +880,7 @@ impl Management {
                 ),
                 (Some(Err(e)), None) => {
                     empty_in(
-                        ui,
+                        &mut area,
                         list,
                         "Não foi possível carregar as propostas",
                         &format!("{e} Use Atualizar para tentar de novo."),
@@ -840,22 +888,49 @@ impl Management {
                     None
                 }
                 (_, None) => {
-                    empty_in(ui, list, "Carregando propostas…", "Até 200 por estado.");
+                    empty_in(
+                        &mut area,
+                        list,
+                        "Carregando propostas…",
+                        "Até 200 por estado.",
+                    );
                     None
                 }
             };
-            let foot = !wide && narrow_foot(ui, list);
             if let Some(id) = picked {
                 self.identifier = id;
                 self.open = true;
-            } else if foot {
+            } else if entered && !self.identifier.trim().is_empty() {
+                // Tela estreita: Enter no campo abre o detalhe do ID.
                 self.open = true;
             }
+            // O ID digitado vale ao sair do campo, já neste frame.
+            self.select(shared, s);
             if wide {
-                let detail = divide(ui, rect, list);
-                self.proposal(ui, shared, s, detail, false, now);
+                let detail = divide(ui, rect, column);
+                ask = ask.or(self.proposal(ui, s, detail, false, now));
             }
         });
+        let id = self.identifier.trim().to_owned();
+        match ask {
+            Some(0) => self.begin(
+                shared,
+                Work::Read(Read::Proposal {
+                    scope: s.clone(),
+                    id,
+                }),
+            ),
+            Some(1) => self.preview(
+                shared,
+                s,
+                Intent::Reject {
+                    id,
+                    reason: self.reason.clone(),
+                },
+            ),
+            Some(2) => self.preview(shared, s, Intent::Approve { id }),
+            _ => {}
+        }
     }
     /// Pede o detalhe da proposta do campo de ID quando ela muda: um clique
     /// na linha ou o ID digitado, ao sair do campo (Enter, Tab ou um clique
@@ -867,31 +942,158 @@ impl Management {
             self.detail.request(shared, key);
         }
     }
-    /// O detalhe da proposta do campo de ID em `rect` (a GET da seleção), com
-    /// o ID, o motivo da rejeição e as ações. `back` = tela estreita.
+    /// O pé da coluna da lista `column`, fixo embaixo dela: "ID da proposta",
+    /// o campo e "Ver detalhes" (`ask` = 0). Devolve a área do pé e se o ID
+    /// foi confirmado com Enter.
+    fn id_foot(&mut self, ui: &mut Ui, column: Rect, ask: &mut Option<u8>) -> (Rect, bool) {
+        let p = theme::palette(ui.visuals());
+        let mut foot = ui.new_child(
+            UiBuilder::new()
+                .max_rect(column.shrink2(vec2(space::L, space::M)))
+                .layout(Layout::bottom_up(Align::Min)),
+        );
+        foot.spacing_mut().item_spacing.y = space::XS;
+        let mut entered = false;
+        foot.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = space::S;
+            let width = (ui.available_width() - 110.).clamp(120., FIELD);
+            let field =
+                widgets::text_field(ui, &mut self.identifier, width, "ID exato", false, 128);
+            self.editing = field.has_focus();
+            entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let id = !self.identifier.trim().is_empty();
+            if ui
+                .add_enabled(id, Button::secondary("Ver detalhes"))
+                .clicked()
+            {
+                *ask = Some(0);
+            }
+        });
+        widgets::caption(&mut foot, "ID da proposta");
+        let top = foot.min_rect().top() - space::M;
+        ui.painter()
+            .hline(column.x_range(), top + 0.5, Stroke::new(1.0_f32, p.line));
+        (
+            Rect::from_min_max(pos2(column.left(), top), column.max),
+            entered,
+        )
+    }
+    /// O detalhe da proposta do campo de ID em `rect` (a GET da seleção): no
+    /// topo, fixas, a linha de estado (altura reservada) e a do título, com
+    /// Rejeitar… e Aprovar… à direita; o corpo, que rola; e o motivo da
+    /// rejeição, fixo embaixo. Nada se move quando o detalhe chega. `back` =
+    /// tela estreita, com "← Voltar" acima. Devolve a ação pedida (1 =
+    /// Rejeitar, 2 = Aprovar).
     fn proposal(
         &mut self,
         ui: &mut Ui,
-        shared: &Shared,
         s: &Scope,
         rect: Rect,
         back: bool,
         now: DateTime<Utc>,
-    ) {
-        self.select(shared, s);
-        let mut ask = None;
+    ) -> Option<u8> {
+        let p = theme::palette(ui.visuals());
+        widgets::pane(ui, rect, "Proposta selecionada");
+        let inner = rect.shrink2(if back { vec2(0., 8.) } else { vec2(28., 22.) });
+        // O motivo antes do resto: guarda o id (e o foco) quando o detalhe
+        // muda.
+        let mut foot = ui.new_child(
+            UiBuilder::new()
+                .max_rect(inner)
+                .layout(Layout::bottom_up(Align::Min)),
+        );
+        foot.spacing_mut().item_spacing.y = space::XS;
+        let width = foot.available_width().min(FIELD);
+        widgets::text_field(
+            &mut foot,
+            &mut self.reason,
+            width,
+            "Fica registrado com a rejeição",
+            false,
+            500,
+        );
+        widgets::caption(&mut foot, "Motivo da rejeição");
+        let bottom = foot.min_rect().top() - 14.;
+        let mut column = ui.new_child(
+            UiBuilder::new()
+                .max_rect(Rect::from_min_max(inner.min, pos2(inner.right(), bottom)))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        column.spacing_mut().item_spacing.y = 14.;
+        if back && column.add(Button::secondary("← Voltar").small()).clicked() {
+            self.open = false;
+        }
         let key = (s.clone(), self.identifier.trim().to_owned());
         let loaded = (self.detail.key.as_ref() == Some(&key)).then_some(&self.detail.value);
-        detail(
-            ui,
-            rect,
-            "Proposta selecionada",
-            back,
-            &mut self.open,
+        let value = match loaded {
+            Some(Some(Ok(v))) => Some(v),
+            _ => None,
+        };
+        // A linha de estado, com a altura de uma linha mesmo vazia.
+        let full = column.max_rect();
+        let line = column
+            .painter()
+            .layout_no_wrap(" ".into(), Type::Caption.font(), p.text2)
+            .size()
+            .y;
+        column.allocate_ui_with_layout(
+            vec2(full.width(), line),
+            Layout::left_to_right(Align::Center),
             |ui| {
-                // Numa `Ui` própria: o campo de ID abaixo guarda o id (e o
-                // foco) quando o que está acima dele muda.
-                ui.scope(|ui| match loaded {
+                ui.set_min_height(line);
+                if let Some(meta) = value.and_then(|v| proposal_meta(v, now)) {
+                    ui.add(Label::new(RichText::new(meta).size(12.).color(p.text2)).truncate());
+                }
+            },
+        );
+        // A linha do título: as ações à direita, fixas; o título à esquerda,
+        // que quebra linha sem empurrá-las.
+        let top = column.cursor().top();
+        let mut actions = column.new_child(
+            UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    pos2(full.left(), top),
+                    pos2(full.right(), top + 28.),
+                ))
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        actions.spacing_mut().item_spacing.x = space::S;
+        let id = !key.1.is_empty();
+        let mut ask = None;
+        if actions
+            .add_enabled(id, Button::primary("Aprovar…"))
+            .clicked()
+        {
+            ask = Some(2);
+        }
+        if actions
+            .add_enabled(id, Button::destructive("Rejeitar…"))
+            .clicked()
+        {
+            ask = Some(1);
+        }
+        let mut title = column.new_child(
+            UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    pos2(full.left(), top),
+                    pos2(actions.min_rect().left() - space::M, full.bottom()),
+                ))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        if let Some(text) = value
+            .and_then(|v| v["summary"]["title"].as_str())
+            .filter(|t| !t.trim().is_empty())
+        {
+            title.add(Label::new(RichText::new(text).font(Type::Detail.font())).wrap());
+        }
+        column.allocate_space(vec2(full.width(), title.min_rect().height().max(28.)));
+        egui::ScrollArea::vertical()
+            .id_salt(("detail", "Proposta selecionada"))
+            .auto_shrink(false)
+            .show(&mut column, |ui| {
+                ui.set_max_width(ui.available_width() - DETAIL_GAP);
+                ui.spacing_mut().item_spacing.y = 14.;
+                match loaded {
                     _ if key.1.is_empty() => note(
                         ui,
                         "Nenhuma proposta selecionada",
@@ -916,77 +1118,10 @@ impl Management {
                             None,
                         );
                     }
-                    Some(Some(Ok(v))) => proposal_view(ui, v, now),
-                });
-                let id = !key.1.is_empty();
-                labeled(ui, "ID da proposta", |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = space::S;
-                        let width = (ui.available_width() - 110.).clamp(120., FIELD);
-                        self.editing = widgets::text_field(
-                            ui,
-                            &mut self.identifier,
-                            width,
-                            "ID exato",
-                            false,
-                            128,
-                        )
-                        .has_focus();
-                        if ui
-                            .add_enabled(id, Button::secondary("Ver detalhes"))
-                            .clicked()
-                        {
-                            ask = Some(0);
-                        }
-                    });
-                });
-                labeled(ui, "Motivo da rejeição", |ui| {
-                    let width = ui.available_width().min(FIELD);
-                    widgets::text_field(
-                        ui,
-                        &mut self.reason,
-                        width,
-                        "Fica registrado com a rejeição",
-                        false,
-                        500,
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = space::S;
-                    if ui
-                        .add_enabled(id, Button::destructive("Rejeitar…"))
-                        .clicked()
-                    {
-                        ask = Some(1);
-                    }
-                    if ui.add_enabled(id, Button::primary("Aprovar…")).clicked() {
-                        ask = Some(2);
-                    }
-                });
-            },
-        );
-        // O ID digitado vale ao sair do campo, já neste frame.
-        self.select(shared, s);
-        let id = self.identifier.trim().to_owned();
-        match ask {
-            Some(0) => self.begin(
-                shared,
-                Work::Read(Read::Proposal {
-                    scope: s.clone(),
-                    id,
-                }),
-            ),
-            Some(1) => self.preview(
-                shared,
-                s,
-                Intent::Reject {
-                    id,
-                    reason: self.reason.clone(),
-                },
-            ),
-            Some(2) => self.preview(shared, s, Intent::Approve { id }),
-            _ => {}
-        }
+                    Some(Some(Ok(v))) => proposal_body(ui, v),
+                }
+            });
+        ask
     }
     fn handoffs(
         &mut self,
@@ -1085,63 +1220,69 @@ impl Management {
             back,
             &mut self.open,
             |ui| {
-                let p = theme::palette(ui.visuals());
-                match h {
-                    Some(h) => {
-                        let agent = if h.agent.is_empty() { "—" } else { &h.agent };
-                        let when = match age(&h.at, now).and_then(|a| a.long()) {
-                            Some(ago) => format!("{} ({ago})", crate::app::date(&h.at)),
-                            None => crate::app::date(&h.at),
-                        };
-                        widgets::caption(ui, &format!("Aberto · {agent} · {when}"));
-                        ui.add(
-                            Label::new(RichText::new(headline(h).0).font(Type::Detail.font()))
-                                .wrap(),
-                        );
-                        let parsed = (!h.redacted)
-                            .then_some(h.summary.as_deref())
-                            .flatten()
-                            .map(handoff_text::parse);
-                        match &parsed {
-                            _ if h.redacted => {
-                                body(ui, "Resumo restrito pelas permissões do servidor.", p.text2)
-                            }
-                            None => body(ui, "Sem resumo.", p.text2),
-                            Some(parsed) => {
-                                let rest = handoff_text::outline(&parsed.body).rest;
-                                for paragraph in rest.split("\n\n") {
-                                    let paragraph = paragraph.trim_matches('\n');
-                                    if !paragraph.trim().is_empty() {
-                                        body(ui, paragraph, p.text);
+                // Numa `Ui` própria: o campo de ID abaixo guarda o id (e o
+                // foco) quando o que está acima dele muda.
+                ui.scope(|ui| {
+                    let p = theme::palette(ui.visuals());
+                    match h {
+                        Some(h) => {
+                            let agent = if h.agent.is_empty() { "—" } else { &h.agent };
+                            let when = match age(&h.at, now).and_then(|a| a.long()) {
+                                Some(ago) => format!("{} ({ago})", crate::app::date(&h.at)),
+                                None => crate::app::date(&h.at),
+                            };
+                            widgets::caption(ui, &format!("Aberto · {agent} · {when}"));
+                            ui.add(
+                                Label::new(RichText::new(headline(h).0).font(Type::Detail.font()))
+                                    .wrap(),
+                            );
+                            let parsed = (!h.redacted)
+                                .then_some(h.summary.as_deref())
+                                .flatten()
+                                .map(handoff_text::parse);
+                            match &parsed {
+                                _ if h.redacted => body(
+                                    ui,
+                                    "Resumo restrito pelas permissões do servidor.",
+                                    p.text2,
+                                ),
+                                None => body(ui, "Sem resumo.", p.text2),
+                                Some(parsed) => {
+                                    let rest = handoff_text::outline(&parsed.body).rest;
+                                    for paragraph in rest.split("\n\n") {
+                                        let paragraph = paragraph.trim_matches('\n');
+                                        if !paragraph.trim().is_empty() {
+                                            body(ui, paragraph, p.text);
+                                        }
                                     }
                                 }
                             }
-                        }
-                        if let Some(steps) = h.next_steps.as_ref().filter(|s| !s.is_empty()) {
-                            ui.label(
-                                RichText::new("Próximos passos")
-                                    .size(12.)
-                                    .family(theme::semibold())
-                                    .color(p.text2),
-                            );
-                            for (i, step) in steps.iter().enumerate() {
-                                body(ui, &format!("{}. {step}", i + 1), p.text);
+                            if let Some(steps) = h.next_steps.as_ref().filter(|s| !s.is_empty()) {
+                                ui.label(
+                                    RichText::new("Próximos passos")
+                                        .size(12.)
+                                        .family(theme::semibold())
+                                        .color(p.text2),
+                                );
+                                for (i, step) in steps.iter().enumerate() {
+                                    body(ui, &format!("{}. {step}", i + 1), p.text);
+                                }
                             }
                         }
+                        None => placeholder(
+                            ui,
+                            self.identifier.trim().is_empty(),
+                            (
+                                "Nenhum handoff selecionado",
+                                "Escolha um na lista ou informe o ID de um handoff fora dela.",
+                            ),
+                            (
+                                "Handoff fora da lista",
+                                "Este ID não está entre os abertos deste projeto na última coleta.",
+                            ),
+                        ),
                     }
-                    None => placeholder(
-                        ui,
-                        self.identifier.trim().is_empty(),
-                        (
-                            "Nenhum handoff selecionado",
-                            "Escolha um na lista ou informe o ID de um handoff fora dela.",
-                        ),
-                        (
-                            "Handoff fora da lista",
-                            "Este ID não está entre os abertos deste projeto na última coleta.",
-                        ),
-                    ),
-                }
+                });
                 let id = !self.identifier.trim().is_empty();
                 labeled(ui, "ID do handoff", |ui| {
                     let width = ui.available_width().min(FIELD);
@@ -1359,22 +1500,17 @@ fn proposal_age(row: &Value, now: DateTime<Utc>) -> Option<crate::sessions_ui::A
     age(&at, now)
 }
 
-/// O detalhe da proposta `v`, a resposta de `GET /admin/pending-writes/{id}`
-/// (`summary` com `status`, `title` e `staged_at`, `rationale`,
-/// `evidence_json` = [{page, quote}] e `events`): "Proposta <estado> · criada
-/// por <agente> há N" (12, text2), o título, a justificativa e as evidências
-/// (text2). Um campo ausente some com a sua linha.
-fn proposal_view(ui: &mut Ui, v: &Value, now: DateTime<Utc>) {
+/// O corpo do detalhe da proposta `v`, a resposta de `GET
+/// /admin/pending-writes/{id}` (`summary` com `status`, `title` e
+/// `staged_at`, `rationale`, `evidence_json` = [{page, quote}] e `events`):
+/// a justificativa e as evidências (text2). A linha de estado
+/// (`proposal_meta`) e o título ficam no topo do detalhe. Um campo ausente
+/// some com a sua linha.
+fn proposal_body(ui: &mut Ui, v: &Value) {
     fn text(value: &Value) -> Option<&str> {
         value.as_str().filter(|t| !t.trim().is_empty())
     }
     let p = theme::palette(ui.visuals());
-    if let Some(meta) = proposal_meta(v, now) {
-        widgets::caption(ui, &meta);
-    }
-    if let Some(title) = text(&v["summary"]["title"]) {
-        ui.add(Label::new(RichText::new(title).font(Type::Detail.font())).wrap());
-    }
     if let Some(rationale) = text(&v["rationale"]) {
         body(ui, rationale, p.text);
     }
@@ -2009,7 +2145,11 @@ mod tests {
     use egui::accesskit::{Node, Role, Toggled};
     use serde_json::json;
     use std::{
-        sync::{Mutex, mpsc},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering::SeqCst},
+            mpsc,
+        },
         time::{Duration, Instant},
     };
 
@@ -3155,12 +3295,45 @@ mod tests {
             ("Proposta 1 · decisions/p-1.md · 25 min".to_owned(), true),
             "the selection is kept"
         );
-        // "Informar ID…" abre o detalhe para um ID fora da lista.
-        let id = rect_of(&node(&out, Role::Button, "Informar ID…"));
-        click_sized(&ctx, NARROW, id.center(), &mut add);
+        // O campo de ID fica no pé da lista, no lugar de "Informar ID…":
+        // Enter abre o detalhe do ID digitado, mesmo fora da lista; vazio,
+        // não abre.
+        assert!(nodes(&out, Role::Button, "Informar ID…").is_empty());
+        let field = rect_of(&node(&out, Role::TextInput, "p-1"));
+        let list = rect_of(&node(&out, Role::Pane, "Lista de propostas"));
+        assert!(field.top() >= list.bottom(), "below the rows: {field:?}");
+        click_sized(&ctx, NARROW, field.center(), &mut add);
+        let erase = vec![
+            key(egui::Key::End),
+            key(egui::Key::Backspace),
+            key(egui::Key::Backspace),
+            key(egui::Key::Backspace),
+        ];
+        run_sized(&ctx, NARROW, erase, &mut add);
+        run_sized(&ctx, NARROW, vec![key(egui::Key::Enter)], &mut add);
         let out = run_sized(&ctx, NARROW, vec![], &mut add);
-        assert_eq!(panes(&out), (0, 1));
+        assert_eq!(panes(&out), (1, 0), "an empty ID does not open");
+        click_sized(&ctx, NARROW, field.center(), &mut add);
+        run_sized(
+            &ctx,
+            NARROW,
+            vec![egui::Event::Text("p-9".into())],
+            &mut add,
+        );
+        run_sized(&ctx, NARROW, vec![key(egui::Key::Enter)], &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        assert_eq!(panes(&out), (0, 1), "Enter opens the detail");
+        node(&out, Role::Label, "Proposta 9");
         node(&out, Role::Button, "← Voltar");
+        assert!(
+            nodes(&out, Role::TextInput, "p-9").is_empty(),
+            "the ID field stays with the list"
+        );
         // Outro estado ou outro projeto: de volta à lista.
         for (shown, option) in [
             ("Estado: pendentes", "Estado: aprovadas"),
@@ -3170,9 +3343,21 @@ mod tests {
             if let Some(back) = nodes(&out, Role::Button, "← Voltar").first() {
                 click_sized(&ctx, NARROW, rect_of(back).center(), &mut add);
             }
-            let out = run_sized(&ctx, NARROW, vec![], &mut add);
-            let id = rect_of(&node(&out, Role::Button, "Informar ID…"));
-            click_sized(&ctx, NARROW, id.center(), &mut add);
+            // Uma linha da lista (a nova carrega) abre o detalhe.
+            let until = Instant::now() + Duration::from_secs(3);
+            let out = loop {
+                let out = run_sized(&ctx, NARROW, vec![], &mut add);
+                if !rows_of(&out).is_empty() || Instant::now() > until {
+                    break out;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            let row = rect_of(&node(
+                &out,
+                Role::Button,
+                "Proposta 1 · decisions/p-1.md · 25 min",
+            ));
+            click_sized(&ctx, NARROW, row.center(), &mut add);
             let out = run_sized(&ctx, NARROW, vec![], &mut add);
             assert_eq!(panes(&out), (0, 1), "{option}: precondition");
             choose(&ctx, NARROW, &mut add, shown, option);
@@ -3188,13 +3373,28 @@ mod tests {
             assert_eq!(panes(&out), (1, 0), "{option}");
         }
         drop(add);
-        // Lado a lado não há "Voltar" nem "Informar ID…".
+        // Lado a lado não há "Voltar" nem "Informar ID…"; o campo de ID fica
+        // no pé da coluna da lista.
         let out = run_sized(&ctx, WINDOW, vec![], |ui| {
             page(&mut m, ui, &shared, &api, Section::Review);
         });
         assert_eq!(panes(&out), (1, 1));
         assert!(nodes(&out, Role::Button, "← Voltar").is_empty());
         assert!(nodes(&out, Role::Button, "Informar ID…").is_empty());
+        let list = rect_of(&node(&out, Role::Pane, "Lista de propostas"));
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        let fields: Vec<egui::Rect> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::TextInput)
+            .map(|(_, n)| rect_of(n))
+            .collect();
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.top() >= list.bottom() && f.right() <= list.right()),
+            "the ID field under the list: {fields:?} / {list:?}"
+        );
     }
 
     /// Uma tecla apertada, sem modificadores.
@@ -3768,22 +3968,29 @@ mod tests {
         drop(add);
         assert!(m.result.is_none(), "precondition: cleared");
         assert_eq!(shown(&m), Some(json!("p-2")), "Limpar keeps the detail");
-        // Atualizar pede a lista de novo e não apaga o detalhe.
-        let mut add = |ui: &mut Ui| {
-            page(&mut m, ui, &shared, &api, Section::Review);
-        };
-        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
-        click_sized(
-            &ctx,
-            WINDOW,
-            rect_of(&node(&out, Role::Button, "Atualizar")).center(),
-            &mut add,
-        );
-        drop(add);
-        assert!(m.list.value.is_none(), "precondition: the list was asked");
-        assert_eq!(shown(&m), Some(json!("p-2")), "the list keeps the detail");
-        settle_list(&mut m, &shared);
-        assert_eq!(shown(&m), Some(json!("p-2")));
+        // Outro estado pede só a lista (Atualizar relê as duas) e não apaga
+        // o detalhe; nem a volta ao estado anterior.
+        for (shown_state, option) in [
+            ("Estado: pendentes", "Estado: aprovadas"),
+            ("Estado: aprovadas", "Estado: pendentes"),
+        ] {
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            choose(&ctx, WINDOW, &mut add, shown_state, option);
+            drop(add);
+            assert!(
+                m.list.value.is_none(),
+                "{option}: precondition, the list was asked"
+            );
+            assert_eq!(
+                shown(&m),
+                Some(json!("p-2")),
+                "{option}: the list keeps the detail"
+            );
+            settle_list(&mut m, &shared);
+            assert_eq!(shown(&m), Some(json!("p-2")), "{option}");
+        }
         // Uma resposta do detalhe com a folha aberta: a folha, o resultado e
         // o texto digitado ficam.
         m.receipt = Some(receipt());
@@ -3854,6 +4061,489 @@ mod tests {
             settle_list(&mut m, &shared);
         }
         assert_eq!(read(&mock, "p-2"), 2);
+    }
+
+    /// Servidor sintético para as releituras: a lista são `rows` e o detalhe
+    /// de `p-N` traz no título a ordem da leitura entre todas as do detalhe
+    /// ("Proposta N (leitura K)"); as escritas (POST) respondem `post`.
+    fn rereading(rows: Vec<Value>, post: u16) -> Mock {
+        let reads = AtomicUsize::new(0);
+        Mock::new(move |r| {
+            if r.path.starts_with("/admin/pending-writes?") {
+                Response::json(200, Value::Array(rows.clone()))
+            } else if let Some(i) = detail_of(&r.path) {
+                let k = reads.fetch_add(1, SeqCst) + 1;
+                let mut v = proposal_detail(i);
+                v["summary"]["title"] = json!(format!("Proposta {i} (leitura {k})"));
+                Response::json(200, v)
+            } else if r.method == "POST" {
+                Response::json(post, json!({"ok": post == 200}))
+            } else {
+                Response::json(404, json!({}))
+            }
+        })
+    }
+    /// As GETs de detalhe e de lista que o servidor recebeu.
+    fn reads(mock: &Mock) -> (usize, usize) {
+        let requests = mock.requests();
+        let detail = requests.iter().filter(|r| detail_of(&r.path).is_some());
+        let list = requests
+            .iter()
+            .filter(|r| r.path.starts_with("/admin/pending-writes?"));
+        (detail.count(), list.count())
+    }
+
+    #[test]
+    fn the_actions_and_the_fields_stay_put_while_the_detail_loads() {
+        let long = "Aumentar o TTL do cache de cotações para quinze minutos, invalidado no fechamento do pregão e revisado a cada trimestre pela equipe";
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let mock = Mock::new(move |r| {
+            if r.path.starts_with("/admin/pending-writes?") {
+                return Response::json(200, json!([proposal(1), proposal(2), proposal(3)]));
+            }
+            match detail_of(&r.path) {
+                Some(3) => Response::json(500, json!({})),
+                Some(i) => {
+                    let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                    let mut v = proposal_detail(i);
+                    v["summary"]["title"] = json!(long);
+                    v["rationale"] = json!(long.repeat(6));
+                    Response::json(200, v)
+                }
+                None => Response::json(404, json!({})),
+            }
+        });
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        m.reason = "motivo".into();
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Dark);
+        run(&ctx, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_list(&mut m, &shared);
+        // Os botões e os campos (o de ID pelo valor) de um frame.
+        let anchors = |out: &egui::FullOutput, id: &str| {
+            let at = |role, text: &str| rect_of(&node(out, role, text));
+            [
+                at(Role::Button, "Rejeitar…"),
+                at(Role::Button, "Aprovar…"),
+                at(Role::Button, "Ver detalhes"),
+                at(Role::TextInput, id),
+                at(Role::TextInput, "motivo"),
+            ]
+        };
+        let row = |out: &egui::FullOutput, i: usize| {
+            rect_of(&node(
+                out,
+                Role::Button,
+                &format!("Proposta {i} · decisions/p-{i}.md · 25 min"),
+            ))
+            .center()
+        };
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        let blank = anchors(&out, "");
+        node(&out, Role::Label, "Nenhuma proposta selecionada");
+        let pane = rect_of(&node(&out, Role::Pane, "Proposta selecionada"));
+        let list = rect_of(&node(&out, Role::Pane, "Lista de propostas"));
+        click_sized(&ctx, WINDOW, row(&out, 2), &mut add);
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        node(&out, Role::Label, "Carregando proposta…");
+        let loading = anchors(&out, "p-2");
+        drop(add);
+        release.send(()).unwrap();
+        settle_detail(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        let title = rect_of(&node(&out, Role::Label, long));
+        let loaded = anchors(&out, "p-2");
+        click_sized(&ctx, WINDOW, row(&out, 3), &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        node(
+            &out,
+            Role::Label,
+            "Não foi possível carregar a proposta. Servidor respondeu HTTP 500.",
+        );
+        let failed = anchors(&out, "p-3");
+        assert_eq!(loading, blank, "nothing selected → loading");
+        assert_eq!(loaded, blank, "loading → loaded");
+        assert_eq!(failed, blank, "→ error");
+        // A linha do título: as ações à direita do detalhe, a 28 da borda; o
+        // campo de ID no pé da coluna da lista.
+        let [reject, approve, details, field, reason] = blank;
+        assert!(
+            (approve.right() - (pane.right() - 28.)).abs() < 0.5,
+            "{approve:?} in {pane:?}"
+        );
+        assert!(
+            reject.right() < approve.left() && reject.top() == approve.top(),
+            "{reject:?} / {approve:?}"
+        );
+        assert!(
+            approve.top() < pane.top() + 22. + 40.,
+            "at the top: {approve:?}"
+        );
+        for f in [field, details] {
+            assert!(
+                f.top() >= list.bottom() && f.right() <= list.right(),
+                "{f:?} under {list:?}"
+            );
+        }
+        assert!(reason.top() > pane.center().y, "at the foot: {reason:?}");
+        assert!(
+            title.height() > 30. && title.right() < reject.left(),
+            "a wrapped title beside the actions: {title:?}"
+        );
+        drop(add);
+        // Tela estreita: no detalhe, as ações e o motivo também ficam.
+        const NARROW: [f32; 2] = [720., 600.];
+        let narrow = |out: &egui::FullOutput| {
+            let at = |role, text: &str| rect_of(&node(out, role, text));
+            [
+                at(Role::Button, "← Voltar"),
+                at(Role::Button, "Rejeitar…"),
+                at(Role::Button, "Aprovar…"),
+                at(Role::TextInput, "motivo"),
+            ]
+        };
+        m.open = false;
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        click_sized(&ctx, NARROW, row(&out, 1), &mut add);
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        node(&out, Role::Label, "Carregando proposta…");
+        let before = narrow(&out);
+        assert!(
+            nodes(&out, Role::TextInput, "p-1").is_empty(),
+            "the ID field stays with the list"
+        );
+        drop(add);
+        release.send(()).unwrap();
+        settle_detail(&mut m, &shared);
+        let out = run_sized(&ctx, NARROW, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        node(&out, Role::Label, long);
+        let [back, reject, approve, _] = before;
+        assert!(
+            reject.top() == approve.top() && approve.top() > back.bottom(),
+            "the actions under ← Voltar: {back:?} {approve:?}"
+        );
+        assert_eq!(narrow(&out), before, "narrow: loading → loaded");
+    }
+
+    #[test]
+    fn refresh_rereads_the_list_and_the_selected_detail() {
+        let mock = rereading(vec![proposal(1), proposal(2)], 200);
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Light);
+        run(&ctx, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_list(&mut m, &shared);
+        // Sem seleção: só a lista.
+        let tickets = |m: &Management| (m.list.ticket, m.detail.ticket);
+        let refresh = |m: &mut Management| {
+            let mut add = |ui: &mut Ui| {
+                page(m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let at = rect_of(&node(&out, Role::Button, "Atualizar")).center();
+            click_sized(&ctx, WINDOW, at, &mut add);
+        };
+        let before = tickets(&m);
+        refresh(&mut m);
+        settle_list(&mut m, &shared);
+        assert_eq!(tickets(&m), (before.0 + 1, before.1), "no selection");
+        assert_eq!(reads(&mock), (0, 2));
+        // Com uma proposta escolhida: a lista e ela.
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        let row = rect_of(&node(
+            &out,
+            Role::Button,
+            "Proposta 2 · decisions/p-2.md · 25 min",
+        ));
+        click_sized(&ctx, WINDOW, row.center(), &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        let before = tickets(&m);
+        refresh(&mut m);
+        assert_eq!(tickets(&m), (before.0 + 1, before.1 + 1), "both asked");
+        settle_list(&mut m, &shared);
+        settle_detail(&mut m, &shared);
+        assert_eq!(reads(&mock), (2, 3));
+        let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        node(&out, Role::Label, "Proposta 2 (leitura 2)");
+        assert!(nodes(&out, Role::Label, "Proposta 2 (leitura 1)").is_empty());
+    }
+
+    #[test]
+    fn a_successful_approve_or_reject_rereads_the_list_and_the_detail_and_nothing_else_does() {
+        let reject = || Intent::Reject {
+            id: "p-1".into(),
+            reason: "duplicada".into(),
+        };
+        let approve = || Intent::Approve { id: "p-1".into() };
+        let checkpoint = || Intent::Checkpoint {
+            message: "test".into(),
+        };
+        // (intenção, o botão final, a resposta da escrita, relê?)
+        let cases = [
+            (approve(), "Aprovar", 200, true),
+            (reject(), "Rejeitar", 200, true),
+            (approve(), "Aprovar", 500, false),
+            (reject(), "Rejeitar", 409, false),
+            (checkpoint(), "Criar checkpoint", 200, false),
+        ];
+        for (intent, verb, status, reread) in cases {
+            let case = format!("{verb} {status}");
+            let mock = rereading(vec![proposal(1)], status);
+            let shared = Shared::unstarted(mock.config());
+            let mut m = Management::new(shared.clone());
+            m.scope = Some(scope());
+            let api = projects(&[scope()]);
+            let ctx = context(egui::Theme::Dark);
+            run(&ctx, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            settle_list(&mut m, &shared);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let row = rect_of(&node(
+                &out,
+                Role::Button,
+                "Proposta 1 · decisions/p-1.md · 25 min",
+            ));
+            click_sized(&ctx, WINDOW, row.center(), &mut add);
+            drop(add);
+            settle_detail(&mut m, &shared);
+            m.receipt = Some(Receipt {
+                action: Action {
+                    scope: scope(),
+                    intent,
+                },
+                generation: 0,
+                at: Instant::now(),
+            });
+            m.result = Some(json!({"evidencia": "prévia"}));
+            let before = (m.list.ticket, m.detail.ticket);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = frames(&ctx, &mut add);
+            let confirm = rect_of(&node(&out, Role::Button, verb)).center();
+            click_sized(&ctx, WINDOW, confirm, &mut add);
+            drop(add);
+            assert!(m.busy, "{case}: precondition, applying");
+            settle(&mut m, &shared);
+            assert_eq!(m.error.is_none(), status == 200, "{case}: {:?}", m.error);
+            if status == 200 {
+                // A releitura é automática: o aviso não manda atualizar.
+                assert_eq!(
+                    m.notice, "Resposta recebida. Confira os detalhes abaixo.",
+                    "{case}"
+                );
+            }
+            let asked = usize::from(reread);
+            assert_eq!(
+                (m.list.ticket, m.detail.ticket),
+                (before.0 + asked as u64, before.1 + asked as u64),
+                "{case}: reread {reread}"
+            );
+            settle_list(&mut m, &shared);
+            settle_detail(&mut m, &shared);
+            std::thread::sleep(Duration::from_millis(30));
+            m.poll(&shared);
+            assert_eq!(reads(&mock), (1 + asked, 1 + asked), "{case}");
+            // Depois da escrita, só leituras.
+            let requests = mock.requests();
+            let post = requests
+                .iter()
+                .position(|r| r.method == "POST")
+                .expect("the write");
+            assert!(
+                requests[post + 1..].iter().all(|r| r.method == "GET"),
+                "{case}: only reads after the write"
+            );
+            let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            node(
+                &out,
+                Role::Label,
+                &format!("Proposta 1 (leitura {})", 1 + asked),
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_in_flight_before_the_reread_never_overwrites_it() {
+        // a: a aprovação; b: a 2ª leitura do detalhe (Atualizar); c: a 3ª,
+        // a releitura depois da aprovação.
+        let (release_a, gate_a) = mpsc::channel::<()>();
+        let (release_b, gate_b) = mpsc::channel::<()>();
+        let (release_c, gate_c) = mpsc::channel::<()>();
+        let gates = Mutex::new([gate_a, gate_b, gate_c]);
+        let count = AtomicUsize::new(0);
+        let mock = Mock::new(move |r| {
+            let wait = |n: usize| {
+                let _ = gates.lock().unwrap()[n].recv_timeout(Duration::from_secs(5));
+            };
+            if r.path.starts_with("/admin/pending-writes?") {
+                Response::json(200, json!([proposal(1)]))
+            } else if let Some(i) = detail_of(&r.path) {
+                let k = count.fetch_add(1, SeqCst) + 1;
+                if k > 1 {
+                    wait(k - 1);
+                }
+                let mut v = proposal_detail(i);
+                v["summary"]["title"] = json!(format!("Proposta {i} (leitura {k})"));
+                Response::json(200, v)
+            } else if r.path.starts_with("/admin/pending-writes/p-1/approve?") {
+                wait(0);
+                Response::json(200, json!({"ok": true}))
+            } else {
+                Response::json(404, json!({}))
+            }
+        });
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Dark);
+        run(&ctx, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        settle_list(&mut m, &shared);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        let row = rect_of(&node(
+            &out,
+            Role::Button,
+            "Proposta 1 · decisions/p-1.md · 25 min",
+        ));
+        click_sized(&ctx, WINDOW, row.center(), &mut add);
+        drop(add);
+        settle_detail(&mut m, &shared);
+        m.receipt = Some(Receipt {
+            action: Action {
+                scope: scope(),
+                intent: Intent::Approve { id: "p-1".into() },
+            },
+            generation: 0,
+            at: Instant::now(),
+        });
+        m.result = Some(json!({"evidencia": "prévia"}));
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let out = frames(&ctx, &mut add);
+        click_sized(
+            &ctx,
+            WINDOW,
+            rect_of(&node(&out, Role::Button, "Aprovar")).center(),
+            &mut add,
+        );
+        // Com a aprovação no servidor, Atualizar pede a leitura 2.
+        let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+        click_sized(
+            &ctx,
+            WINDOW,
+            rect_of(&node(&out, Role::Button, "Atualizar")).center(),
+            &mut add,
+        );
+        drop(add);
+        assert!(m.busy, "precondition: the approval is in flight");
+        let second = m.detail.ticket;
+        release_a.send(()).unwrap();
+        settle(&mut m, &shared);
+        let third = m.detail.ticket;
+        // A leitura 2 responde depois do novo pedido: é ignorada.
+        release_b.send(()).unwrap();
+        wait(&mut m, &shared, "the third read never came", || {
+            reads(&mock).0 == 3
+        });
+        m.poll(&shared);
+        assert!(
+            m.detail.value.is_none(),
+            "the second read is ignored: {:?}",
+            m.detail.value
+        );
+        release_c.send(()).unwrap();
+        settle_detail(&mut m, &shared);
+        let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        node(&out, Role::Label, "Proposta 1 (leitura 3)");
+        assert!(nodes(&out, Role::Label, "Proposta 1 (leitura 2)").is_empty());
+        assert_eq!(
+            third,
+            second + 1,
+            "the approval asked again, with a new ticket"
+        );
+    }
+
+    #[test]
+    fn typing_a_handoff_id_that_matches_an_open_one_keeps_the_focus() {
+        let (_mock, shared, mut m) = quiet();
+        m.scope = Some(scope());
+        m.tab = 1;
+        let now = Utc::now();
+        let mut api = projects(&[scope()]);
+        api.at = Some(now);
+        api.handoffs = vec![Handoff {
+            id: "h-12".into(),
+            agent: "codex".into(),
+            at: (now - chrono::Duration::minutes(4)).to_rfc3339(),
+            state: "open".into(),
+            summary: Some("## Primeiro".into()),
+            scope: scope().label(),
+            ..Default::default()
+        }];
+        for size in [WINDOW, [720., 600.]] {
+            m.identifier.clear();
+            m.open = true;
+            let ctx = context(egui::Theme::Light);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, size, vec![], &mut add);
+            node(&out, Role::Label, "Nenhum handoff selecionado");
+            let field = rect_of(&node(&out, Role::TextInput, ""));
+            click_sized(&ctx, size, field.center(), &mut add);
+            // Em "h-12" o detalhe troca o aviso pelo handoff, acima do campo.
+            for typed in ["h", "-", "1", "2", "x"] {
+                run_sized(&ctx, size, vec![egui::Event::Text(typed.into())], &mut add);
+            }
+            drop(add);
+            assert_eq!(m.identifier, "h-12x", "{size:?}: the focus stayed");
+        }
     }
 
     #[test]
