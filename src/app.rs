@@ -104,10 +104,8 @@ pub struct MonitorApp {
     resources: ResourceSnapshot,
     api: ApiSnapshot,
     page: Page,
-    docker_tab: usize,
     sessions: crate::sessions_ui::Sessions,
-    filter: String,
-    running_only: bool,
+    docker: crate::docker_ui::Docker,
     history: VecDeque<Sample>,
     minutes: i64,
     last_sync: Instant,
@@ -190,10 +188,8 @@ impl MonitorApp {
             resources: Default::default(),
             api: Default::default(),
             page: Page::Overview,
-            docker_tab: 0,
             sessions: Default::default(),
-            filter: String::new(),
-            running_only: false,
+            docker: Default::default(),
             history: VecDeque::new(),
             minutes: 5,
             last_sync: Instant::now() - Duration::from_secs(1),
@@ -364,7 +360,6 @@ impl MonitorApp {
                         };
                         if nav_item(ui, page, self.page == page, compact, aside).clicked() {
                             self.page = page;
-                            self.filter.clear();
                         }
                     }
                     ui.add_space(10.);
@@ -379,7 +374,6 @@ impl MonitorApp {
                     );
                     if settings.clicked() {
                         self.page = Page::Settings;
-                        self.filter.clear();
                     }
                     // Fontes, de baixo para cima, entre bordas de 10 px e a linha.
                     ui.add_space(16.);
@@ -505,22 +499,32 @@ impl MonitorApp {
             });
     }
 
-    fn notices(&self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
+    /// Avisos globais, no topo de todas as páginas: Docker e ai-memory fora
+    /// (Bad; o do ai-memory leva a Ajustes) e dados parciais da API (Warn).
+    fn notices(&mut self, ui: &mut egui::Ui) {
+        use crate::widgets::{Tone, strip};
         if let Some(e) = &self.resources.docker_error {
-            notice(ui, e, p.warn);
+            strip(ui, Tone::Bad, "Docker indisponível.", e, None);
         }
-        if let Some(e) = &self.api.error {
-            notice(ui, e, p.warn);
+        if let Some(e) = &self.api.error
+            && strip(
+                ui,
+                Tone::Bad,
+                "Sem conexão com o ai-memory.",
+                e,
+                Some("Abrir Ajustes"),
+            )
+            .is_some_and(|r| r.clicked())
+        {
+            self.page = Page::Settings;
         }
         if !self.api.errors.is_empty() {
-            notice(
+            strip(
                 ui,
-                &format!(
-                    "Dados parciais: {} aviso(s). Consulte Ajustes.",
-                    self.api.errors.len()
-                ),
-                p.warn,
+                Tone::Warn,
+                "Dados parciais:",
+                &format!("{} aviso(s). Consulte Ajustes.", self.api.errors.len()),
+                None,
             );
         }
     }
@@ -663,9 +667,11 @@ impl MonitorApp {
             .collect();
         let prev_selected = self.selected_container.clone();
         container_table(ui, &running, &mut self.selected_container, 180.);
-        if self.selected_container != prev_selected && self.selected_container.is_some() {
+        if self.selected_container != prev_selected
+            && let Some(id) = &self.selected_container
+        {
             self.page = Page::Docker;
-            self.docker_tab = 0;
+            self.docker.open(id);
         }
         ui.add_space(16.);
         panel(ui).show(ui, |ui| {
@@ -687,239 +693,6 @@ impl MonitorApp {
         });
     }
 
-    fn docker(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui.visuals());
-        let total = self.resources.docker_total();
-        ui.columns(4, |cols| {
-            metric(
-                &mut cols[0],
-                "CPU · CONTÊINERES",
-                total.as_ref().map(|u| format!("{}%", decimal(u.cpu, 1))),
-                "100% = um núcleo",
-                p.series2,
-            );
-            metric(
-                &mut cols[1],
-                "MEMÓRIA · CONTÊINERES",
-                total.as_ref().map(|u| bytes(u.memory)),
-                "Cache inativo excluído pelo Docker",
-                p.series2,
-            );
-            metric(
-                &mut cols[2],
-                "THREADS / TAREFAS",
-                total.as_ref().and_then(|u| u.tasks.map(number_u64)),
-                "Processos + threads Linux",
-                p.text,
-            );
-            metric(
-                &mut cols[3],
-                "IMAGENS LOCAIS",
-                self.resources
-                    .images_at
-                    .map(|_| number(self.resources.images.len())),
-                "IDs únicos; tags agrupadas",
-                p.acc,
-            );
-        });
-        ui.add_space(16.);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.docker_tab, 0, "Contêineres");
-            ui.selectable_value(&mut self.docker_tab, 1, "Imagens");
-            ui.selectable_value(
-                &mut self.docker_tab,
-                2,
-                format!("Processos no {}", crate::platform::HOST),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Buscar nome, imagem ou ID…")
-                    .desired_width(300.),
-            );
-            if self.docker_tab == 0 {
-                ui.checkbox(&mut self.running_only, "Só em execução");
-            }
-        });
-        ui.add_space(6.);
-        let needle = self.filter.to_lowercase();
-        if self.docker_tab == 0 {
-            let cs: Vec<_> = self
-                .resources
-                .containers
-                .iter()
-                .filter(|c| {
-                    (!self.running_only || c.state == "running")
-                        && format!("{} {} {}", c.name, c.image, c.id)
-                            .to_lowercase()
-                            .contains(&needle)
-                })
-                .collect();
-            container_table(ui, &cs, &mut self.selected_container, 420.);
-            if let Some(c) = cs
-                .iter()
-                .copied()
-                .find(|c| Some(&c.id) == self.selected_container.as_ref())
-            {
-                ui.add_space(10.);
-                panel(ui).show(ui, |ui| {
-                    section(ui, &c.name);
-                    ui.label(RichText::new(&c.image).color(p.text2));
-                    ui.label(format!("Status: {}", c.status));
-                    ui.label(format!(
-                        "Portas: {}",
-                        if c.ports.is_empty() { "—" } else { &c.ports }
-                    ));
-                    ui.label(format!(
-                        "Rede acumulada: {}  ·  Disco acumulado: {}",
-                        c.net_io, c.block_io
-                    ));
-                    if let Some(u) = &c.usage {
-                        ui.label(format!(
-                            "Limite de memória do contêiner: {}",
-                            bytes(u.limit)
-                        ));
-                    }
-                    if c.name == self.config.container {
-                        ui.separator();
-                        ui.label(RichText::new("Processos dentro do ai-memory").strong());
-                        if let Some(e) = &self.resources.ai_process_error {
-                            ui.label(e);
-                        }
-                        for (pid, name, threads) in &self.resources.ai_processes {
-                            ui.label(format!(
-                                "PID {pid}    {name}    {} threads",
-                                number_u64(*threads)
-                            ));
-                        }
-                    }
-                    if ui.small_button("Copiar ID").clicked() {
-                        ui.ctx().copy_text(c.id.clone());
-                    }
-                });
-            }
-        } else if self.docker_tab == 1 {
-            if let Some(e) = &self.resources.inventory_error {
-                notice(ui, e, p.warn);
-            }
-            ui.label(
-                RichText::new(format!(
-                    "Inventário {} · imagens associadas a contêineres parados continuam em uso.",
-                    age(self.resources.images_at)
-                ))
-                .small()
-                .color(p.text2),
-            );
-            ui.label(RichText::new("Tamanho lógico por imagem; camadas compartilhadas impedem somar estes valores como espaço real em disco.").small().color(p.text2));
-            let images: Vec<_> = self
-                .resources
-                .images
-                .iter()
-                .filter(|i| {
-                    format!("{} {}", i.tags.join(" "), i.id)
-                        .to_lowercase()
-                        .contains(&needle)
-                })
-                .collect();
-            TableBuilder::new(ui)
-                .striped(true)
-                .resizable(true)
-                .column(Column::remainder().at_least(220.))
-                .column(Column::initial(100.))
-                .column(Column::initial(120.))
-                .column(Column::initial(200.))
-                .header(30., |mut h| {
-                    for title in ["IMAGEM / TAGS", "TAMANHO", "USO", "CONTÊINERES"] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(54., images.len(), |mut row| {
-                        let i = images[row.index()];
-                        row.col(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(i.tags.first().map(String::as_str).unwrap_or("<sem tag>"))
-                                    .on_hover_text(i.tags.join("\n"));
-                                ui.label(RichText::new(short_id(&i.id)).small().color(p.text2));
-                            });
-                        });
-                        row.col(|ui| {
-                            ui.label(bytes(i.size));
-                        });
-                        row.col(|ui| {
-                            badge(
-                                ui,
-                                if i.running > 0 {
-                                    "EM EXECUÇÃO"
-                                } else if !i.containers.is_empty() {
-                                    "ASSOCIADA"
-                                } else {
-                                    "SEM VÍNCULO"
-                                },
-                                if i.running > 0 { p.acc } else { p.text2 },
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.label(if i.containers.is_empty() {
-                                "—".into()
-                            } else {
-                                i.containers.join(", ")
-                            });
-                        });
-                    });
-                });
-        } else {
-            ui.label(
-                RichText::new(crate::platform::PROCESSES_CAPTION)
-                    .small()
-                    .color(p.text2),
-            );
-            TableBuilder::new(ui)
-                .striped(true)
-                .column(Column::initial(80.))
-                .column(Column::remainder())
-                .column(Column::initial(90.))
-                .column(Column::initial(110.))
-                .column(Column::initial(90.))
-                .header(30., |mut h| {
-                    for title in ["PID", "PROCESSO", "CPU", "MEMÓRIA RSS", "THREADS"] {
-                        h.col(|ui| {
-                            table_head(ui, title);
-                        });
-                    }
-                })
-                .body(|mut body| {
-                    for p in self
-                        .resources
-                        .processes
-                        .iter()
-                        .filter(|p| process_matches(p, &needle))
-                    {
-                        body.row(36., |mut row| {
-                            row.col(|ui| {
-                                ui.label(p.pid.to_string());
-                            });
-                            row.col(|ui| {
-                                ui.label(&p.name).on_hover_text(&p.group);
-                            });
-                            row.col(|ui| {
-                                ui.label(format!("{}%", decimal(p.usage.cpu, 1)));
-                            });
-                            row.col(|ui| {
-                                ui.label(bytes(p.usage.memory));
-                            });
-                            row.col(|ui| {
-                                ui.label(p.usage.tasks.map(number_u64).unwrap_or("—".into()));
-                            });
-                        });
-                    }
-                });
-        }
-    }
-
     fn reconnect(&mut self, mut config: Config) {
         // O tema é trocado à parte (choose_theme); uma config montada antes da
         // troca, como a do login humano em andamento, não pode revertê-lo.
@@ -935,6 +708,7 @@ impl MonitorApp {
         self.resources = Default::default();
         self.api = Default::default();
         self.sessions.reset();
+        self.docker.reset();
         self.selected_container = None;
         self.paused = false;
         self.last_sync = Instant::now() - Duration::from_secs(1);
@@ -1048,8 +822,8 @@ impl MonitorApp {
             )
             .show(ctx, |ui| {
                 self.notices(ui);
-                // Sessões controla a própria rolagem (lista e detalhe) e cabe
-                // na largura.
+                // Sessões e Docker controlam a própria rolagem (listas,
+                // detalhe, inspetor) e cabem na largura.
                 if self.page == Page::Sessions {
                     if self.sessions.show(ui, &self.api, Utc::now()) {
                         self.management.open_handoffs();
@@ -1057,8 +831,13 @@ impl MonitorApp {
                     }
                     return;
                 }
-                // Na largura mínima, tabelas e linhas do Docker passam da
-                // área: rolam na horizontal em vez de cortar.
+                if self.page == Page::Docker {
+                    self.docker
+                        .show(ui, &self.resources, &self.config.container, Utc::now());
+                    return;
+                }
+                // Na largura mínima, tabelas e linhas da Visão geral passam
+                // da área: rolam na horizontal em vez de cortar.
                 egui::ScrollArea::both()
                     .id_salt("main-scroll")
                     .show(ui, |ui| {
@@ -1108,9 +887,8 @@ impl MonitorApp {
                             Page::Explore => {
                                 self.central.show(ui, &self.shared, &self.api.projects)
                             }
-                            // Mostrada acima, fora desta rolagem.
-                            Page::Sessions => {}
-                            Page::Docker => self.docker(ui),
+                            // Mostradas acima, fora desta rolagem.
+                            Page::Sessions | Page::Docker => {}
                             Page::Settings => self.settings(ui),
                         }
                     });
@@ -1553,17 +1331,6 @@ fn drag_window(response: &egui::Response) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
     }
 }
-fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.08))
-        .inner_margin(10)
-        .corner_radius(6.)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.label(RichText::new(text).small().color(color));
-        });
-    ui.add_space(4.);
-}
 fn empty(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     let p = theme::palette(ui.visuals());
     panel(ui).show(ui, |ui| {
@@ -1986,7 +1753,7 @@ pub(crate) fn handoff_warning_message(loaded: usize, total: Option<usize>) -> St
     }
 }
 
-fn process_matches(p: &HostProcess, needle: &str) -> bool {
+pub(crate) fn process_matches(p: &HostProcess, needle: &str) -> bool {
     format!("{} {} {}", p.pid, p.name, p.group)
         .to_lowercase()
         .contains(needle)
@@ -3860,6 +3627,468 @@ mod tests {
             update_node(&out, Role::Button, "Um título bem comprido que não cabe na linha da lista estreita de jeito nenhum · codex · agora").toggled(),
             Some(egui::accesskit::Toggled::True),
             "a new connection opens on the first again"
+        );
+    }
+
+    /// Docker com dados longos: oito contêineres (três em execução), um nome
+    /// e uma imagem compridos, imagens, processos e o contexto.
+    fn docker_data() -> ResourceSnapshot {
+        let now = Utc::now();
+        let container = |name: &str, state: &str, cpu: Option<f64>, ports: &str| Container {
+            id: format!("{name}-{}", "8f3c21a9d0e4".repeat(5)),
+            name: name.into(),
+            image: format!("ghcr.io/organizacao/{name}:2026.11.03"),
+            state: state.into(),
+            status: "Up 3 days".into(),
+            ports: ports.into(),
+            usage: cpu.map(|cpu| Usage {
+                cpu,
+                memory: 1_234_567_890,
+                limit: 8 << 30,
+                tasks: Some(1234),
+            }),
+            net_io: "1.2GB / 840MB".into(),
+            block_io: "3.4GB / 9.1GB".into(),
+            ..Default::default()
+        };
+        ResourceSnapshot {
+            at: Some(now),
+            containers: vec![
+                container(
+                    "ai-memory",
+                    "running",
+                    Some(123.4),
+                    "0.0.0.0:49374->49374/tcp, [::]:49374->49374/tcp",
+                ),
+                container(
+                    "postgres-dev",
+                    "running",
+                    Some(2.7),
+                    "0.0.0.0:5432->5432/tcp",
+                ),
+                container("redis-cache", "running", Some(0.4), "6379/tcp"),
+                container(
+                    "um-conteiner-com-um-nome-comprido-demais-para-a-coluna",
+                    "exited",
+                    None,
+                    "",
+                ),
+                container("minio", "exited", None, ""),
+                container("grafana", "paused", None, "3000/tcp"),
+                container("loki", "created", None, ""),
+                container("tempo", "dead", None, ""),
+            ],
+            images: (0..40)
+                .map(|i| DockerImage {
+                    id: format!("sha256:{i:064x}"),
+                    tags: vec![format!("ghcr.io/organizacao/imagem-{i}:latest")],
+                    size: 1_234_567_890,
+                    containers: vec!["ai-memory".into()],
+                    running: 1,
+                })
+                .collect(),
+            images_at: Some(now - chrono::Duration::seconds(9)),
+            processes: (0..30)
+                .map(|i| HostProcess {
+                    pid: 10_000 + i,
+                    name: format!("com.docker.virtualization-processo-{i}"),
+                    group: "Docker Desktop".into(),
+                    usage: Usage {
+                        cpu: 123.4,
+                        memory: 1_234_567_890,
+                        tasks: Some(1234),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            ai_processes: vec![("1".into(), "ai-memory".into(), 41)],
+            docker_context: Some("desktop-linux".into()),
+            ..Default::default()
+        }
+    }
+    /// Roda a roda sobre `pos` e espera a animação; devolve o último frame.
+    fn wheel(
+        app: &mut MonitorApp,
+        ctx: &egui::Context,
+        size: [f32; 2],
+        pos: egui::Pos2,
+        dy: f32,
+    ) -> egui::FullOutput {
+        let pointer = egui::Event::PointerMoved(pos);
+        frame(app, ctx, size, vec![pointer.clone()]);
+        frame(
+            app,
+            ctx,
+            size,
+            vec![
+                pointer.clone(),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0., dy),
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        let mut out = frame(app, ctx, size, vec![pointer.clone()]);
+        for _ in 0..30 {
+            out = frame(app, ctx, size, vec![pointer.clone()]);
+        }
+        out
+    }
+    /// Linhas da tabela de contêineres, de cima para baixo.
+    fn container_rows(out: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        let mut rows: Vec<(String, egui::Rect)> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == egui::accesskit::Role::Button
+                    && n.label().is_some_and(|l| l.contains(" · CPU "))
+            })
+            .map(|(_, n)| {
+                let b = n.bounds().unwrap();
+                (
+                    n.label().unwrap().split(" · ").next().unwrap().to_owned(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(b.x0 as f32, b.y0 as f32),
+                        egui::pos2(b.x1 as f32, b.y1 as f32),
+                    ),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+        rows
+    }
+
+    #[test]
+    fn docker_page_fits_720_and_1320_in_both_themes_without_overlap() {
+        use crate::docker_ui::Tab;
+        use egui::accesskit::Role;
+        let host = format!("Processos do {}", crate::platform::HOST);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for size in [[720., 560.], [1320., 860.]] {
+                for tab in [Tab::Containers, Tab::Images, Tab::Processes] {
+                    let mut app = app_with_unsaved_draft();
+                    app.page = Page::Docker;
+                    app.config.container = "ai-memory".into();
+                    app.resources = docker_data();
+                    app.docker.set_tab(tab);
+                    let ctx = styled();
+                    ctx.set_theme(theme);
+                    ctx.enable_accesskit();
+                    let out = frame(&mut app, &ctx, size, vec![]);
+                    let side = sidebar_width(&ctx);
+                    let (left, right) = (side + 24., size[0] - 24.);
+                    let case = format!("{theme:?} {size:?} {tab:?}");
+                    let found = page_widgets(&out, side, size[1]);
+                    assert!(found.len() > 10, "{case}: the page mounted: {found:?}");
+                    for (name, rect) in &found {
+                        assert!(
+                            rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                            "{case}: {name:?} {rect:?} leaves the content ({left}..{right})"
+                        );
+                    }
+                    // Linha de ferramentas: abas e busca lado a lado, sem se tocar.
+                    let tabs = widget_rect(&out, Role::Button, &host);
+                    let search = update_node(&out, Role::TextInput, "")
+                        .bounds()
+                        .map(|b| {
+                            egui::Rect::from_min_max(
+                                egui::pos2(b.x0 as f32, b.y0 as f32),
+                                egui::pos2(b.x1 as f32, b.y1 as f32),
+                            )
+                        })
+                        .unwrap();
+                    assert!(
+                        tabs.right() < search.left() && search.right() <= right + 0.5,
+                        "{case}: {tabs:?} / {search:?}"
+                    );
+                    // A legenda é a última coisa e fica acima da barra de status.
+                    let legend = widget_rect(&out, Role::Label, "Imagens: inventário há 9 s");
+                    assert!(
+                        legend.bottom() <= size[1] - 28. - 20. + 0.5,
+                        "{case}: legend {legend:?} must sit above the status bar"
+                    );
+                    if tab != Tab::Containers {
+                        continue;
+                    }
+                    let switch = widget_rect(&out, Role::CheckBox, "Só em execução");
+                    let summary = widget_rect(&out, Role::Label, "Tarefas 3.702");
+                    assert!(
+                        summary.right() < switch.left()
+                            && (summary.center().y - switch.center().y).abs() < 4.,
+                        "{case}: one summary line: {summary:?} / {switch:?}"
+                    );
+                    let table = widget_rect(&out, Role::Pane, "Contêineres");
+                    assert!(table.top() > switch.bottom(), "{case}: {table:?}");
+                    let rows = container_rows(&out);
+                    assert_eq!(rows[0].0, "ai-memory", "{case}");
+                    assert!(rows.windows(2).all(|w| w[0].1.bottom() <= w[1].1.top()));
+                    let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+                    if size[0] == 1320. {
+                        assert_eq!(inspector.width(), 320., "{case}");
+                        assert!((inspector.right() - right).abs() < 0.5, "{case}");
+                        assert_eq!(table.right() + 1., inspector.left(), "{case}");
+                        widget_rect(&out, Role::Label, "Portas");
+                    } else {
+                        // Depois das oito linhas, abaixo da dobra.
+                        assert!(inspector.top() > table.bottom(), "{case}: below the fold");
+                        assert!(
+                            inspector.top() >= rows[0].1.top() + 8. * 44.,
+                            "{case}: {inspector:?} after the rows from {:?}",
+                            rows[0].1
+                        );
+                        let out = wheel(&mut app, &ctx, size, table.center(), -3000.);
+                        let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+                        assert!(
+                            (inspector.left() - left).abs() < 0.5
+                                && (inspector.right() - right).abs() < 0.5,
+                            "{case}: {inspector:?} spans the content"
+                        );
+                        let copy = widget_rect(&out, Role::Button, "Copiar nome");
+                        assert!(
+                            table.contains_rect(copy),
+                            "{case}: scrolled into view, not cut: {copy:?} in {table:?}"
+                        );
+                        assert!(widgets(&out, Role::Label, "Portas").is_empty(), "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn docker_table_follows_the_width_of_every_frame() {
+        use egui::accesskit::Role;
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        app.resources = docker_data();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let content =
+            |ctx: &egui::Context, size: [f32; 2]| (sidebar_width(ctx) + 24., size[0] - 24.);
+        let narrow = [720., 560.];
+        // (tamanho, inspetor ao lado?) — no mesmo contexto, nada guardado.
+        for (size, beside) in [
+            (narrow, false),
+            ([1320., 860.], true),
+            ([1920., 1080.], true),
+            (narrow, false),
+            ([1320., 860.], true),
+        ] {
+            let out = frame(&mut app, &ctx, size, vec![]);
+            let (left, right) = content(&ctx, size);
+            let table = widget_rect(&out, Role::Pane, "Contêineres");
+            let want = if beside { right - 321. } else { right };
+            assert!(
+                (table.left() - left).abs() < 0.5 && (table.right() - want).abs() < 0.5,
+                "{size:?}: table {table:?} must span {left}..{want}"
+            );
+            let rows = container_rows(&out);
+            assert!(
+                rows.iter()
+                    .all(|(_, r)| (r.left() - left).abs() < 0.5 && (r.right() - want).abs() < 0.5),
+                "{size:?}: rows follow the table: {rows:?}"
+            );
+            let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+            assert_eq!(inspector.left() > table.left(), beside, "{size:?}");
+        }
+    }
+
+    #[test]
+    fn global_notices_are_strips_on_every_page_in_both_themes() {
+        use egui::accesskit::Role;
+        let docker = "Docker indisponível. Docker CLI não encontrado.";
+        let api = "Sem conexão com o ai-memory. Falha ao conectar.";
+        let partial = "Dados parciais: 2 aviso(s). Consulte Ajustes.";
+        // (caso, erro do Docker, erro da API, avisos parciais, faixas na ordem)
+        let cases: [(&str, bool, bool, usize, &[&str]); 5] = [
+            ("none", false, false, 0, &[]),
+            ("docker", true, false, 0, &[docker]),
+            ("api", false, true, 0, &[api]),
+            ("partial", false, false, 2, &[partial]),
+            ("all", true, true, 2, &[docker, api, partial]),
+        ];
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let p = if theme == egui::Theme::Dark {
+                &theme::DARK
+            } else {
+                &theme::LIGHT
+            };
+            for (case, docker_down, api_down, warnings, want) in cases {
+                for page in PAGES {
+                    let mut app = app_with_unsaved_draft();
+                    app.page = page;
+                    app.resources.docker_error =
+                        docker_down.then(|| "Docker CLI não encontrado.".into());
+                    app.api.error = api_down.then(|| "Falha ao conectar.".into());
+                    app.api.errors = vec!["aviso".into(); warnings];
+                    let ctx = styled();
+                    ctx.set_theme(theme);
+                    ctx.enable_accesskit();
+                    let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+                    let strips: Vec<egui::Rect> = want
+                        .iter()
+                        .map(|text| widget_rect(&out, Role::Label, text))
+                        .collect();
+                    assert!(
+                        strips.windows(2).all(|w| w[0].bottom() < w[1].top()),
+                        "{theme:?} {case} {page:?}: in order, apart"
+                    );
+                    let fills = |color: Color32| {
+                        out.shapes
+                            .iter()
+                            .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color))
+                            .count()
+                    };
+                    assert_eq!(
+                        (
+                            fills(p.bad.gamma_multiply(0.08)),
+                            fills(p.warn.gamma_multiply(0.10))
+                        ),
+                        (
+                            usize::from(docker_down) + usize::from(api_down),
+                            usize::from(warnings > 0)
+                        ),
+                        "{theme:?} {case} {page:?}: Bad and Warn strips"
+                    );
+                    let open = widgets(&out, Role::Button, "Abrir Ajustes");
+                    assert_eq!(open.len(), usize::from(api_down), "{case} {page:?}");
+                    // Nada da página sobre as faixas.
+                    let side = sidebar_width(&ctx);
+                    for (name, rect) in page_widgets(&out, side, 860.) {
+                        if want.contains(&name.as_str()) || name == "Abrir Ajustes" {
+                            continue;
+                        }
+                        for strip in &strips {
+                            assert!(
+                                !rect.intersects(strip.shrink(0.5)),
+                                "{theme:?} {case} {page:?}: {name:?} {rect:?} on a strip {strip:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // "Abrir Ajustes" leva a Ajustes.
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        app.api.error = Some("Falha ao conectar.".into());
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, [1320., 860.], vec![]);
+        let open = widget_rect(&out, Role::Button, "Abrir Ajustes");
+        click_at(&mut app, &ctx, [1320., 860.], open.center());
+        assert_eq!(app.page, Page::Settings);
+    }
+
+    #[test]
+    fn navigating_away_keeps_the_docker_search() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for away in ["Visão geral", "Ajustes"] {
+            let mut app = app_with_unsaved_draft();
+            app.page = Page::Docker;
+            app.resources = docker_data();
+            *app.docker.search_mut() = "redis".into();
+            let ctx = styled();
+            ctx.enable_accesskit();
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(
+                container_rows(&out)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect::<Vec<_>>(),
+                ["redis-cache"]
+            );
+            click_at(
+                &mut app,
+                &ctx,
+                size,
+                widget_rect(&out, Role::Button, away).center(),
+            );
+            assert_ne!(app.page, Page::Docker, "{away}");
+            let out = frame(&mut app, &ctx, size, vec![]);
+            click_at(
+                &mut app,
+                &ctx,
+                size,
+                widget_rect(&out, Role::Button, "Docker").center(),
+            );
+            let out = frame(&mut app, &ctx, size, vec![]);
+            assert_eq!(app.page, Page::Docker);
+            assert_eq!(app.docker.search_mut(), "redis", "{away}");
+            update_node(&out, Role::TextInput, "redis");
+            assert_eq!(container_rows(&out).len(), 1, "{away}");
+        }
+    }
+
+    #[test]
+    fn a_container_clicked_in_the_overview_opens_in_the_docker_inspector() {
+        use egui::accesskit::Role;
+        // Alta o bastante para a tabela da Visão geral aparecer sem rolar.
+        let size = [1320., 1400.];
+        let mut app = app_with_unsaved_draft();
+        app.resources = docker_data();
+        app.docker.set_tab(crate::docker_ui::Tab::Images);
+        *app.docker.search_mut() = "redis".into();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(app.page, Page::Overview);
+        let row = widget_rect(&out, Role::Button, "postgres-dev");
+        assert!(
+            row.bottom() < size[1] - 28.,
+            "precondition: the row is on screen"
+        );
+        click_at(&mut app, &ctx, size, row.center());
+        assert_eq!(app.page, Page::Docker);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(app.docker.search_mut(), "", "the search would hide it");
+        assert_eq!(
+            app.docker.selected(),
+            Some(&*format!("postgres-dev-{}", "8f3c21a9d0e4".repeat(5)))
+        );
+        update_node(&out, Role::Button, "Contêineres 8");
+        let inspector = widget_rect(&out, Role::Pane, "Inspetor do contêiner");
+        assert!(inspector.contains_rect(widget_rect(&out, Role::Label, "postgres-dev")));
+    }
+
+    #[test]
+    fn reconnect_clears_the_docker_selection_but_keeps_the_search() {
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Docker;
+        // O monitorado não é o primeiro da lista (ai-memory tem mais CPU).
+        app.config.container = "redis-cache".into();
+        app.resources = docker_data();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        let out = frame(&mut app, &ctx, size, vec![]);
+        let row = container_rows(&out)
+            .into_iter()
+            .find(|(n, _)| n == "minio")
+            .unwrap()
+            .1;
+        click_at(&mut app, &ctx, size, row.center());
+        *app.docker.search_mut() = "i".into();
+        frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            app.docker
+                .selected()
+                .is_some_and(|id| id.starts_with("minio-")),
+            "precondition: minio chosen"
+        );
+        app.reconnect(app.config.clone());
+        assert_eq!(app.docker.selected(), None);
+        assert_eq!(app.docker.search_mut(), "i");
+        app.resources = docker_data();
+        frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            app.docker
+                .selected()
+                .is_some_and(|id| id.starts_with("redis-cache-")),
+            "a new connection opens on the monitored container, not on the first"
         );
     }
 }

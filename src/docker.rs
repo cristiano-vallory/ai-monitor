@@ -306,6 +306,25 @@ pub fn sort_images(images: &mut [DockerImage]) {
     });
 }
 
+/// Contexto ativo do Docker CLI (`docker context show`, só leitura). O
+/// processo herda o ambiente, então `DOCKER_CONTEXT` e `DOCKER_HOST` valem
+/// como no terminal. Falha, tempo esgotado ou saída que não é um nome de
+/// contexto = `None`, sem aviso.
+pub fn context(binary: &str) -> Option<String> {
+    parse_context(&command(binary, &["context", "show"]).ok()?)
+}
+
+/// Um nome de contexto numa linha: letras, algarismos e `_.+-`, começando
+/// por letra ou algarismo (a regra do Docker), até 128 caracteres.
+fn parse_context(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    let mut chars = name.chars();
+    (name.len() <= 128
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c)))
+    .then(|| name.to_owned())
+}
+
 pub fn process_threads(
     binary: &str,
     container: &str,
@@ -445,6 +464,116 @@ mod tests {
             }
         }
         assert_eq!(drain(FlakyReader { step: 0 }), b"hello world");
+    }
+
+    #[test]
+    fn context_names_follow_the_docker_rule_and_anything_else_is_none() {
+        for (raw, want) in [
+            ("desktop-linux\n", Some("desktop-linux")),
+            ("default\n", Some("default")),
+            ("  colima \r\n", Some("colima")),
+            ("a", Some("a")),
+            ("ctx_1.2+x-y", Some("ctx_1.2+x-y")),
+            (&"c".repeat(128), Some(&*"c".repeat(128))),
+            (&"c".repeat(129), None),
+            ("", None),
+            ("  \n", None),
+            ("dois\nnomes", None),
+            ("com espaço", None),
+            ("-começa-com-hífen", None),
+            (".oculto", None),
+            ("acentuação", None),
+            ("{\"Name\":\"x\"}", None),
+            ("\u{1b}[31mvermelho", None),
+        ] {
+            assert_eq!(parse_context(raw).as_deref(), want, "{raw:?}");
+        }
+    }
+
+    /// Um `docker` falso: um script que só existe neste teste.
+    #[cfg(unix)]
+    fn fake_docker(name: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("ai-monitor-context-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("docker");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, script)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn context_runs_context_show_and_falls_back_to_none_without_noise() {
+        // (caso, corpo do script, esperado)
+        for (case, body, want) in [
+            (
+                "the subcommand",
+                "[ \"$1 $2 $#\" = \"context show 2\" ] && echo desktop-linux",
+                Some("desktop-linux"),
+            ),
+            ("exit 1", "echo default; echo 'erro' >&2; exit 1", None),
+            ("empty output", "exit 0", None),
+            ("garbage", "echo 'Erro interno <html>'", None),
+            ("two lines", "printf 'um\\ndois\\n'", None),
+        ] {
+            let (dir, script) = fake_docker(case.split(' ').next().unwrap(), body);
+            let got = context(script.to_str().unwrap());
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(got.as_deref(), want, "{case}");
+        }
+        assert_eq!(
+            context("/nonexistent/ai-monitor/docker"),
+            None,
+            "missing binary"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn context_inherits_docker_context_and_docker_host() {
+        const CHILD: &str = "AI_MONITOR_TEST_CONTEXT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // O docker falso responde com o que herdou do ambiente.
+            let (dir, script) = fake_docker(
+                "env",
+                "echo \"${DOCKER_CONTEXT:-sem-contexto}+${DOCKER_HOST:-sem-host}\"",
+            );
+            let got = context(script.to_str().unwrap());
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(got.as_deref(), Some(std::env::var(CHILD).unwrap().as_str()));
+            return;
+        }
+        // (DOCKER_CONTEXT, DOCKER_HOST, o que o docker falso tem de ver)
+        for (docker_context, docker_host, want) in [
+            (Some("remoto"), None, "remoto+sem-host"),
+            (None, Some("tcp-host"), "sem-contexto+tcp-host"),
+            (Some("a"), Some("b"), "a+b"),
+        ] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "docker::tests::context_inherits_docker_context_and_docker_host",
+                ])
+                .env(CHILD, want)
+                .env_remove("DOCKER_CONTEXT")
+                .env_remove("DOCKER_HOST");
+            if let Some(v) = docker_context {
+                child.env("DOCKER_CONTEXT", v);
+            }
+            if let Some(v) = docker_host {
+                child.env("DOCKER_HOST", v);
+            }
+            let result = child.output().unwrap();
+            assert!(
+                result.status.success(),
+                "{want}: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
     }
 
     #[test]

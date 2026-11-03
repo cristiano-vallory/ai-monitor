@@ -770,9 +770,18 @@ mod tests {
                 "{case}"
             );
             let go = rect_of(&node(&out, Role::Button, "Ir para Revisão"));
-            let discard_at = nodes(&out, Role::Button, discard_button)
+            let discard_rect = nodes(&out, Role::Button, discard_button)
                 .first()
-                .map(|n| rect_of(n).center());
+                .map(rect_of);
+            let discard_at = discard_rect.map(|r| r.center());
+            // O botão vem abaixo da faixa inteira, não sobre ela.
+            let strip = rect_of(&node(&out, Role::Label, warning));
+            if let Some(button) = discard_rect {
+                assert!(
+                    button.top() > strip.bottom(),
+                    "{case}: {button:?} under {strip:?}"
+                );
+            }
             click(&ctx, go.center(), &mut add);
             drop(add);
             assert_eq!(went, Some(Section::Review), "{case}");

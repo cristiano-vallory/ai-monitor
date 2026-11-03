@@ -458,6 +458,8 @@ pub struct ResourceSnapshot {
     pub processes: Vec<HostProcess>,
     pub ai_processes: Vec<(String, String, u64)>,
     pub ai_process_error: Option<String>,
+    /// Contexto ativo do Docker CLI (`docker context show`); `None` = não lido.
+    pub docker_context: Option<String>,
 }
 
 impl ResourceSnapshot {

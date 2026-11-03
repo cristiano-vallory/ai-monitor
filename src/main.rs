@@ -7,6 +7,7 @@ mod client;
 mod commands;
 mod console;
 mod docker;
+mod docker_ui;
 mod handoff_text;
 mod health;
 mod health_ui;
@@ -53,6 +54,7 @@ fn main() -> eframe::Result {
             Ok(images) => resources.images = images,
             Err(e) => resources.inventory_error = Some(e),
         }
+        resources.docker_context = docker::context(&config.docker_binary);
         let api = api::collect(
             &config,
             &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

@@ -715,11 +715,7 @@ impl Sessions {
                     } else {
                         "Ver texto bruto"
                     };
-                    // No `scope`: o `strip` com ação devolve o cursor para
-                    // dentro da faixa (o `put` do botão); o escopo o põe abaixo.
-                    if ui
-                        .scope(|ui| widgets::strip(ui, Tone::Info, bold, &text, Some(action)))
-                        .inner
+                    if widgets::strip(ui, Tone::Info, bold, &text, Some(action))
                         .is_some_and(|r| r.clicked())
                     {
                         *raw = !*raw;
@@ -2170,7 +2166,7 @@ mod tests {
                     .any(|r| r.fill == widgets::tone(p.info, 0.10)),
                 "{theme:?}: the info strip"
             );
-            // A faixa vem antes do corpo, sem sobrepor (o escopo do `strip`).
+            // A faixa vem antes do corpo, sem sobrepor.
             let strip = rect_of(&node(
                 &out,
                 Role::Label,

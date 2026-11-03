@@ -50,31 +50,30 @@
 //! - `strip(ui, Tone::{Warn, Bad, Info}, negrito, texto, ação) -> Option<Response>`:
 //!   faixa de aviso (fundo do tom a 8–10 %, ícone, trecho em negrito e texto).
 //!   `ação = Some(rótulo)` põe um `Button::secondary(..).small()` à direita e
-//!   devolve a resposta dele. AccessKit: `Label` "negrito texto".
+//!   devolve a resposta dele; o cursor segue abaixo da faixa inteira.
+//!   AccessKit: `Label` "negrito texto".
 //! - `meter(ui, fração, espessura, cor, rótulo) -> Response`: trilho line de
 //!   `THIN` (4) ou `THICK` (8) px; `None` = desconhecido (só o trilho).
 //!   AccessKit: `ProgressIndicator` com o valor em % (sem valor se `None`).
 //! - `stacked_bar(ui, &[(valor, cor)], espessura, rótulo) -> Response`: partes
 //!   proporcionais ao total; total 0 = só o trilho.
 //! - `facts(ui, &[Fact::new(rótulo, valor).color(cor)])`: linhas rótulo (text2)
-//!   … valor (SemiBold, `cor` ou text), espaçadas de 6. AccessKit: um `Label`
-//!   "rótulo: valor" por linha.
+//!   … valor (SemiBold, `cor` ou text; `.mono()` = `Type::Mono`), espaçadas
+//!   de 6. Numa linha só: o valor longo corta com reticências (o rótulo cede
+//!   até 40 % da largura) e o texto cortado vai ao tooltip. AccessKit: um
+//!   `Label` "rótulo: valor" por linha.
 //! - `tone(cor, alfa) -> Color32`: o tom translúcido de chips e faixas.
 //! - `strokes(painter, rect, &[&[(x, y), …]], largura, cor)` e `dot(painter,
 //!   rect, (x, y), largura, cor)`: ícones a partir dos paths de 24 unidades dos
 //!   artboards (um traço que volta ao ponto inicial é fechado).
 use crate::theme;
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontFamily, FontId, Layout, Pos2, Rect, Response, Sense,
-    Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    self, Align, Color32, CornerRadius, FontFamily, FontId, Galley, Layout, Pos2, Rect, Response,
+    Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
-use std::hash::Hash;
+use std::{hash::Hash, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "API das passadas P2 (Visão geral, Sessões, Docker)"
-)]
 pub(crate) enum Type {
     Detail,
     Bar,
@@ -98,10 +97,6 @@ impl Type {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "API das passadas P2 (Visão geral, Sessões, Docker)"
-)]
 pub(crate) mod space {
     pub(crate) const XS: f32 = 4.;
     pub(crate) const S: f32 = 8.;
@@ -111,7 +106,6 @@ pub(crate) mod space {
 }
 
 /// Espessuras do medidor e da barra empilhada.
-#[allow(dead_code, reason = "API das passadas P2 (Docker)")]
 pub(crate) const THIN: f32 = 4.;
 pub(crate) const THICK: f32 = 8.;
 
@@ -342,13 +336,11 @@ impl egui::Widget for Button<'_> {
     }
 }
 
-#[allow(dead_code, reason = "API das passadas P2 (Sessões, Docker)")]
 pub(crate) struct Segment<'a, T> {
     pub value: T,
     pub label: &'a str,
     pub count: Option<String>,
 }
-#[allow(dead_code, reason = "API das passadas P2 (Sessões, Docker)")]
 pub(crate) fn segmented<T: PartialEq + Copy>(
     ui: &mut Ui,
     current: &mut T,
@@ -417,7 +409,6 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     changed
 }
 
-#[allow(dead_code, reason = "API das passadas P2 (Docker: Só em execução)")]
 pub(crate) fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let p = theme::palette(ui.visuals());
     let galley = ui
@@ -508,12 +499,7 @@ pub(crate) fn chip(ui: &mut Ui, chip: Chip, text: &str) -> Response {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Tone {
     Warn,
-    #[allow(dead_code, reason = "API das passadas P2 (Visão geral: sem conexão)")]
     Bad,
-    #[allow(
-        dead_code,
-        reason = "API das passadas P2 (Sessões: mensagem entre sessões)"
-    )]
     Info,
 }
 impl Tone {
@@ -627,7 +613,14 @@ pub(crate) fn strip(
         pos2(rect.right() - 12. - width, rect.center().y - 12.),
         vec2(width, 24.),
     );
-    Some(ui.put(at, Button::secondary(action.unwrap_or_default()).small()))
+    // Num filho, que não mexe no cursor: `ui.put` o deixaria no fundo do
+    // botão, dentro da faixa, e o próximo widget a sobreporia.
+    let mut slot = ui.new_child(
+        UiBuilder::new()
+            .max_rect(at)
+            .layout(Layout::centered_and_justified(egui::Direction::TopDown)),
+    );
+    Some(slot.add(Button::secondary(action.unwrap_or_default()).small()))
 }
 
 pub(crate) fn meter(
@@ -698,6 +691,7 @@ pub(crate) struct Fact<'a> {
     label: &'a str,
     value: String,
     color: Option<Color32>,
+    mono: bool,
 }
 impl<'a> Fact<'a> {
     pub(crate) fn new(label: &'a str, value: impl Into<String>) -> Self {
@@ -705,12 +699,24 @@ impl<'a> Fact<'a> {
             label,
             value: value.into(),
             color: None,
+            mono: false,
         }
     }
     pub(crate) fn color(mut self, color: Option<Color32>) -> Self {
         self.color = color;
         self
     }
+    /// Valor em `Type::Mono` (IDs, portas).
+    pub(crate) fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+}
+/// Uma linha cortada numa largura (`truncate_at_width`).
+fn single_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.));
+    ui.painter().layout_job(job)
 }
 pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
     let p = theme::palette(ui.visuals());
@@ -718,37 +724,64 @@ pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
         ui.spacing_mut().item_spacing.y = 6.;
         for fact in rows {
             let value_color = fact.color.unwrap_or(p.text);
-            let value = ui.painter().layout_no_wrap(
-                fact.value.clone(),
-                FontId::new(13., theme::semibold()),
-                value_color,
-            );
+            let font = if fact.mono {
+                Type::Mono.font()
+            } else {
+                FontId::new(13., theme::semibold())
+            };
             let width = ui.available_width();
-            let (rect, response) =
-                ui.allocate_exact_size(vec2(width, value.size().y), Sense::hover());
-            let spoken = format!("{}: {}", fact.label, fact.value);
-            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                fact.label.to_owned(),
+            // O valor corta onde começaria o rótulo inteiro, que cede só até
+            // 40 % da linha; depois o rótulo corta no que o valor deixou.
+            let label_width = ui
+                .painter()
+                .layout_no_wrap(fact.label.to_owned(), Type::Body.font(), p.text2)
+                .size()
+                .x;
+            let value = single_line(
+                ui,
+                &fact.value,
+                font,
+                value_color,
+                width - 12. - label_width.min(width * 0.4),
+            );
+            let label = single_line(
+                ui,
+                fact.label,
                 Type::Body.font(),
                 p.text2,
+                width - value.size().x - 12.,
             );
-            job.wrap =
-                egui::text::TextWrapping::truncate_at_width((width - value.size().x - 12.).max(0.));
-            let label = ui.painter().layout_job(job);
-            let elided = label.elided;
+            let (rect, response) = ui.allocate_exact_size(
+                vec2(width, value.size().y.max(label.size().y)),
+                Sense::hover(),
+            );
+            let spoken = format!("{}: {}", fact.label, fact.value);
+            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
+            let elided = (label.elided, value.elided);
             ui.painter().galley(
                 pos2(rect.left(), rect.center().y - label.size().y / 2.),
                 label,
                 p.text2,
             );
             ui.painter().galley(
-                pos2(rect.right() - value.size().x, rect.top()),
+                pos2(
+                    rect.right() - value.size().x,
+                    rect.center().y - value.size().y / 2.,
+                ),
                 value,
                 value_color,
             );
-            if elided {
-                response.on_hover_text(fact.label);
+            match elided {
+                (true, false) => {
+                    response.on_hover_text(fact.label);
+                }
+                (false, true) => {
+                    response.on_hover_text(&fact.value);
+                }
+                (true, true) => {
+                    response.on_hover_text(&spoken);
+                }
+                (false, false) => {}
             }
         }
     });
@@ -1329,6 +1362,96 @@ pub(crate) mod tests {
             strip.height() > 60.,
             "long text must wrap, not overflow: {strip:?}"
         );
+    }
+
+    #[test]
+    fn the_widget_after_a_strip_with_an_action_starts_below_the_whole_strip() {
+        let long = "palavra ".repeat(40);
+        // (largura, texto, linhas mínimas): 1 linha e 3+ linhas.
+        for (width, text, lines) in [(800., "Texto curto.", 1), (300., long.trim(), 3)] {
+            for (theme, _) in THEMES {
+                let ctx = context(theme);
+                let out = run_sized(&ctx, [width, 600.], vec![], |ui| {
+                    strip(ui, Tone::Warn, "Aviso.", text, Some("Abrir"));
+                    ui.label("Depois da faixa");
+                });
+                let strip = rect_of(&node(&out, Role::Label, &format!("Aviso. {text}")));
+                let button = rect_of(&node(&out, Role::Button, "Abrir"));
+                let after = rect_of(&node(&out, Role::Label, "Depois da faixa"));
+                assert!(
+                    strip.height() >= lines as f32 * 15. + 20.,
+                    "{width}: precondition, {lines}+ lines: {strip:?}"
+                );
+                assert!(strip.contains_rect(button), "{button:?} in {strip:?}");
+                let gap = ctx.style().spacing.item_spacing.y;
+                assert_eq!(
+                    after.top(),
+                    strip.bottom() + gap,
+                    "{theme:?} {width}: the next widget follows the strip, not its button"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_fact_values_are_cut_beside_their_label_and_mono_uses_the_mono_font() {
+        let image = "ghcr.io/organizacao/uma-imagem-com-um-nome-muito-comprido:2026.11.03";
+        for (theme, p) in THEMES {
+            let ctx = context(theme);
+            let mut add = |ui: &mut Ui| {
+                ui.allocate_ui(vec2(280., 400.), |ui| {
+                    facts(
+                        ui,
+                        &[
+                            Fact::new("Imagem", image),
+                            Fact::new("ID", "8f3c21a9d0e4").mono(),
+                            Fact::new("Curto", "ok"),
+                        ],
+                    );
+                });
+            };
+            let out = run(&ctx, vec![], &mut add);
+            let row = rect_of(&node(&out, Role::Label, &format!("Imagem: {image}")));
+            let painted = |text: &str| {
+                out.shapes
+                    .iter()
+                    .find_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text().starts_with(text) => {
+                            Some(t.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{text} painted"))
+            };
+            let label = painted("Imagem");
+            let value = painted("ghcr.io");
+            assert!(value.galley.elided, "{theme:?}: the long value is cut");
+            assert!(!label.galley.elided, "{theme:?}: the short label is whole");
+            let logical = |t: &egui::epaint::TextShape| t.galley.rect.translate(t.pos.to_vec2());
+            let (label, value) = (logical(&label), logical(&value));
+            assert!(
+                value.left() >= label.right() + 12. - 0.5 && value.right() <= row.right() + 0.5,
+                "{theme:?}: {value:?} overlaps {label:?} or leaves {row:?}"
+            );
+            assert_eq!(
+                painted("8f3c21a9d0e4").galley.job.sections[0]
+                    .format
+                    .font_id,
+                Type::Mono.font()
+            );
+            assert_eq!(
+                painted("ok").galley.job.sections[0].format.font_id,
+                FontId::new(13., theme::semibold())
+            );
+            assert!(texts(&out).contains(&("ok".into(), p.text)));
+            // O valor cortado inteiro no tooltip.
+            let hover = egui::Event::PointerMoved(row.center());
+            let mut out = run(&ctx, vec![hover], &mut add);
+            for _ in 0..45 {
+                out = run(&ctx, vec![], &mut add);
+            }
+            node(&out, Role::Label, image);
+        }
     }
 
     #[test]

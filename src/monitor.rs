@@ -11,6 +11,35 @@ use std::{
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+/// Intervalo do inventário de imagens e da leitura do contexto Docker.
+const INVENTORY_EVERY: Duration = Duration::from_secs(15);
+
+/// O contexto Docker da coleta: lido no ritmo do inventário, não a cada
+/// amostra, e logo de novo numa conexão nova (outra geração).
+#[derive(Default)]
+struct ContextPoll {
+    value: Option<String>,
+    /// Geração da última leitura e quando ler de novo.
+    read: Option<(u64, Instant)>,
+}
+impl ContextPoll {
+    fn get(
+        &mut self,
+        now: Instant,
+        generation: u64,
+        read: impl FnOnce() -> Option<String>,
+    ) -> Option<String> {
+        if self
+            .read
+            .is_none_or(|(last, next)| last != generation || now >= next)
+        {
+            self.value = read();
+            self.read = Some((generation, now + INVENTORY_EVERY));
+        }
+        self.value.clone()
+    }
+}
+
 pub struct Shared {
     pub config: RwLock<Config>,
     pub resources: Mutex<ResourceSnapshot>,
@@ -60,6 +89,7 @@ impl Shared {
             let mut next_inventory = Instant::now();
             let mut generation = 0;
             let mut inventory_error = None;
+            let mut context = ContextPoll::default();
             loop {
                 if resources.stop.load(Ordering::Relaxed) {
                     break;
@@ -78,6 +108,9 @@ impl Shared {
                     generation = current;
                 }
                 let mut snapshot = sample_resources(&config, &mut system);
+                snapshot.docker_context = context.get(Instant::now(), current, || {
+                    docker::context(&config.docker_binary)
+                });
                 if snapshot.docker_error.is_none() {
                     let inventory_changed = snapshot.containers.len() != image_ids.len()
                         || snapshot
@@ -103,7 +136,7 @@ impl Shared {
                             }
                             Err(e) => inventory_error = Some(e),
                         }
-                        next_inventory = Instant::now() + Duration::from_secs(15);
+                        next_inventory = Instant::now() + INVENTORY_EVERY;
                     }
                     snapshot.images = images.clone();
                     snapshot.images_at = images_at;
@@ -704,6 +737,64 @@ pub(crate) mod tests {
             "inventory error must enforce backoff until next_inventory"
         );
         assert!(should_poll_inventory(future, future, true, true));
+    }
+
+    #[test]
+    fn docker_context_is_read_at_the_inventory_rhythm_and_again_on_a_new_connection() {
+        let start = Instant::now();
+        let second = Duration::from_secs(1);
+        let mut reads = Vec::new();
+        let mut poll = ContextPoll::default();
+        let mut generation = 7;
+        let mut at = |poll: &mut ContextPoll, t: Duration, value: Option<&str>| {
+            poll.get(start + t, generation, || {
+                reads.push(t.as_secs());
+                value.map(str::to_owned)
+            })
+        };
+        // A primeira amostra lê; as de 2 em 2 s até 14 s ficam com o valor.
+        assert_eq!(
+            at(&mut poll, Duration::ZERO, Some("ctx-1")).as_deref(),
+            Some("ctx-1")
+        );
+        for t in [2, 4, 14] {
+            assert_eq!(
+                at(&mut poll, second * t, Some("outro")).as_deref(),
+                Some("ctx-1"),
+                "{t} s: kept, not read again"
+            );
+        }
+        // Aos 15 s, lê de novo; uma falha vira None, sem guardar o antigo.
+        assert_eq!(at(&mut poll, second * 15, None), None);
+        assert_eq!(at(&mut poll, second * 16, Some("ctx-2")), None, "16 s");
+        assert_eq!(
+            at(&mut poll, second * 30, Some("ctx-2")).as_deref(),
+            Some("ctx-2")
+        );
+        // Conexão nova (outra geração): lê já, antes dos 15 s; depois, de
+        // novo no ritmo, contado dessa leitura.
+        generation = 8;
+        let mut at = |poll: &mut ContextPoll, t: Duration, value: Option<&str>| {
+            poll.get(start + t, generation, || {
+                reads.push(t.as_secs());
+                value.map(str::to_owned)
+            })
+        };
+        assert_eq!(
+            at(&mut poll, second * 31, Some("ctx-3")).as_deref(),
+            Some("ctx-3")
+        );
+        assert_eq!(
+            at(&mut poll, second * 45, Some("ctx-4")).as_deref(),
+            Some("ctx-3"),
+            "45 s: 14 s after the new connection's read"
+        );
+        assert_eq!(
+            at(&mut poll, second * 46, Some("ctx-4")).as_deref(),
+            Some("ctx-4")
+        );
+        assert_eq!(reads, [0, 15, 30, 31, 46]);
+        assert_eq!(INVENTORY_EVERY, Duration::from_secs(15));
     }
 
     #[test]
