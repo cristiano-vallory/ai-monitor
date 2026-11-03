@@ -22,7 +22,10 @@
 //!   lista; Rejeitar… e Aprovar…, na linha do título do detalhe, à direita, e
 //!   o motivo da rejeição no pé do detalhe. Nada disso se move quando o
 //!   detalhe chega: a linha de estado tem a altura reservada e o corpo rola
-//!   entre as duas.
+//!   entre as duas. Rejeitar… e Aprovar… desabilitam no lugar, com a dica,
+//!   quando o estado conhecido da proposta (o do detalhe ou, enquanto ele não
+//!   chega, o da linha da lista) não é pendente; desconhecido, ficam
+//!   habilitados e a prévia decide.
 //! - Handoffs: a lista são os handoffs abertos do projeto na coleta do monitor
 //!   (`ApiSnapshot`); nenhuma consulta nova.
 //! - A seleção é o campo de ID: clicar numa linha o preenche; um ID fora da
@@ -33,6 +36,9 @@
 //! - Um resultado, um erro ou o aviso de prévia vencida ficam na página até
 //!   "Limpar", trocar de aba ou de projeto; uma operação em andamento prende o
 //!   painel até a resposta.
+//! - A folha de confirmação trava o que descartaria a prévia: o projeto, as
+//!   abas e as ações de Handoffs. O véu só engole cliques; sem a trava, o
+//!   teclado (Tab e Enter) chegaria a eles.
 use crate::{
     client::{Error, Scope},
     console, handoff_text,
@@ -82,6 +88,8 @@ const REVIEW_NOTE: &str =
     "Até 200 propostas por estado · operações dependem das permissões do servidor";
 const HANDOFF_NOTE: &str = "Handoffs abertos na última coleta do monitor · até 200 por projeto · operações dependem das permissões do servidor";
 const MAINTENANCE_NOTE: &str = "Revise o escopo e a prévia antes de confirmar. Operações dependem das permissões e recursos habilitados no servidor.";
+/// A dica de Rejeitar… e Aprovar… desabilitados por estado.
+const NOT_PENDING: &str = "Só propostas pendentes podem ser aprovadas ou rejeitadas.";
 /// Estados das propostas: (valor da API, plural do filtro, singular do detalhe).
 const STATUSES: [(&str, &str, &str); 5] = [
     ("pending", "pendentes", "pendente"),
@@ -250,6 +258,9 @@ pub struct Management {
     tab: u8,
     result: Option<Value>,
     receipt: Option<Receipt>,
+    /// O diff da prévia de Aprovar ou Rejeitar do recibo: calculado uma vez,
+    /// quando o recibo chega (`poll`), e descartado com ele (`clear`).
+    proposed: Option<Proposed>,
     error: Option<String>,
     notice: String,
     /// A prévia venceu e `poll` a descartou; só resta o aviso em `notice`.
@@ -293,6 +304,7 @@ impl Management {
             tab: 0,
             result: None,
             receipt: None,
+            proposed: None,
             error: None,
             notice: String::new(),
             expired: false,
@@ -336,6 +348,7 @@ impl Management {
     }
     fn clear(&mut self) {
         self.receipt = None;
+        self.proposed = None;
         self.result = None;
         self.error = None;
         self.confirm.clear();
@@ -454,6 +467,11 @@ impl Management {
             match reply.result {
                 Ok(v) => {
                     refresh |= reread;
+                    // O diff sai uma vez, aqui; a folha só o mostra.
+                    self.proposed = reply
+                        .receipt
+                        .as_ref()
+                        .and_then(|r| proposed(&r.action.intent, &v));
                     self.result = Some(v);
                     self.receipt = reply.receipt;
                     self.notice = if reply.applying {
@@ -576,7 +594,13 @@ impl Management {
                 count,
             })
             .collect();
-        let (tab, busy, chosen) = (self.tab, self.busy, self.scope.is_some());
+        // A folha de confirmação também trava o que descartaria a prévia: o
+        // véu só engole cliques, e o teclado (Tab e Enter) chegaria aqui.
+        let (tab, locked, chosen) = (
+            self.tab,
+            self.busy || self.receipt.is_some(),
+            self.scope.is_some(),
+        );
         let (scope, current, status, days) = (
             &mut self.scope,
             &mut self.tab,
@@ -587,7 +611,7 @@ impl Management {
         let mut ask = widgets::toolbar(
             ui,
             |ui| {
-                ui.add_enabled_ui(!busy, |ui| {
+                ui.add_enabled_ui(!locked, |ui| {
                     ui.spacing_mut().item_spacing.x = space::S;
                     picker(
                         ui,
@@ -608,7 +632,7 @@ impl Management {
                     below = true;
                     return None;
                 }
-                actions(ui, tab, status, days, busy)
+                actions(ui, tab, status, days, locked)
             },
         );
         if below {
@@ -618,7 +642,7 @@ impl Management {
                     Layout::right_to_left(Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = space::S;
-                        actions(ui, tab, &mut self.status, &mut self.days, busy)
+                        actions(ui, tab, &mut self.status, &mut self.days, locked)
                     },
                 )
                 .inner;
@@ -702,14 +726,11 @@ impl Management {
             return;
         };
         let action = &receipt.action;
-        let proposed = self
-            .result
-            .as_ref()
-            .and_then(|r| proposed(&action.intent, r));
+        let proposed = self.proposed.as_ref();
         let mut facts = vec![Fact::new("Operação", action.label())];
         match &proposed {
             Some(p) => {
-                facts.push(Fact::new("Alvo", p.target).mono());
+                facts.push(Fact::new("Alvo", p.target.as_str()).mono());
                 if let Some((effect, reversible)) = p.consequences {
                     facts.push(Fact::new("Efeito", effect));
                     if let Some(reversible) = reversible {
@@ -719,7 +740,10 @@ impl Management {
             }
             None => facts.push(Fact::new("Alvo", action.target())),
         }
-        if let Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } = &action.intent {
+        // O motivo é opcional: em branco, a linha some.
+        if let Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } = &action.intent
+            && !reason.trim().is_empty()
+        {
             facts.push(Fact::new("Motivo", reason.as_str()));
         }
         let mut subtitle = format!("Projeto: {}", action.scope.label());
@@ -821,6 +845,7 @@ impl Management {
     #[cfg(test)]
     pub(crate) fn hold_preview(&mut self, receipt: Receipt, result: Value) {
         self.scope = Some(receipt.action.scope.clone());
+        self.proposed = proposed(&receipt.action.intent, &result);
         self.receipt = Some(receipt);
         self.result = Some(result);
     }
@@ -1059,17 +1084,31 @@ impl Management {
         );
         actions.spacing_mut().item_spacing.x = space::S;
         let id = !key.1.is_empty();
+        // O estado conhecido: o do detalhe ou, enquanto ele não chega, o da
+        // linha da lista. Fora de pendente, os dois botões desabilitam no
+        // lugar; desconhecido, ficam habilitados e a prévia decide.
+        let state = value
+            .and_then(|v| v["summary"]["status"].as_str())
+            .or_else(|| {
+                self.list
+                    .loaded(&(s.clone(), self.status.clone()))?
+                    .iter()
+                    .find(|row| row["id"] == key.1)?["status"]
+                    .as_str()
+            });
+        let pending = state.is_none_or(|state| state == "pending");
+        let hint = |response: egui::Response| {
+            if pending {
+                response
+            } else {
+                response.on_disabled_hover_text(NOT_PENDING)
+            }
+        };
         let mut ask = None;
-        if actions
-            .add_enabled(id, Button::primary("Aprovar…"))
-            .clicked()
-        {
+        if hint(actions.add_enabled(id && pending, Button::primary("Aprovar…"))).clicked() {
             ask = Some(2);
         }
-        if actions
-            .add_enabled(id, Button::destructive("Rejeitar…"))
-            .clicked()
-        {
+        if hint(actions.add_enabled(id && pending, Button::destructive("Rejeitar…"))).clicked() {
             ask = Some(1);
         }
         let mut title = column.new_child(
@@ -1565,8 +1604,8 @@ fn proposal_meta(v: &Value, now: DateTime<Utc>) -> Option<String> {
 
 /// As ações da aba à direita da linha de ferramentas, montadas da direita
 /// para a esquerda: Propostas = Atualizar e Estado; Handoffs = expirar
-/// (com a idade) e o histórico.
-fn actions(ui: &mut Ui, tab: u8, status: &mut String, days: &mut u32, busy: bool) -> Option<Ask> {
+/// (com a idade) e o histórico, travados com `locked`.
+fn actions(ui: &mut Ui, tab: u8, status: &mut String, days: &mut u32, locked: bool) -> Option<Ask> {
     match tab {
         0 => {
             let mut ask = None;
@@ -1583,7 +1622,7 @@ fn actions(ui: &mut Ui, tab: u8, status: &mut String, days: &mut u32, busy: bool
         }
         1 => {
             let mut ask = None;
-            ui.add_enabled_ui(!busy, |ui| {
+            ui.add_enabled_ui(!locked, |ui| {
                 if ui.add(Button::destructive("Expirar antigos…")).clicked() {
                     ask = Some(Ask::Expire);
                 }
@@ -1979,14 +2018,21 @@ fn field_line(ui: &mut Ui, label: &str, value: &mut String, limit: usize) {
 /// `target_path` e `operation`, e `body_markdown`) e `comparison.diff` =
 /// "--- before/{alvo}\n+++ after/{alvo}\n@@\n{atual}\n--- proposed ---\n{proposto}\n"
 /// (a página atual inteira e a proposta inteira, não um diff de linhas).
-struct Proposed<'a> {
-    target: &'a str,
+struct Proposed {
+    target: String,
     /// (Efeito, Reversível); `None` com uma operação desconhecida. Rejeitar
     /// não tem Reversível.
     consequences: Option<(&'static str, Option<&'static str>)>,
     lines: Vec<(Mark, String)>,
 }
-fn proposed<'a>(intent: &Intent, result: &'a Value) -> Option<Proposed<'a>> {
+#[cfg(test)]
+thread_local! {
+    /// Quantas vezes `proposed` calculou a prévia neste thread.
+    static PROPOSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+fn proposed(intent: &Intent, result: &Value) -> Option<Proposed> {
+    #[cfg(test)]
+    PROPOSED.with(|n| n.set(n.get() + 1));
     if !matches!(intent, Intent::Approve { .. } | Intent::Reject { .. }) {
         return None;
     }
@@ -2013,7 +2059,7 @@ fn proposed<'a>(intent: &Intent, result: &'a Value) -> Option<Proposed<'a>> {
         _ => None,
     };
     Some(Proposed {
-        target,
+        target: target.to_owned(),
         consequences,
         lines: changes(before, after),
     })
@@ -2139,7 +2185,8 @@ mod tests {
     use crate::{
         test_support::{Mock, Request, Response},
         widgets::tests::{
-            click, click_sized, context, node, nodes, rect_of, rects, run, run_sized, texts,
+            click, click_sized, context, node, nodes, rect_of, rects, run, run_sized,
+            tab_and_enter, texts,
         },
     };
     use egui::accesskit::{Node, Role, Toggled};
@@ -3397,6 +3444,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn narrow_handoffs_show_the_list_or_the_detail_with_back() {
+        const NARROW: [f32; 2] = [720., 600.];
+        let (_mock, shared, mut m) = quiet();
+        m.scope = Some(scope());
+        m.tab = 1;
+        let now = Utc::now();
+        let mut api = projects(&[scope(), other()]);
+        api.at = Some(now);
+        // Linhas que passam da altura da lista: sem o pé reservado, as
+        // últimas pintariam sobre ele.
+        api.handoffs = (1..=12)
+            .map(|i| Handoff {
+                id: format!("h-{i}"),
+                agent: "codex".into(),
+                at: (now - chrono::Duration::minutes(4)).to_rfc3339(),
+                state: "open".into(),
+                summary: Some(format!("## Handoff {i}")),
+                scope: scope().label(),
+                ..Default::default()
+            })
+            .collect();
+        let ctx = context(egui::Theme::Dark);
+        let mut add = |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        };
+        let panes = |out: &egui::FullOutput| {
+            (
+                nodes(out, Role::Pane, "Lista de handoffs").len(),
+                nodes(out, Role::Pane, "Handoff selecionado").len(),
+            )
+        };
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        assert_eq!(panes(&out), (1, 0), "the list alone");
+        let inform = rect_of(&node(&out, Role::Button, "Informar ID…"));
+        // O pé: os `LIST_FOOT` de baixo da lista, com "Informar ID…".
+        let list = rect_of(&node(&out, Role::Pane, "Lista de handoffs"));
+        let foot = list.bottom() - LIST_FOOT;
+        assert!(
+            inform.top() >= foot && inform.bottom() <= list.bottom(),
+            "the button in the foot: {inform:?} / {list:?}"
+        );
+        assert!(
+            12. * ROW_HEIGHT > list.height(),
+            "precondition: the rows overflow the list"
+        );
+        // O que cada linha pinta (título, legenda, idade), recortado pela
+        // rolagem: nada abaixo do topo do pé.
+        let visible: Vec<(String, Rect)> = shown_texts(&out)
+            .into_iter()
+            .filter(|(t, _)| t.starts_with("Handoff ") || t == "codex" || t == "4 min")
+            .collect();
+        assert!(
+            visible.iter().any(|(t, _)| t == "Handoff 1"),
+            "precondition: the rows are painted: {visible:?}"
+        );
+        for (text, shown) in &visible {
+            assert!(
+                shown.bottom() <= inform.top(),
+                "a row paints over the foot: {text:?} at {shown:?}, foot from {foot}"
+            );
+        }
+        // Com o ID vazio, "Informar ID…" abre o detalhe sem seleção.
+        click_sized(&ctx, NARROW, inform.center(), &mut add);
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        assert_eq!(panes(&out), (0, 1), "Informar ID… opens the detail");
+        node(&out, Role::Label, "Nenhum handoff selecionado");
+        let back = rect_of(&node(&out, Role::Button, "← Voltar"));
+        click_sized(&ctx, NARROW, back.center(), &mut add);
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        assert_eq!(panes(&out), (1, 0), "back to the list");
+        // Um clique na linha abre o detalhe dela, com o ID no campo.
+        let row = rect_of(&node(&out, Role::Button, "Handoff 2 · codex · 4 min"));
+        click_sized(&ctx, NARROW, row.center(), &mut add);
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        assert_eq!(panes(&out), (0, 1), "a row opens its detail");
+        node(&out, Role::Label, "Handoff 2");
+        assert_eq!(nodes(&out, Role::TextInput, "h-2").len(), 1, "the ID field");
+        assert!(nodes(&out, Role::Button, "Informar ID…").is_empty());
+        let back = rect_of(&node(&out, Role::Button, "← Voltar"));
+        click_sized(&ctx, NARROW, back.center(), &mut add);
+        let out = run_sized(&ctx, NARROW, vec![], &mut add);
+        assert_eq!(panes(&out), (1, 0), "back to the list");
+        assert!(
+            rows_of(&out).contains(&("Handoff 2 · codex · 4 min".to_owned(), true)),
+            "the selection is kept"
+        );
+        node(&out, Role::Button, "Informar ID…");
+        drop(add);
+        assert_eq!(m.identifier, "h-2");
+    }
+    /// Os textos pintados e a parte de cada um que fica à vista (dentro do
+    /// recorte da rolagem).
+    fn shown_texts(out: &egui::FullOutput) -> Vec<(String, Rect)> {
+        fn walk(shape: &egui::Shape, clip: Rect, into: &mut Vec<(String, Rect)>) {
+            match shape {
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, clip, into)),
+                egui::Shape::Text(t) => {
+                    let shown = t.galley.rect.translate(t.pos.to_vec2()).intersect(clip);
+                    if shown.is_positive() {
+                        into.push((t.galley.text().to_owned(), shown));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        for c in &out.shapes {
+            walk(&c.shape, c.clip_rect, &mut all);
+        }
+        all
+    }
+
     /// Uma tecla apertada, sem modificadores.
     fn key(key: egui::Key) -> egui::Event {
         egui::Event::Key {
@@ -4244,6 +4404,172 @@ mod tests {
             "the actions under ← Voltar: {back:?} {approve:?}"
         );
         assert_eq!(narrow(&out), before, "narrow: loading → loaded");
+    }
+
+    /// Aprovar… e Rejeitar… de um frame: habilitados como `enabled`, no
+    /// mesmo lugar que em `places` (o 1º frame o grava) e, desabilitados,
+    /// com a dica de pendente sob o ponteiro.
+    fn approve_and_reject(
+        ctx: &egui::Context,
+        add: &mut impl FnMut(&mut Ui),
+        places: &mut Option<[Rect; 2]>,
+        case: &str,
+        enabled: bool,
+    ) {
+        let out = run_sized(ctx, WINDOW, vec![], &mut *add);
+        let buttons = ["Aprovar…", "Rejeitar…"].map(|b| node(&out, Role::Button, b));
+        for button in &buttons {
+            assert_eq!(
+                button.is_disabled(),
+                !enabled,
+                "{case}: {:?} should be enabled = {enabled}",
+                button.label()
+            );
+        }
+        let rects = buttons.each_ref().map(rect_of);
+        assert_eq!(
+            *places.get_or_insert(rects),
+            rects,
+            "{case}: the buttons moved"
+        );
+        // O egui não mostra a dica logo depois de um clique: o ponteiro sai,
+        // espera e volta parado sobre Aprovar….
+        run_sized(ctx, WINDOW, vec![egui::Event::PointerGone], &mut *add);
+        for _ in 0..10 {
+            run_sized(ctx, WINDOW, vec![], &mut *add);
+        }
+        let point = vec![egui::Event::PointerMoved(rects[0].center())];
+        let mut out = run_sized(ctx, WINDOW, point, &mut *add);
+        for _ in 0..45 {
+            out = run_sized(ctx, WINDOW, vec![], &mut *add);
+        }
+        assert_eq!(
+            nodes(&out, Role::Label, NOT_PENDING).len(),
+            usize::from(!enabled),
+            "{case}: the hint"
+        );
+    }
+
+    #[test]
+    fn approve_and_reject_disable_in_place_when_the_known_state_is_not_pending() {
+        let mut places = None;
+        // (estado da proposta, habilitados?); `None` = sem o campo.
+        for (state, enabled) in [
+            (Some("pending"), true),
+            (Some("approved"), false),
+            (Some("rejected"), false),
+            (Some("failed"), false),
+            (Some("conflict"), false),
+            (None, true),
+        ] {
+            let with_state = move |mut v: Value| {
+                match state {
+                    Some(state) => v["status"] = json!(state),
+                    None => {
+                        v.as_object_mut().unwrap().remove("status");
+                    }
+                }
+                v
+            };
+            // O detalhe só sai com a porteira aberta; o p-8 falha.
+            let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let gate = open.clone();
+            let mock = Mock::new(move |r| {
+                if r.path.starts_with("/admin/pending-writes?") {
+                    return Response::json(
+                        200,
+                        json!([with_state(proposal(1)), with_state(proposal(2))]),
+                    );
+                }
+                if r.path.starts_with("/admin/pending-writes/p-8?") {
+                    return Response::json(500, json!({}));
+                }
+                match detail_of(&r.path) {
+                    Some(i) => {
+                        let until = Instant::now() + Duration::from_secs(5);
+                        while !gate.load(SeqCst) && Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        let mut v = proposal_detail(i);
+                        v["summary"] = with_state(v["summary"].take());
+                        Response::json(200, v)
+                    }
+                    None => Response::json(404, json!({})),
+                }
+            });
+            let shared = Shared::unstarted(mock.config());
+            let mut m = Management::new(shared.clone());
+            m.scope = Some(scope());
+            // O filtro do estado, como na tela ("Estado: aprovadas"…).
+            if let Some(state) = state {
+                m.status = state.into();
+            }
+            let api = projects(&[scope()]);
+            let ctx = context(egui::Theme::Dark);
+            run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            settle_list(&mut m, &shared);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let row = rect_of(&node(
+                &out,
+                Role::Button,
+                "Proposta 1 · decisions/p-1.md · 25 min",
+            ));
+            click_sized(&ctx, WINDOW, row.center(), &mut add);
+            // Enquanto o detalhe não chega, vale a linha da lista.
+            let case = format!("{state:?}, the row");
+            approve_and_reject(&ctx, &mut add, &mut places, &case, enabled);
+            drop(add);
+            open.store(true, SeqCst);
+            settle_detail(&mut m, &shared);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            node(&out, Role::Label, "Proposta 1");
+            let case = format!("{state:?}, the detail");
+            approve_and_reject(&ctx, &mut add, &mut places, &case, enabled);
+            drop(add);
+            // Um ID fora da lista: desconhecido até o detalhe chegar.
+            open.store(false, SeqCst);
+            m.identifier = "p-9".into();
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            node(&out, Role::Label, "Carregando proposta…");
+            let case = format!("{state:?}, an ID outside the list, loading");
+            approve_and_reject(&ctx, &mut add, &mut places, &case, true);
+            drop(add);
+            open.store(true, SeqCst);
+            settle_detail(&mut m, &shared);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let case = format!("{state:?}, an ID outside the list, loaded");
+            approve_and_reject(&ctx, &mut add, &mut places, &case, enabled);
+            drop(add);
+            // Com erro, também desconhecido.
+            m.identifier = "p-8".into();
+            run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            settle_detail(&mut m, &shared);
+            assert!(
+                matches!(m.detail.value, Some(Err(_))),
+                "precondition: {:?}",
+                m.detail.value
+            );
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let case = format!("{state:?}, an ID outside the list, error");
+            approve_and_reject(&ctx, &mut add, &mut places, &case, true);
+        }
     }
 
     #[test]
@@ -5251,7 +5577,8 @@ mod tests {
         for (n, (intent, result, shown, absent)) in cases.into_iter().enumerate() {
             for (theme, p) in crate::widgets::tests::THEMES {
                 let (_mock, shared, mut m) = previewing(intent.clone(), 0);
-                m.result = Some(result.clone());
+                let receipt = m.receipt.take().unwrap();
+                m.hold_preview(receipt, result.clone());
                 let ctx = context(theme);
                 let api = ApiSnapshot::default();
                 let out = frames(&ctx, &mut |ui: &mut Ui| {
@@ -5317,6 +5644,180 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_diff_is_computed_once_when_the_receipt_arrives_and_dropped_with_it() {
+        let preview = proposal_preview(
+            "update",
+            "# Cache\nTTL: 5 min\nfim",
+            "# Cache\nTTL: 15 min\nfim",
+        );
+        let mock = Mock::new(move |r| {
+            if r.path.starts_with("/admin/pending-writes/p-1/diff?") {
+                Response::json(200, preview["comparison"].clone())
+            } else if r.path.starts_with("/admin/pending-writes/p-1?") {
+                Response::json(200, preview["proposal"].clone())
+            } else {
+                Response::json(200, json!([]))
+            }
+        });
+        let shared = Shared::unstarted(mock.config());
+        let mut m = Management::new(shared.clone());
+        m.scope = Some(scope());
+        let api = projects(&[scope()]);
+        let ctx = context(egui::Theme::Dark);
+        let computed = || PROPOSED.with(std::cell::Cell::get);
+        PROPOSED.with(|n| n.set(0));
+        // A prévia chega pelo `poll`, como na tela.
+        let arm = |m: &mut Management, intent: Intent| {
+            m.preview(&shared, &scope(), intent);
+            settle(m, &shared);
+            assert!(m.receipt.is_some(), "precondition: the preview arrived");
+        };
+        let approve = || Intent::Approve { id: "p-1".into() };
+        arm(&mut m, approve());
+        assert_eq!(computed(), 1, "computed when the receipt arrived");
+        let mut out = None;
+        for _ in 0..10 {
+            out = Some(run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            }));
+        }
+        let out = out.unwrap();
+        node(&out, Role::Label, "+ TTL: 15 min");
+        node(
+            &out,
+            Role::Label,
+            "Efeito: Grava uma nova versão da página; a atual fica no histórico",
+        );
+        assert_eq!(computed(), 1, "10 frames with the sheet open, one diff");
+        // Um recibo novo recalcula: o efeito passa a ser o da rejeição.
+        arm(
+            &mut m,
+            Intent::Reject {
+                id: "p-1".into(),
+                reason: String::new(),
+            },
+        );
+        assert_eq!(computed(), 2, "a new receipt computes its own diff");
+        let out = frames(&ctx, &mut |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        node(
+            &out,
+            Role::Label,
+            "Efeito: Recusa a proposta; a página não muda",
+        );
+        node(&out, Role::Label, "+ TTL: 15 min");
+        assert_eq!(computed(), 2);
+        // Todo caminho que descarta o recibo descarta o diff.
+        for way in ["clear", "discard", "reset", "expiry"] {
+            m.scope = Some(scope());
+            arm(&mut m, approve());
+            assert!(m.proposed.is_some(), "{way}: precondition");
+            match way {
+                "clear" => m.clear(),
+                "discard" => m.discard(),
+                "reset" => m.reset(),
+                _ => {
+                    if let Some(r) = m.receipt.as_mut() {
+                        r.at = Instant::now() - PREVIEW_TTL - Duration::from_secs(1);
+                    }
+                }
+            }
+            m.poll(&shared);
+            assert!(m.receipt.is_none(), "{way}: precondition");
+            assert!(m.proposed.is_none(), "{way}: the diff outlived its receipt");
+        }
+        // Cancelar na folha (Esc) também.
+        arm(&mut m, approve());
+        let esc = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        frames(&ctx, &mut |ui: &mut Ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        run_sized(&ctx, WINDOW, vec![esc], |ui| {
+            page(&mut m, ui, &shared, &api, Section::Review);
+        });
+        assert!(m.receipt.is_none(), "cancel: precondition");
+        assert!(
+            m.proposed.is_none(),
+            "cancel: the diff outlived its receipt"
+        );
+        // Uma leitura não traz recibo nem diff.
+        m.begin(&shared, Work::Read(Read::Checkpoints));
+        settle(&mut m, &shared);
+        assert!(m.result.is_some() && m.receipt.is_none() && m.proposed.is_none());
+    }
+
+    #[test]
+    fn the_sheet_shows_the_reason_line_only_when_a_reason_was_given() {
+        // (motivo, a linha na folha)
+        for (reason, line) in [
+            ("", None),
+            ("   ", None),
+            ("duplicada", Some("Motivo: duplicada")),
+        ] {
+            let cases = [
+                (
+                    Intent::Reject {
+                        id: "p-1".into(),
+                        reason: reason.into(),
+                    },
+                    0,
+                    Section::Review,
+                ),
+                (
+                    Intent::Feedback {
+                        path: "decisions/cache.md".into(),
+                        signal: "stale".into(),
+                        reason: reason.into(),
+                    },
+                    2,
+                    Section::Maintenance,
+                ),
+            ];
+            for (intent, tab, section) in cases {
+                let operation = Action {
+                    scope: scope(),
+                    intent: intent.clone(),
+                }
+                .label();
+                let (_mock, shared, mut m) = previewing(intent, 0);
+                m.tab = tab;
+                let ctx = context(egui::Theme::Light);
+                let api = ApiSnapshot::default();
+                let out = frames(&ctx, &mut |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, section);
+                });
+                let case = format!("{operation} {reason:?}");
+                // A folha está aberta, com a grade.
+                node(&out, Role::Label, &format!("Operação: {operation}"));
+                let shown: Vec<String> = out
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.role() == Role::Label)
+                    .filter_map(|(_, n)| n.label().or(n.value()))
+                    .filter(|t| t.starts_with("Motivo:"))
+                    .map(str::to_owned)
+                    .collect();
+                assert_eq!(
+                    shown,
+                    line.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    "{case}: the reason line"
+                );
             }
         }
     }
@@ -5506,6 +6007,70 @@ mod tests {
             drop(add);
             assert_eq!(m.tab, if open { 0 } else { 1 }, "sheet open: {open}");
             assert_eq!(m.receipt.is_some(), open, "sheet open: {open}");
+        }
+    }
+
+    #[test]
+    fn the_keyboard_never_reaches_what_would_discard_the_preview_under_the_sheet() {
+        let expire = || Intent::ExpireHandoffs { days: 7 };
+        // (aba, prévia, os controles a alcançar com Tab e apertar com Enter)
+        let cases: [(u8, Intent, &[&str]); 5] = [
+            (0, Intent::Approve { id: "p-1".into() }, &["Handoffs"]),
+            (1, expire(), &["Propostas"]),
+            (1, expire(), &["Carregar histórico"]),
+            (1, expire(), &["Expirar antigos…"]),
+            // O seletor abre com Enter; o Tab entra nas opções.
+            (0, expire(), &["fixture / demo", "fixture / other"]),
+        ];
+        for (tab, intent, controls) in cases {
+            for open in [true, false] {
+                let (_mock, shared, mut m) = previewing(intent.clone(), 0);
+                m.tab = tab;
+                if !open {
+                    m.receipt = None;
+                }
+                let ctx = context(egui::Theme::Dark);
+                let api = projects(&[scope(), other()]);
+                let mut add = |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                };
+                frames(&ctx, &mut add);
+                // O segmentado fala "rótulo contador".
+                let hit = |control: &str, l: &str| {
+                    l == control || l.strip_prefix(control).is_some_and(|r| r.starts_with(' '))
+                };
+                let mut seen = Vec::new();
+                for control in controls {
+                    seen.extend(tab_and_enter(
+                        &ctx,
+                        WINDOW,
+                        &mut add,
+                        |l| hit(control, l),
+                        40,
+                    ));
+                }
+                drop(add);
+                let case = format!("tab {tab} {controls:?}, sheet open: {open}, focus: {seen:?}");
+                assert_eq!(
+                    m.receipt.is_some(),
+                    open,
+                    "{case}: Tab + Enter under the sheet discarded the preview"
+                );
+                // Sem a folha, o Enter faz o que o clique faria.
+                let acted = m.tab != tab || m.busy || m.scope != Some(scope());
+                assert_eq!(acted, !open, "{case}");
+                for control in controls {
+                    assert_eq!(
+                        seen.iter().any(|l| hit(control, l)),
+                        !open,
+                        "{case}: {control}"
+                    );
+                }
+                if open {
+                    // O teclado andou: só não chega ao que está sob o véu.
+                    assert!(seen.iter().any(|l| l == "Cancelar"), "{case}");
+                }
+            }
         }
     }
 

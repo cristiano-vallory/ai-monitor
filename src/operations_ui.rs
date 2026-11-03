@@ -220,7 +220,9 @@ impl Panel {
         widgets::toolbar(
             ui,
             |ui| {
-                ui.add_enabled_ui(!self.busy, |ui| {
+                // Travado também sob a folha: o véu só engole cliques, e o
+                // teclado (Tab e Enter) trocaria a aba, descartando a prévia.
+                ui.add_enabled_ui(!self.busy && self.receipt.is_none(), |ui| {
                     widgets::segmented(
                         ui,
                         &mut self.local_tab,
@@ -567,7 +569,9 @@ mod tests {
     use super::*;
     use crate::{
         test_support::{Mock, Response},
-        widgets::tests::{THEMES, click_sized, context, node, nodes, rect_of, rects, run_sized},
+        widgets::tests::{
+            THEMES, click_sized, context, node, nodes, rect_of, rects, run_sized, tab_and_enter,
+        },
     };
     use egui::accesskit::{Role, Toggled};
     use std::time::Duration;
@@ -710,6 +714,35 @@ mod tests {
             drop(add);
             assert_eq!(panel.local_tab, !open, "sheet open: {open}");
             assert_eq!(panel.receipt.is_some(), open, "sheet open: {open}");
+        }
+    }
+
+    #[test]
+    fn the_keyboard_never_reaches_the_tab_under_the_sheet() {
+        let local = format!("Serviço deste {}", crate::platform::HOST);
+        for open in [true, false] {
+            let (_mock, shared, mut panel) = previewing(purge(), false);
+            if !open {
+                panel.receipt = None;
+            }
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut egui::Ui| panel.show(ui, &shared, &[]);
+            frames(&ctx, &mut add);
+            // Tab até a aba do serviço local e Enter, como o teclado faria.
+            let seen = tab_and_enter(&ctx, WINDOW, &mut add, |l| l == local, 12);
+            drop(add);
+            let case = format!("sheet open: {open}, focus went through {seen:?}");
+            assert_eq!(
+                panel.receipt.is_some(),
+                open,
+                "{case}: Tab + Enter on the tab discarded the preview"
+            );
+            assert_eq!(panel.local_tab, !open, "{case}");
+            assert_eq!(seen.contains(&local), !open, "{case}");
+            if open {
+                // O teclado andou: só não chega ao que está sob o véu.
+                assert!(seen.iter().any(|l| l == "Cancelar"), "{case}");
+            }
         }
     }
 

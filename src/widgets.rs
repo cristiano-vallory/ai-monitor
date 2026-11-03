@@ -25,13 +25,14 @@
 //!   clicáveis. Título (15/600), linha em text2, `details(facts)`, a prévia
 //!   (cabeçalho 11 sobre surf2; rola além de 240), `strip` Warn com
 //!   `warning`; com `typed: Some(alvo)`, "Digite alvo para confirmar" e um
-//!   `text_field` (até 512 caracteres) que pega o foco quando nada mais o
-//!   tem. Rodapé: "Prévia válida por m:ss" (de `left`, arredondado para
-//!   cima; zero fecha a folha), Cancelar e o botão final:
-//!   `Button::primary(verb)` sem digitação, `Button::danger(verb)` com ela,
-//!   habilitado só com `ready` e o texto exato. Esc ou Cancelar =
-//!   `Answer::Cancel`; o botão final = `Answer::Confirm`. Pede um repaint
-//!   por segundo enquanto aberta. Segue o `ui` desabilitado (botões e Esc).
+//!   `text_field` (até 512 caracteres, ou o tamanho do alvo, se maior) que
+//!   pega o foco quando nada mais o tem. Rodapé: "Prévia válida por m:ss"
+//!   (de `left`, arredondado para cima; zero fecha a folha), Cancelar e o
+//!   botão final: `Button::primary(verb)` sem digitação,
+//!   `Button::danger(verb)` com ela, habilitado só com `ready` e o texto
+//!   exato. Esc ou Cancelar = `Answer::Cancel`; o botão final =
+//!   `Answer::Confirm`. Pede um repaint por segundo enquanto aberta. Segue o
+//!   `ui` desabilitado (botões e Esc).
 //! - `card_grid(ui, &["Captura", …], |ui, i| …)`: um cartão por título, numa
 //!   grade `repeat(auto-fit, minmax(260px, 1fr))` com gap 12. As colunas saem da
 //!   largura disponível a cada frame (`grid_columns`); nada do layout anterior
@@ -1675,9 +1676,11 @@ fn typing(ui: &mut Ui, target: &str, input: &mut String) {
             job.append(text, 0., egui::TextFormat::simple(font, p.text));
         }
         let label = ui.add(egui::Label::new(job));
-        // O limite do campo antigo: um texto colado não passa de 512.
+        // O limite do campo antigo (512), ou o alvo inteiro, se maior: um
+        // texto colado não passa disso.
+        let limit = target.chars().count().max(512);
         let field =
-            text_field(ui, input, ui.available_width(), "", false, 512).labelled_by(label.id);
+            text_field(ui, input, ui.available_width(), "", false, limit).labelled_by(label.id);
         if ui.memory(|m| m.focused().is_none()) {
             field.request_focus();
         }
@@ -1746,6 +1749,47 @@ pub(crate) mod tests {
             [n] => n.clone(),
             found => panic!("expected one {role:?} {text:?}, found {}", found.len()),
         }
+    }
+    /// O rótulo (ou o valor) do nó com o foco do teclado.
+    pub(crate) fn focused(out: &egui::FullOutput) -> Option<String> {
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == update.focus)
+            .and_then(|(_, n)| n.label().or(n.value()).map(str::to_owned))
+    }
+    /// Tab, um por frame, até `presses` vezes. Quando o foco cai num nó que
+    /// `hit` aceita, aperta Enter no frame seguinte (o clique do teclado num
+    /// `Sense::click` com foco, no egui) e para. Devolve os rótulos que
+    /// pegaram o foco, na ordem.
+    pub(crate) fn tab_and_enter(
+        ctx: &egui::Context,
+        size: [f32; 2],
+        add: &mut impl FnMut(&mut Ui),
+        hit: impl Fn(&str) -> bool,
+        presses: usize,
+    ) -> Vec<String> {
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        let mut seen = Vec::new();
+        for _ in 0..presses {
+            let out = run_sized(ctx, size, vec![key(egui::Key::Tab)], &mut *add);
+            let Some(label) = focused(&out) else {
+                continue;
+            };
+            seen.push(label.clone());
+            if hit(&label) {
+                run_sized(ctx, size, vec![key(egui::Key::Enter)], &mut *add);
+                break;
+            }
+        }
+        seen
     }
     pub(crate) fn rect_of(node: &Node) -> Rect {
         let b = node.bounds().expect("node has bounds");
@@ -3201,6 +3245,52 @@ pub(crate) mod tests {
             drop(add);
             assert_eq!(input.chars().count(), kept, "{pasted}");
             assert_eq!(input.len(), 2 * kept, "{pasted}");
+        }
+    }
+
+    #[test]
+    fn a_target_longer_than_512_characters_raises_the_field_limit_to_its_length() {
+        // O contêiner do serviço local vai até 4096; um rótulo de projeto,
+        // sem limite. Caracteres, não bytes: "é" tem 2 bytes.
+        for size in [600, 4096] {
+            let target = "é".repeat(size);
+            // (colado, guardado, habilita?)
+            for (pasted, kept, enabled) in [
+                (target.clone(), target.clone(), true),
+                // Um caractere a mais, na frente: o corte no tamanho do alvo
+                // deixa outro texto.
+                (
+                    format!("x{target}"),
+                    format!("x{}", "é".repeat(size - 1)),
+                    false,
+                ),
+                // Um a mais no fim: o corte devolve o alvo exato, como o 513
+                // do limite de 512.
+                (format!("{target}x"), target.clone(), true),
+            ] {
+                let ctx = context(egui::Theme::Dark);
+                let mut input = String::new();
+                let mut add = |ui: &mut Ui| {
+                    confirm_sheet(
+                        ui,
+                        &sheet_with(Some(&target), FIVE_MINUTES),
+                        &mut input,
+                        |_| {},
+                    );
+                };
+                open(&ctx, [800., 600.], &mut add);
+                let case = format!("{size}: {} pasted", pasted.chars().count());
+                let paste = egui::Event::Paste(pasted.clone());
+                let out = run(&ctx, vec![paste], &mut add);
+                assert_eq!(
+                    node(&out, Role::Button, "Excluir").is_disabled(),
+                    !enabled,
+                    "{case}: the final button should be enabled = {enabled}"
+                );
+                drop(add);
+                assert_eq!(input.chars().count(), size, "{case}: cut at the target");
+                assert!(input == kept, "{case}: kept the wrong text");
+            }
         }
     }
 
