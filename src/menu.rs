@@ -145,7 +145,7 @@ impl MenuReading {
         now: DateTime<Utc>,
     ) -> Self {
         let age = snapshot.at.map(|at| (now - at).num_seconds().max(0));
-        let fresh = age.is_some_and(|age| age <= (interval.saturating_mul(3).max(10)) as i64);
+        let fresh = age.is_some_and(|age| !crate::app::is_late(age, interval));
         let load = |u: Usage| Load {
             cpu: u.cpu,
             memory: u.memory,
@@ -191,7 +191,7 @@ impl MenuReading {
         }
         self.alert_dot = !self.alerts.is_empty() && config.alert_dot;
         self.handoffs = api.and_then(|a| {
-            a.at.filter(|at| (now - *at).num_seconds() <= (config.api_seconds * 3) as i64)
+            a.at.filter(|at| !crate::app::is_late((now - *at).num_seconds(), config.api_seconds))
                 .and(a.handoff_total)
         });
         self.proposals = match (health, &config.proposal_watch) {
@@ -345,14 +345,12 @@ impl Entry {
             Row::Separator => (String::new(), None),
             Row::Action {
                 label,
-                detail: Some(detail),
+                detail,
                 action,
-            } => (format!("{label} · {detail}"), Some(*action)),
-            Row::Action {
-                label,
-                detail: None,
-                action,
-            } => (label.clone(), Some(*action)),
+            } => {
+                let (main, rest) = action_text(label, detail.as_deref());
+                (main + &rest.unwrap_or_default(), Some(*action))
+            }
         };
         Flat {
             label,
@@ -363,6 +361,13 @@ impl Entry {
             action: action.map(MenuAction::id),
         }
     }
+}
+
+/// O texto de uma ação e, com `detail`, o resto (" · acme / api"), que o
+/// macOS pinta em cor secundária logo depois do rótulo; juntos, são a linha
+/// em texto da bandeja.
+pub fn action_text(label: &str, detail: Option<&str>) -> (String, Option<String>) {
+    (label.to_owned(), detail.map(|d| format!(" · {d}")))
 }
 
 /// A dica do ícone: as linhas da leitura, o resumo da saúde e as legendas,
@@ -628,6 +633,36 @@ mod tests {
     }
 
     #[test]
+    fn the_project_follows_the_label_as_a_secondary_tail() {
+        let entries = entries(&full(Utc::now()));
+        let parts: Vec<(String, Option<String>, String)> = entries
+            .iter()
+            .filter_map(|e| match &e.row {
+                Row::Action { label, detail, .. } if e.dynamic => {
+                    let (main, rest) = action_text(label, detail.as_deref());
+                    Some((main, rest, e.flat().label))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (
+                    "75 handoffs abertos".into(),
+                    None,
+                    "75 handoffs abertos".into()
+                ),
+                (
+                    "3 propostas pendentes".into(),
+                    Some(" · acme / api-pagamentos".into()),
+                    "3 propostas pendentes · acme / api-pagamentos".into()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn every_action_is_its_destination_and_every_code_is_one_destination() {
         // A ação de cada linha habilitada, na ordem do menu.
         let actions: Vec<MenuAction> = entries(&full(Utc::now()))
@@ -739,6 +774,60 @@ mod tests {
         ] {
             let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", interval, now);
             assert_eq!(flats(&reading)[0].label, want, "{case}");
+        }
+    }
+
+    #[test]
+    fn samples_are_late_after_three_intervals_and_never_before_10_s() {
+        let now = Utc::now();
+        // (intervalo, idade, atrasada?): com 2 s, 3 × 2 = 6 fica abaixo do
+        // piso de 10 s; com 60 s, valem os 180.
+        for (interval, age, late) in [
+            (2, 6, false),
+            (2, 7, false),
+            (2, 10, false),
+            (2, 11, true),
+            (60, 180, false),
+            (60, 181, true),
+        ] {
+            let mut snapshot = resources(now);
+            snapshot.at = Some(now - Duration::seconds(age));
+            let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", interval, now);
+            let case = format!("{interval} s, {age} s old");
+            if late {
+                assert_eq!(reading.state, State::Late(age), "{case}");
+                assert_eq!((reading.ai, reading.docker), (None, None), "{case}");
+            } else {
+                assert_eq!(reading.state, State::Live(age), "{case}");
+                let ai = Load {
+                    cpu: 12.4,
+                    memory: 421 * MIB,
+                };
+                assert_eq!(reading.ai, Some(ai), "{case}");
+            }
+        }
+        // A API pela mesma regra: no menor intervalo (5 s), 3 × 5 = 15 já
+        // passa do piso; em 60 s, os 180.
+        for (api_seconds, age, late) in [
+            (5, 10, false),
+            (5, 15, false),
+            (5, 16, true),
+            (60, 180, false),
+            (60, 181, true),
+        ] {
+            let config = Config {
+                api_seconds,
+                ..Default::default()
+            };
+            let api = ApiSnapshot {
+                at: Some(now - Duration::seconds(age)),
+                handoff_total: Some(5),
+                ..Default::default()
+            };
+            let reading = MenuReading::from_snapshot(&resources(now), "ai-memory", 2, now)
+                .with_context(Some(&api), None, &config, now);
+            let want = (!late).then_some(5);
+            assert_eq!(reading.handoffs, want, "API {api_seconds} s, {age} s old");
         }
     }
 

@@ -968,7 +968,7 @@ impl MonitorApp {
     /// Barra de menus (macOS) ou bandeja (Linux): o modo do item (só no
     /// macOS), o projeto das propostas e o ponto de alerta.
     fn tray(&mut self, ui: &mut egui::Ui) {
-        use crate::widgets::{caption, checkbox, option, select};
+        use crate::widgets::{Select, caption, checkbox, option};
         #[cfg(target_os = "macos")]
         setting_row(ui, "Mostrar na barra:", |ui| {
             // A prévia mostra o que a barra mostraria agora.
@@ -1003,7 +1003,11 @@ impl MonitorApp {
                 .as_ref()
                 .map(crate::client::Scope::label)
                 .unwrap_or("Desativado".into());
-            select(ui, "Propostas", &selected, 280., |ui| {
+            // O corpo de Ajustes é surf: o seletor vai raised.
+            let select = Select::new("watch-proposals", "Propostas", &selected)
+                .min_width(280.)
+                .raised();
+            select.show(ui, |ui| {
                 if option(ui, self.draft.proposal_watch.is_none(), "Desativado").clicked() {
                     self.draft.proposal_watch = None;
                 }
@@ -4694,11 +4698,12 @@ mod tests {
             // O traço dos widgets em repouso; `scroll_bar` o troca por text2.
             let normal = theme::visuals(theme).widgets.inactive.fg_stroke.color;
             assert_ne!(normal, p.text2, "{theme:?}: precondition");
-            // (aba, um texto pintado no traço do controle dele)
+            // (aba, um texto pintado no traço do controle dele). A aba da
+            // barra não entra: o Select, a caixa e os rádios dela pintam com
+            // as cores do tema, sem traço de widget; o corpo é o mesmo.
             for (tab, probe) in [
                 (SettingsTab::General, "2"),
                 (SettingsTab::Connection, "https://draft.example"),
-                (SettingsTab::Tray, "Desativado"),
                 (SettingsTab::Account, "grupo"),
             ] {
                 let mut app = app_with_unsaved_draft();

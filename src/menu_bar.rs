@@ -25,9 +25,8 @@ mod native {
         NSFontAttributeName, NSFontWeight, NSFontWeightMedium, NSFontWeightRegular,
         NSFontWeightSemibold, NSForegroundColorAttributeName, NSGraphicsContext, NSImage,
         NSImageScaling, NSImageView, NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle, NSMenu,
-        NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStatusBar,
-        NSStatusBarButton, NSStatusItem, NSTextAlignment, NSTextField, NSTextTab, NSTitlePosition,
-        NSVariableStatusItemLength, NSView,
+        NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextAlignment, NSTextField,
+        NSTitlePosition, NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
         MainThreadMarker, NSActivityOptions, NSArray, NSAttributedString, NSDictionary,
@@ -523,11 +522,12 @@ mod native {
                 }
             }
             (Native::Action(item), Row::Action { label, detail, .. }) if entry.dynamic => {
-                match detail {
-                    Some(detail) => item.setAttributedTitle(Some(&detail_title(label, detail))),
+                let (main, rest) = menu::action_text(label, detail.as_deref());
+                match rest {
+                    Some(rest) => item.setAttributedTitle(Some(&secondary_tail(&main, &rest))),
                     None => {
                         item.setAttributedTitle(None);
-                        item.setTitle(&NSString::from_str(label));
+                        item.setTitle(&NSString::from_str(&main));
                     }
                 }
             }
@@ -535,29 +535,16 @@ mod native {
         }
     }
 
-    /// O rótulo com `detail` à direita, em text2 e 12 (o projeto das
-    /// propostas), numa parada de tabulação no fim da linha.
-    fn detail_title(label: &str, detail: &str) -> Retained<NSAttributedString> {
-        // SAFETY: an empty options dictionary is valid for NSTextTab.
-        let tab = unsafe {
-            NSTextTab::initWithTextAlignment_location_options(
-                NSTextTab::alloc(),
-                NSTextAlignment::Right,
-                WIDTH - 2. * INSET,
-                &NSDictionary::new(),
-            )
-        };
-        let style = NSMutableParagraphStyle::new();
-        style.setTabStops(Some(&NSArray::from_slice(&[&*tab])));
-        let part = |text: &str, font: &NSFont, color: &NSColor| {
+    /// `main` na cor do menu e, logo depois, `rest` (o projeto das propostas)
+    /// em cor secundária, na mesma fonte: o item segue nativo, sem tabulação.
+    fn secondary_tail(main: &str, rest: &str) -> Retained<NSAttributedString> {
+        let font = NSFont::menuFontOfSize(0.);
+        let font: &NSFont = &font;
+        let part = |text: &str, color: &NSColor| {
             // SAFETY: AppKit's attribute keys with values of their types.
             unsafe {
-                let keys = [
-                    NSFontAttributeName,
-                    NSForegroundColorAttributeName,
-                    NSParagraphStyleAttributeName,
-                ];
-                let values: [&AnyObject; 3] = [font.as_ref(), color.as_ref(), (*style).as_ref()];
+                let keys = [NSFontAttributeName, NSForegroundColorAttributeName];
+                let values: [&AnyObject; 2] = [font.as_ref(), color.as_ref()];
                 NSAttributedString::initWithString_attributes(
                     NSAttributedString::alloc(),
                     &NSString::from_str(text),
@@ -566,16 +553,8 @@ mod native {
             }
         };
         let title = NSMutableAttributedString::new();
-        title.appendAttributedString(&part(
-            label,
-            &NSFont::menuFontOfSize(0.),
-            &NSColor::labelColor(),
-        ));
-        title.appendAttributedString(&part(
-            &format!("\t{detail}"),
-            &NSFont::menuFontOfSize(12.),
-            &NSColor::secondaryLabelColor(),
-        ));
+        title.appendAttributedString(&part(main, &NSColor::labelColor()));
+        title.appendAttributedString(&part(rest, &NSColor::secondaryLabelColor()));
         Retained::into_super(title)
     }
 
