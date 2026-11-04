@@ -268,8 +268,10 @@ def menu_mismatches(expected, items):
         if enabled != want["enabled"]:
             wrong.append(f"{i} {label!r}: enabled {enabled}")
         if want["dynamic"]:
-            # Data-dependent text and visibility (the alert band shows only
-            # with alerts): a visible dynamic line must say something.
+            # Data-dependent text. A line --print-menu shows stays shown; only
+            # the one it hides (the alert band, shown with alerts) is free.
+            if want["visible"] and not visible:
+                wrong.append(f"{i} {label!r}: hidden, --print-menu shows it")
             if visible and not label:
                 wrong.append(f"{i}: visible dynamic line without a label")
         elif (label, visible) != (want["label"], want["visible"]):

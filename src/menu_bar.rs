@@ -65,6 +65,8 @@ mod native {
             name: Retained<NSTextField>,
             cpu: Retained<NSTextField>,
             memory: Retained<NSTextField>,
+            /// "indisponível", nas duas colunas juntas, no lugar delas.
+            missing: Retained<NSTextField>,
         },
         Alert {
             item: Retained<NSMenuItem>,
@@ -183,25 +185,12 @@ mod native {
             let state = self.ivars();
             let mtm = self.mtm();
             let now = Utc::now();
-            let current = {
-                // Never wait for a collector or a configuration change on AppKit.
-                let Ok(config) = state.shared.config.try_read() else {
-                    return;
-                };
-                let Ok(snapshot) = state.shared.resources.try_lock() else {
-                    return;
-                };
-                let api = state.shared.api.try_lock().ok();
-                let health = state.shared.health.try_lock().ok();
-                let reading = MenuReading::from_snapshot(
-                    &snapshot,
-                    &config.container,
-                    config.resource_seconds,
-                    now,
-                )
-                .with_context(api.as_deref(), health.as_deref(), &config, now);
-                (reading, config.bar_mode, dark(mtm))
+            // Never wait for a collector or a configuration change on AppKit:
+            // a busy lock skips the tick and keeps the last reading.
+            let Some((reading, mode)) = menu::read(&state.shared, now) else {
+                return;
             };
+            let current = (reading, mode, dark(mtm));
             let Some(button) = state.status.button(mtm) else {
                 return;
             };
@@ -391,15 +380,31 @@ mod native {
                     right,
                     rect(WIDTH - INSET - MEMORY, y, MEMORY, 16.),
                 );
+                let missing = label(
+                    mtm,
+                    12.5,
+                    regular,
+                    &NSColor::secondaryLabelColor(),
+                    right,
+                    rect(
+                        WIDTH - INSET - MEMORY - GAP - CPU,
+                        y,
+                        CPU + GAP + MEMORY,
+                        16.,
+                    ),
+                );
+                missing.setStringValue(&NSString::from_str(menu::UNAVAILABLE));
                 // O nome ganha a largura extra; as colunas ficam à direita.
                 name.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-                cpu.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
-                memory.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+                for column in [&cpu, &memory, &missing] {
+                    column.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+                }
                 Native::Metric {
-                    item: view_item(mtm, height, &[&name, &cpu, &memory]),
+                    item: view_item(mtm, height, &[&name, &cpu, &memory, &missing]),
                     name,
                     cpu,
                     memory,
+                    missing,
                 }
             }
             Row::Alert(_) => {
@@ -489,23 +494,20 @@ mod native {
                     name: field,
                     cpu,
                     memory,
+                    missing,
                     ..
                 },
                 Row::Metric { name, value },
             ) => {
                 field.setStringValue(&NSString::from_str(name));
-                let (c, m) = match value {
-                    Some((c, m)) => (c.as_str(), m.as_str()),
-                    None => ("indisponível", ""),
-                };
-                cpu.setStringValue(&NSString::from_str(c));
-                let ink = if value.is_some() {
-                    NSColor::labelColor()
-                } else {
-                    NSColor::secondaryLabelColor()
-                };
-                cpu.setTextColor(Some(&ink));
-                memory.setStringValue(&NSString::from_str(m));
+                // Sem medida, "indisponível" inteiro na borda das colunas.
+                if let Some((c, m)) = value {
+                    cpu.setStringValue(&NSString::from_str(c));
+                    memory.setStringValue(&NSString::from_str(m));
+                }
+                cpu.setHidden(value.is_none());
+                memory.setHidden(value.is_none());
+                missing.setHidden(value.is_some());
             }
             (
                 Native::Alert {

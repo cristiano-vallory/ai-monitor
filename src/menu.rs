@@ -17,6 +17,8 @@ pub const PULSE: [(f32, f32); 6] = [
 ];
 /// A espessura do traço do pulso, nas mesmas 24 unidades.
 pub const PULSE_WIDTH: f32 = 2.4;
+/// Métrica sem medida (nunca zero), na linha em texto e na do macOS.
+pub const UNAVAILABLE: &str = "indisponível";
 /// O âmbar do ponto de alerta no ícone (MenuBar.dc.html), nos dois sistemas.
 pub const ALERT_DOT: (u8, u8, u8) = (0xF2, 0xA3, 0x3A);
 
@@ -204,6 +206,24 @@ impl MenuReading {
     }
 }
 
+/// A leitura de um tique da barra ou da bandeja, com o modo do item. `None`
+/// quando algum lock está ocupado (um coletor gravando, a config mudando):
+/// nunca espera e quem chama mantém a leitura anterior, em vez de mostrar
+/// por um tique "sem saúde" ou "sem API".
+pub fn read(
+    shared: &crate::monitor::Shared,
+    now: DateTime<Utc>,
+) -> Option<(MenuReading, crate::model::BarMode)> {
+    let config = shared.config.try_read().ok()?;
+    let snapshot = shared.resources.try_lock().ok()?;
+    let api = shared.api.try_lock().ok()?;
+    let health = shared.health.try_lock().ok()?;
+    let reading =
+        MenuReading::from_snapshot(&snapshot, &config.container, config.resource_seconds, now)
+            .with_context(Some(&api), Some(&health), &config, now);
+    Some((reading, config.bar_mode))
+}
+
 /// Uma linha do menu.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
@@ -320,7 +340,7 @@ impl Entry {
                 name,
                 value: Some((cpu, memory)),
             } => (format!("{name} · {cpu} · {memory}"), None),
-            Row::Metric { name, value: None } => (format!("{name} · indisponível"), None),
+            Row::Metric { name, value: None } => (format!("{name} · {UNAVAILABLE}"), None),
             Row::Alert(text) => (text.clone(), None),
             Row::Separator => (String::new(), None),
             Row::Action {
@@ -851,6 +871,50 @@ mod tests {
             (band.label.as_str(), band.visible),
             ("Saúde do servidor indisponível", true)
         );
+    }
+
+    #[test]
+    fn a_busy_lock_skips_the_tick_instead_of_reading_as_no_data() {
+        use crate::monitor::Shared;
+        let now = Utc::now();
+        let shared = Shared::unstarted(Config {
+            bar_mode: crate::model::BarMode::Full,
+            ..watching()
+        });
+        *shared.resources.lock().unwrap() = resources(now);
+        *shared.api.lock().unwrap() = api(now, 75);
+        *shared.health.lock().unwrap() =
+            health(now, serde_json::json!({"consolidation": {"failed": 2}}));
+        let (reading, mode) = read(&shared, now).expect("all locks free");
+        assert_eq!(reading, full(now), "the same reading as with_context");
+        assert_eq!(mode, crate::model::BarMode::Full);
+        assert!(reading.alert_dot, "precondition: the alert");
+        // Cada lock ocupado: nenhum tique, nunca uma leitura sem alertas.
+        let busy = |what: &str| {
+            let skipped = match what {
+                "config" => {
+                    let _held = shared.config.write().unwrap();
+                    read(&shared, now)
+                }
+                "resources" => {
+                    let _held = shared.resources.lock().unwrap();
+                    read(&shared, now)
+                }
+                "api" => {
+                    let _held = shared.api.lock().unwrap();
+                    read(&shared, now)
+                }
+                _ => {
+                    let _held = shared.health.lock().unwrap();
+                    read(&shared, now)
+                }
+            };
+            skipped.is_none()
+        };
+        for what in ["config", "resources", "api", "health"] {
+            assert!(busy(what), "{what} busy");
+        }
+        assert!(read(&shared, now).is_some(), "free again");
     }
 
     #[test]

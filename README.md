@@ -53,7 +53,7 @@ cargo clippy --all-targets --locked -- -D warnings
 
 `--trace-menu` emite até 120 leituras do indicador AppKit (texto, modo, esmaecido, ponto de alerta e estado da coleta), visibilidade da janela e quantidade de amostras históricas no terminal, para verificar a atualização em segundo plano. Pode ser combinado com `--show-dashboard`; não registra conteúdo de sessões, projetos nem credenciais.
 
-`--print-menu` imprime em JSON as linhas do menu da barra/bandeja de uma leitura sem dados (rótulo, habilitada, separador, dinâmica, visível e ação) e sai, sem abrir janela, bandeja, D-Bus ou rede. O smoke da bandeja no Linux compara essa saída com o menu publicado.
+`--print-menu` imprime em JSON as linhas do menu da barra/bandeja de uma leitura sem dados (rótulo, habilitada, separador, dinâmica, visível e ação) e sai, sem abrir janela, bandeja, D-Bus ou rede. A linha das propostas leva o workspace e o projeto vigiados em Ajustes, se houver; revise antes de compartilhar. O smoke da bandeja no Linux compara essa saída com o menu publicado.
 
 ## Barra de menus do macOS
 
@@ -111,6 +111,8 @@ Abra **Ajustes** com **⌘,** (no Linux, **Ctrl+,**), pelo item **Ajustes** no r
 | Recursos | 2 segundos | Entre 1 e 60 segundos |
 | Sessões/handoffs | 60 segundos | Entre 5 e 300 segundos; espera após cada varredura |
 | Aparência | Sistema | Sistema, Claro ou Escuro; aplica e salva na hora, sem reconectar |
+| Mostrar na barra (só macOS) | Ícone + CPU | Só o ícone, Ícone + CPU ou Completo; vale ao salvar, sem reiniciar |
+| Alertas | Ligado | Ponto âmbar no ícone da barra/bandeja quando a saúde tem alertas |
 
 Configurações são salvas em `~/Library/Application Support/AI Monitor/config.json`, fora do projeto. **O token não entra no JSON.** Pode ser guardado opcionalmente no Keychain, separado por endereço de servidor; **Carregar do Keychain** coloca no campo o token guardado para o endereço informado (no Linux, o rótulo é “chaveiro do sistema”). URLs com usuário, senha, query ou fragmento são recusadas. Tokens em servidores fora de loopback exigem HTTPS. Redirecionamentos HTTP são recusados. O app não depende do PATH do Finder para encontrar as instalações usuais do Docker Desktop.
 

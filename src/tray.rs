@@ -155,22 +155,19 @@ fn symbolic_name(dot: bool) -> &'static str {
     }
 }
 /// Onde gravar os ícones: `$XDG_RUNTIME_DIR/ai-monitor`; sem ele, o cache do
-/// usuário (`$XDG_CACHE_HOME` ou `~/.cache`); sem os dois, o temporário, com
-/// o uid no nome. Só valem caminhos absolutos.
+/// usuário (`$XDG_CACHE_HOME` ou `~/.cache`). Só valem caminhos absolutos.
+/// Sem os dois, nenhum: um caminho previsível no /tmp compartilhado seguiria
+/// symlinks de outro usuário (CWE-377/CWE-59), e a bandeja fica no pixmap.
 fn icon_base(
     runtime: Option<OsString>,
     cache: Option<OsString>,
     home: Option<OsString>,
-) -> PathBuf {
+) -> Option<PathBuf> {
     let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
-    if let Some(dir) = absolute(runtime) {
-        return dir.join("ai-monitor");
-    }
-    if let Some(dir) = absolute(cache).or_else(|| absolute(home).map(|h| h.join(".cache"))) {
-        return dir.join("ai-monitor");
-    }
-    // SAFETY: getuid não falha nem tem pré-condições.
-    std::env::temp_dir().join(format!("ai-monitor-{}", unsafe { libc::getuid() }))
+    absolute(runtime)
+        .or_else(|| absolute(cache))
+        .or_else(|| absolute(home).map(|h| h.join(".cache")))
+        .map(|dir| dir.join("ai-monitor"))
 }
 /// Grava os dois ícones simbólicos em `base/icons` (no tema hicolor e soltos,
 /// para hosts que não leem o tema) e devolve esse `IconThemePath`; `None`
@@ -257,16 +254,9 @@ impl Tray for AiTray {
     }
 }
 
+/// `None` com algum lock ocupado: o tique é pulado e a leitura anterior fica.
 fn current_reading(shared: &Shared) -> Option<MenuReading> {
-    let now = Utc::now();
-    let config = shared.config.try_read().ok()?;
-    let snapshot = shared.resources.try_lock().ok()?;
-    let api = shared.api.try_lock().ok();
-    let health = shared.health.try_lock().ok();
-    Some(
-        MenuReading::from_snapshot(&snapshot, &config.container, config.resource_seconds, now)
-            .with_context(api.as_deref(), health.as_deref(), &config, now),
-    )
+    crate::menu::read(shared, Utc::now()).map(|(reading, _)| reading)
 }
 
 pub fn start(
@@ -286,7 +276,7 @@ pub fn start(
     let tray = AiTray {
         control: control.clone(),
         reading,
-        icons: install_icons(&base),
+        icons: base.as_deref().and_then(install_icons),
     };
     let handle = tray.spawn().ok()?;
     let worker = handle.clone();
@@ -380,12 +370,22 @@ mod tests {
 
     #[test]
     fn the_tray_menu_is_the_flat_spec_line_by_line() {
-        for (case, reading) in [("no data", empty()), ("alerts", alerting())] {
+        // Um projeto com "_": o rótulo publicado é o escapado.
+        let mut underscored = empty();
+        underscored.proposals = Proposals::Watched {
+            scope: "ws_a / proj_b".into(),
+            pending: Some(1),
+        };
+        for (case, reading) in [
+            ("no data", empty()),
+            ("alerts", alerting()),
+            ("underscores", underscored),
+        ] {
             let want: Vec<_> = crate::menu::entries(&reading)
                 .iter()
                 .map(|e| {
                     let f = e.flat();
-                    (f.label, f.enabled, f.visible, f.separator)
+                    (escape_label(&f.label), f.enabled, f.visible, f.separator)
                 })
                 .collect();
             assert_eq!(rendered(&tray(reading)), want, "{case}");
@@ -705,47 +705,49 @@ mod tests {
     }
 
     #[test]
-    fn the_icons_go_to_the_runtime_dir_else_the_cache_else_the_temp_dir() {
+    fn the_icons_go_to_the_runtime_dir_else_the_cache_else_nowhere() {
         let os = |s: &str| Some(OsString::from(s));
-        let temp = std::env::temp_dir().join(format!("ai-monitor-{}", unsafe { libc::getuid() }));
+        let at = |s: &str| Some(PathBuf::from(s));
         for (case, runtime, cache, home, want) in [
             (
                 "runtime",
                 os("/run/user/1000"),
                 os("/c"),
                 os("/h"),
-                PathBuf::from("/run/user/1000/ai-monitor"),
+                at("/run/user/1000/ai-monitor"),
             ),
             (
                 "no runtime: cache",
                 None,
                 os("/c"),
                 os("/h"),
-                PathBuf::from("/c/ai-monitor"),
+                at("/c/ai-monitor"),
             ),
             (
                 "empty runtime",
                 os(""),
                 os("/c"),
                 os("/h"),
-                PathBuf::from("/c/ai-monitor"),
+                at("/c/ai-monitor"),
             ),
             (
                 "relative runtime",
                 os("run"),
                 None,
                 os("/h"),
-                PathBuf::from("/h/.cache/ai-monitor"),
+                at("/h/.cache/ai-monitor"),
             ),
             (
                 "relative cache: home",
                 None,
                 os("c"),
                 os("/h"),
-                PathBuf::from("/h/.cache/ai-monitor"),
+                at("/h/.cache/ai-monitor"),
             ),
-            ("nothing: temp", None, None, None, temp.clone()),
-            ("relative home: temp", None, None, os("h"), temp.clone()),
+            // Nunca o /tmp compartilhado: sem diretório do usuário, nada.
+            ("nothing", None, None, None, None),
+            ("relative home", None, None, os("h"), None),
+            ("only relative", os("r"), os("c"), os("h"), None),
         ] {
             assert_eq!(icon_base(runtime, cache, home), want, "{case}");
         }
