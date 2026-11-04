@@ -1,5 +1,5 @@
 AI Monitor — third-party notices
-Cargo.lock SHA-256: 03aae5bb31b51e8cf3e20fa2afefc2c947f5eba67b53465bb26c7ea10323f0b3
+Cargo.lock SHA-256: 545eda57d2d01f7166aa22198add6c99f10dc75bc72871626535d4fd82c1d8e3
 Inventory of resolved Linux dependencies, including build-time components.
 License texts are reproduced from published crates or their recorded upstream commits.
 

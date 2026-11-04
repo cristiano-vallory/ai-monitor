@@ -89,3 +89,29 @@ não existe fallback em texto puro.
   `cristiano_vallory`/`cristiano-vallory` e correções acumuladas do port.
 - v0.6.2 — intervalo padrão de sessões/handoffs de 10 s para 60 s (PR #12);
   configs salvas mantêm o valor escolhido.
+
+## Redesign — fases
+
+Referência visual: o canvas de artboards do redesign, nos dois temas, para
+macOS e Linux. Cada fase teve PR próprio, gates macOS e Linux (em contêiner),
+mutation checks dos guards novos, capturas nos dois temas e o loop de code
+review até zerar os BLOCKING.
+
+- Fase 1 — **concluída (PR #14)**: tokens de cor em `src/theme.rs`, tema
+  Sistema/Claro/Escuro (portal `org.freedesktop.appearance` no Linux), Inter e
+  JetBrains Mono embutidas, números em pt-BR.
+- Fase 2 — **concluída (PR #15)**: lateral com grupos e modo compacto abaixo de
+  1000 px, barra superior com o chip de atualização e a pausa, barra de
+  status, janela mínima de 720 × 560.
+- Fase 3 — **concluída (PR #16)**: Visão geral, Sessões e handoffs, Docker e
+  Saúde redesenhadas; `egui_extras` removido.
+- Fase 4 — **concluída (PR #17)**: Ajustes em janela própria, folha de
+  confirmação em níveis; Explorar, Revisão, Manutenção e backup e
+  Administração redesenhadas.
+- NB acumulados das Fases 2–4 — **concluídos (PR #18)**: 29 itens de revisão.
+- Fase 5 — **concluída (PR #19)**: barra de menus (macOS) e bandeja (Linux)
+  com uma descrição única do menu (`src/menu.rs`), três modos da barra e o
+  ponto de alerta.
+- v0.7.0 — release do redesign. Verificações e pendências NON-BLOCKING para
+  uma rodada futura em `docs/reviews/v0.7.0.md`. A validação em desktop
+  Linux real (VM Omarchy) continua pendente.
