@@ -1,10 +1,10 @@
 //! Commands arriving at the app while a window may or may not exist.
 //! The decision is pure so the whole domain is unit-testable.
 
+/// `Open` carries a `menu::Destination` code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Open(u8),
-    Hide,
     Quit,
 }
 
@@ -12,23 +12,15 @@ pub enum Command {
 pub enum Action {
     OpenWindow(u8),
     FocusAndNavigate(u8),
-    CloseWindow,
     Exit,
-    Ignore,
 }
 
 pub fn decide(window_open: bool, cmd: Command) -> Action {
     match cmd {
         Command::Quit => Action::Exit,
-        Command::Hide => {
-            if window_open {
-                Action::CloseWindow
-            } else {
-                Action::Ignore
-            }
-        }
         Command::Open(nav) => {
-            let nav = if nav > 3 { 0 } else { nav };
+            // Outside the destinations: open without navigating.
+            let nav = crate::menu::Destination::from_code(nav).map_or(0, |d| d.code());
             if window_open {
                 Action::FocusAndNavigate(nav)
             } else {
@@ -72,25 +64,19 @@ mod tests {
     fn decide_covers_every_command_and_window_state() {
         assert_eq!(decide(false, Command::Quit), Action::Exit);
         assert_eq!(decide(true, Command::Quit), Action::Exit);
-        assert_eq!(decide(false, Command::Hide), Action::Ignore);
-        assert_eq!(decide(true, Command::Hide), Action::CloseWindow);
-        for nav in 0..=3u8 {
+        // 0 = panel, 1 = Saúde, 2 = Revisão, 3 = Sessões, 4 = Ajustes; the
+        // rest of the u8 domain opens without navigating.
+        for nav in 0..=u8::MAX {
+            let want = if nav <= 4 { nav } else { 0 };
             assert_eq!(
                 decide(false, Command::Open(nav)),
-                Action::OpenWindow(nav),
+                Action::OpenWindow(want),
                 "nav={nav}"
             );
             assert_eq!(
                 decide(true, Command::Open(nav)),
-                Action::FocusAndNavigate(nav),
+                Action::FocusAndNavigate(want),
                 "nav={nav}"
-            );
-        }
-        for nav in [4u8, 200, u8::MAX] {
-            assert_eq!(decide(false, Command::Open(nav)), Action::OpenWindow(0));
-            assert_eq!(
-                decide(true, Command::Open(nav)),
-                Action::FocusAndNavigate(0)
             );
         }
     }

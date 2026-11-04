@@ -19,6 +19,7 @@ mod local_service;
 mod maintenance;
 mod management_ui;
 mod mcp;
+mod menu;
 mod menu_bar;
 mod model;
 mod monitor;
@@ -42,6 +43,17 @@ fn main() -> eframe::Result {
             "AI Monitor {} ({})",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::ARCH
+        );
+        return Ok(());
+    }
+    // As linhas do menu da barra/bandeja em JSON (o smoke da bandeja compara
+    // com o dbusmenu). Sai antes de janela, bandeja, D-Bus e rede; sem o
+    // Keychain/chaveiro, que o menu não usa.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if std::env::args().any(|a| a == "--print-menu") {
+        println!(
+            "{}",
+            menu::print_menu(&model::Config::load_without_keychain())
         );
         return Ok(());
     }

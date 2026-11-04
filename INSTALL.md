@@ -8,7 +8,7 @@ Você pode instalar pelo `.dmg` pronto, sem compilar Rust. O aplicativo abre na 
 2. Abra o `.dmg` e arraste **AI Monitor.app** para o atalho **Applications / Aplicativos**.
 3. Se estiver atualizando, encerre a versão anterior em **Sair do AI Monitor** antes de substituir o app.
 4. Ejete o disco AI Monitor e abra o aplicativo em **Aplicativos**.
-5. Procure **AI / Docker** na barra de menus. Clique e escolha **Abrir painel**.
+5. Procure o ícone de pulso, com a CPU do ai-memory, na barra de menus. Clique e escolha **Abrir painel**.
 6. Abra **Ajustes** (**⌘,** ou o item **Ajustes** no rodapé da lateral), vá à aba **Conexão**, ajuste servidor, token opcional e nome do contêiner; use **Salvar e conectar**.
 
 O instalador é **Universal**, com executáveis nativos para Apple Silicon e Intel. O mínimo declarado é macOS 12.0; a interface foi validada em Apple Silicon e o executável Intel foi verificado via Rosetta. Hardware Intel e versões antigas do macOS ainda não foram validados.
@@ -140,7 +140,7 @@ A primeira compilação baixa e compila as crates, podendo demorar alguns minuto
 
 O script usa Cargo de `~/.cargo/bin/cargo` ou do `PATH`; `CARGO_BIN` permite informar outro executável. Ele fixa o diretório de saída em `target/`, o alvo da arquitetura solicitada e o deployment target macOS 12.0. Os flags de release remapeiam caminhos do projeto, Cargo e Rustup para evitar incluir diretórios pessoais nas mensagens de erro compiladas.
 
-**Ao abrir, procure o texto AI/Docker na barra de menus.** Não aparece uma janela nem um ícone no Dock. Clique no indicador e escolha **Abrir painel**. Abra **Ajustes** com **⌘,** (ou pelo item **Ajustes** no rodapé da lateral), ajuste os campos e clique em **Salvar e conectar**. O botão vermelho da janela apenas oculta o painel; para encerrar, use **Sair do AI Monitor** no menu.
+**Ao abrir, procure o ícone de pulso na barra de menus** (por padrão, com a CPU do ai-memory ao lado; **Ajustes → Barra de menus** troca para só o ícone ou o modo completo, com o Docker). Não aparece uma janela nem um ícone no Dock. Clique no indicador e escolha **Abrir painel**. Abra **Ajustes** com **⌘,** (ou pelo item **Ajustes** no rodapé da lateral), ajuste os campos e clique em **Salvar e conectar**. O botão vermelho da janela apenas oculta o painel; para encerrar, use **Sair do AI Monitor** no menu.
 
 Para abrir explicitamente com a janela:
 
@@ -210,7 +210,7 @@ As preferências locais são preservadas. O app não possui atualizador automát
 | `cargo: command not found` | Abra um novo terminal ou carregue `source "$HOME/.cargo/env"` |
 | Clang, SDK ou Swift ausente | Instalação do Xcode Command Line Tools e resultado de `xcode-select -p` |
 | Não aparece janela | Comportamento esperado: use **Abrir painel** na barra de menus |
-| Não vejo o indicador | Espaço disponível na barra, notch ou app que oculta itens; confirme se o monitor está aberto |
+| Não vejo o indicador | Espaço disponível na barra, notch ou app que oculta itens (o modo **Só o ícone** ocupa menos); confirme se o monitor está aberto |
 | Docker indisponível | Docker Desktop iniciado, `docker version`, contexto ativo e caminho do CLI no painel |
 | AI indisponível, Docker funciona | Nome exato do contêiner ou existência de processo ai-memory nativo |
 | Sessões/handoffs indisponíveis | URL da API, porta acessível, versão do servidor e permissões do token |
@@ -317,7 +317,7 @@ prévias, permissões, limites, logs privados e recuperação offline orientada.
 
 Na release **v0.6.2**: **Ubuntu** instala `sudo apt install ./ai-monitor_0.6.2_<amd64|arm64>.deb` (Resolve as dependências automaticamente; `gnome-keyring` é recomendado para o chaveiro). **Omarchy/Arch** baixa o `PKGBUILD` da release e roda `makepkg -si`. Remover: `sudo apt remove ai-monitor` ou `sudo pacman -R ai-monitor-bin`. O app aparece no menu de aplicativos (ícone + `.desktop`).
 
-Com bandeja (StatusNotifierItem), o app mostra somente um ícone — clique esquerdo abre o painel; fechar a janela mantém o monitor na bandeja; uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, volta ao modo janela (fecha encerra). GNOME/Ubuntu exige a extensão AppIndicator (padrão); Omarchy 4 usa o widget de bandeja. Autostart: **não é instalado** — no GNOME use "Aplicativos de inicialização"; no Hyprland, adicione `exec-once = ai-monitor` em `~/.config/hypr/autostart.conf` (autostart padrão do Hyprland; a localização preferida no Omarchy não foi verificada). A execução foi verificada em Xvfb e compositor sway headless; ainda não foi validada em desktop real — pendente do teste na VM Omarchy.
+Com bandeja (StatusNotifierItem), o app mostra somente um ícone (o pulso, como ícone simbólico que o host da bandeja pinta na cor do texto da barra, com um ponto âmbar quando a saúde tem alertas, desligável em **Ajustes → Bandeja**; os SVGs ficam em `$XDG_RUNTIME_DIR/ai-monitor/icons` ou, sem ele, no cache do usuário; sem os dois, ou se um host não os acha, vale a imagem embutida) — clique esquerdo abre o painel; o menu traz, em texto, as mesmas linhas da barra do macOS (estado, ai-memory, Docker, alertas, handoffs, propostas, **Abrir painel**, **Saúde do ai-memory**, **Revisar propostas…**, **Ajustes…** e **Sair do AI Monitor**); fechar a janela mantém o monitor na bandeja; uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, volta ao modo janela (fecha encerra). GNOME/Ubuntu exige a extensão AppIndicator (padrão); Omarchy 4 usa o widget de bandeja. Autostart: **não é instalado** — no GNOME use "Aplicativos de inicialização"; no Hyprland, adicione `exec-once = ai-monitor` em `~/.config/hypr/autostart.conf` (autostart padrão do Hyprland; a localização preferida no Omarchy não foi verificada). A execução foi verificada em Xvfb e compositor sway headless; ainda não foi validada em desktop real — pendente do teste na VM Omarchy.
 
 ### Executar o artefato do CI
 
@@ -340,6 +340,6 @@ Com Rust estável: `cargo build --release`. Com bandeja disponível, o binário 
 
 ### Limites atuais do port
 
-- Com bandeja (StatusNotifierItem), o app mostra somente um ícone — clique esquerdo abre o painel; fechar a janela mantém o monitor rodando na bandeja; abrir uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, o app volta ao modo janela: abre direto e fechar encerra.
+- Com bandeja (StatusNotifierItem), o app mostra somente um ícone (o SNI não garante texto ao lado; os modos da barra são só do macOS) — clique esquerdo abre o painel; fechar a janela mantém o monitor rodando na bandeja; abrir uma segunda instância reabre o painel da primeira. Sem StatusNotifierWatcher, o app volta ao modo janela: abre direto e fechar encerra.
 - No GNOME/Ubuntu é exigida a extensão AppIndicator (ativa por padrão no Ubuntu ≥ 22.04); no Omarchy 4, o widget de bandeja da barra Quickshell.
 - Na aba de serviço local há os backends Docker e **systemd (usuário)**: controla a unit `ai-memory.service` instalada por `ai-memory setup` (iniciar, parar, reiniciar, logs do journal, atualização nativa com backup e SHA-256). Units de sistema (system-wide) estão fora de escopo. O backend precisa do barramento do usuário (`XDG_RUNTIME_DIR` e `DBUS_SESSION_BUS_ADDRESS`), presente em sessões gráficas; numa sessão sem login gráfico (SSH, headless), habilite antes `loginctl enable-linger <usuário>`.

@@ -3,14 +3,19 @@
 
 Run inside `dbus-run-session` with DISPLAY set (Xvfb). Two modes:
   --with-watcher   exposes a minimal org.kde.StatusNotifierWatcher and drives
-                   the full open/hide/single-instance/quit lifecycle.
+                   the full open/close/single-instance/quit lifecycle.
   --no-watcher     asserts the Phase-1 fallback: window opens at startup and
                    the stderr warning is printed.
+The expected menu is not listed here: it is what `<binary> --print-menu`
+prints (src/menu.rs), compared with the dbusmenu layout.
 """
 import argparse
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import gi
@@ -37,22 +42,8 @@ WATCHER_XML = """
 </node>
 """
 
-EXPECTED_HEAD = [
-    "AI Monitor",
-    "ai-memory · métricas indisponíveis",
-    "Docker (contêineres) · métricas indisponíveis",
-]
-EXPECTED_TAIL = [
-    "CPU: 100% = 1 núcleo · M/G = MiB/GiB",
-    "Docker = contêineres ativos, incluindo ai-memory",
-    "---",
-    "Abrir painel",
-    "Saúde",
-    "Revisão",
-    "Administração",
-    "Ocultar painel",
-    "Sair do AI Monitor",
-]
+# The window title of Ajustes is its tab; a fresh app opens on "Geral".
+SETTINGS_TITLE = "Geral"
 
 CHECKS = []
 
@@ -63,11 +54,21 @@ def check(name, condition, detail=""):
     print(f"[{status}] {name}" + (f" — {detail}" if detail and not condition else ""), flush=True)
 
 
-def windows():
+def windows(name="AI Monitor"):
     out = subprocess.run(
-        ["xdotool", "search", "--name", "AI Monitor"], capture_output=True, text=True
+        ["xdotool", "search", "--name", name], capture_output=True, text=True
     ).stdout.split()
     return [w for w in out if w.strip()]
+
+
+def printed_menu(binary):
+    """The menu lines the binary itself describes (src/menu.rs)."""
+    out = subprocess.run(
+        [binary, "--print-menu"], capture_output=True, text=True, timeout=15
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"--print-menu exited {out.returncode}: {out.stderr[:300]}")
+    return json.loads(out.stdout)
 
 
 def close_request():
@@ -225,23 +226,59 @@ def dbusmenu(conn, item):
     return path, proxy
 
 
-def layout_labels(proxy):
-    rev, layout = proxy.call_sync(
+def layout(proxy):
+    """[(id, label, enabled, visible, separator)] of the top-level items.
+
+    dbusmenu omits default properties: enabled and visible default to true,
+    an empty label is absent. `__` is how the app escapes a literal `_`.
+    """
+    rev, root = proxy.call_sync(
         "GetLayout",
         GLib.Variant("(iias)", (0, -1, [])),
         Gio.DBusCallFlags.NONE,
         5000,
         None,
     ).unpack()
-    # layout: (id, properties a{sv}, children av); each child same shape.
-    children = layout[2]
-    labels = []
-    for child in children:
+    items = []
+    for child in root[2]:
         props = child[1]
-        raw = props.get("label")
-        label = raw.unpack() if isinstance(raw, GLib.Variant) else (raw or "---")
-        labels.append(label or "---")
-    return labels, [c[0] for c in children]
+        items.append(
+            (
+                child[0],
+                (props.get("label") or "").replace("__", "_"),
+                props.get("enabled", True),
+                props.get("visible", True),
+                props.get("type") == "separator",
+            )
+        )
+    return items
+
+
+def menu_mismatches(expected, items):
+    """Differences between --print-menu and the dbusmenu layout, if any."""
+    if len(items) != len(expected):
+        return [f"{len(items)} items, --print-menu has {len(expected)}"]
+    wrong = []
+    for i, (want, (_, label, enabled, visible, separator)) in enumerate(
+        zip(expected, items)
+    ):
+        if separator != want["separator"]:
+            wrong.append(f"{i}: separator {separator}, expected {want['separator']}")
+            continue
+        if separator:
+            continue
+        if enabled != want["enabled"]:
+            wrong.append(f"{i} {label!r}: enabled {enabled}")
+        if want["dynamic"]:
+            # Data-dependent text. A line --print-menu shows stays shown; only
+            # the one it hides (the alert band, shown with alerts) is free.
+            if want["visible"] and not visible:
+                wrong.append(f"{i} {label!r}: hidden, --print-menu shows it")
+            if visible and not label:
+                wrong.append(f"{i}: visible dynamic line without a label")
+        elif (label, visible) != (want["label"], want["visible"]):
+            wrong.append(f"{i}: {label!r} visible={visible}, expected {want['label']!r}")
+    return wrong
 
 
 def click(proxy, item_id):
@@ -252,6 +289,25 @@ def click(proxy, item_id):
         5000,
         None,
     )
+
+
+def sni_property(conn, item, name):
+    sni = Gio.DBusProxy.new_sync(
+        conn,
+        Gio.DBusProxyFlags.NONE,
+        None,
+        item,
+        "/StatusNotifierItem",
+        "org.freedesktop.DBus.Properties",
+        None,
+    )
+    return sni.call_sync(
+        "Get",
+        GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", name)),
+        Gio.DBusCallFlags.NONE,
+        5000,
+        None,
+    ).unpack()[0]
 
 
 def icon_pixmap(conn, item):
@@ -278,8 +334,12 @@ def scenario_with_watcher(binary):
     conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     watcher = FakeWatcher(conn)
     pump(0.5)  # let the well-known names be owned before the client connects
+    # A session's private runtime dir (logind gives one, 0700): without a
+    # private folder the app writes no SVG and keeps the pixmap only.
+    runtime = tempfile.mkdtemp(prefix="ai-monitor-smoke-")
+    env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
     proc = subprocess.Popen(
-        [binary], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        [binary], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env
     )
     try:
         check(
@@ -301,74 +361,115 @@ def scenario_with_watcher(binary):
             len(icons) > 0 and len(icons[0][2]) > 0,
             f"got {icons!r}",
         )
+        # The symbolic icon: a name the host finds under IconThemePath.
+        try:
+            name = sni_property(conn, item, "IconName")
+            path = sni_property(conn, item, "IconThemePath")
+        except Exception as e:
+            name, path = "", ""
+            print(f"IconName read error: {e}", flush=True)
+        svg = os.path.join(path, "hicolor", "scalable", "status", f"{name}.svg")
+        check(
+            "IconName is a written symbolic SVG",
+            name.endswith("-symbolic")
+            and path.startswith(runtime + os.sep)
+            and os.path.isfile(svg),
+            f"name={name!r} path={path!r}",
+        )
 
+        expected = printed_menu(binary)
+        check(
+            "--print-menu lists the menu",
+            len(expected) > 0 and any(e["action"] == "quit" for e in expected),
+            f"got {expected!r}",
+        )
         menu_path, menu = None, None
         ok = until(
             lambda: _try_menu(conn, item), 10, "dbusmenu available"
         )
         state = _try_menu(conn, item)
         check("dbusmenu available", state is not None)
+        by_action = {}
         if state:
             menu_path, menu = state
-            labels, ids = layout_labels(menu)
-            # freshness/activity are dynamic (health/proposal suffixes);
-            # assert the static prefix, the info tail and the action block.
+            items = layout(menu)
+            wrong = menu_mismatches(expected, items)
             check(
-                "dbusmenu labels match macOS menu",
-                len(labels) == 14
-                and labels[:3] == EXPECTED_HEAD
-                and all(labels[i] for i in (3, 4))
-                and labels[5:] == EXPECTED_TAIL,
-                f"got {labels}",
+                "dbusmenu matches --print-menu",
+                not wrong,
+                f"{wrong}; got {[i[1:] for i in items]}",
             )
-            by_label = {labels[i]: ids[i] for i in range(len(labels))}
-        else:
-            by_label = {}
+            # Click by action (the first line with it): the handoffs line is
+            # the dynamic "sessions" one; "review" is the proposals line.
+            for want, got in zip(expected, items):
+                if want["action"] and want["action"] not in by_action:
+                    by_action[want["action"]] = got[0]
+            # The static "review" line is "Revisar propostas…".
+            static_review = [
+                got[0]
+                for want, got in zip(expected, items)
+                if want["action"] == "review" and not want["dynamic"]
+            ]
+            if static_review:
+                by_action["review-static"] = static_review[0]
 
         rss = []
         check("no window at startup", not windows(), f"windows: {windows()}")
         rss.append(("initial", rss_kb(proc.pid)))
 
-        def open_and_hide(label_open, label_hide, cycles=1):
+        def open_and_close(action, cycles=1, settings=False):
+            """Open by a menu action, then close as the compositor would."""
             for _ in range(cycles):
-                click(menu, by_label[label_open])
-                ok = until(lambda: len(windows()) == 1, 15, f"open via {label_open}")
-                check(f"{label_open} opens one window", ok, f"windows: {windows()}")
+                click(menu, by_action[action])
+                ok = until(lambda: len(windows()) == 1, 15, f"open via {action}")
+                check(f"{action} opens one window", ok, f"windows: {windows()}")
+                if settings:
+                    check(
+                        f"{action} also opens Ajustes",
+                        until(lambda: len(windows(SETTINGS_TITLE)) == 1, 15, "Ajustes"),
+                        f"windows: {windows(SETTINGS_TITLE)}",
+                    )
                 rss.append(("open", rss_kb(proc.pid)))
-                click(menu, by_label[label_hide])
+                close_request()
                 ok = until(
-                    lambda: not windows() and proc.poll() is None,
+                    lambda: not windows()
+                    and not windows(SETTINGS_TITLE)
+                    and proc.poll() is None,
                     15,
-                    f"hide via {label_hide}",
+                    f"close after {action}",
                 )
-                check(f"{label_hide} hides, process alive", ok)
-                rss.append(("hide", rss_kb(proc.pid)))
+                check(f"compositor close after {action}: no window, process alive", ok)
+                rss.append(("close", rss_kb(proc.pid)))
 
-        open_and_hide("Abrir painel", "Ocultar painel", cycles=3)
-        open_and_hide("Saúde", "Ocultar painel")
-
-        # Compositor close (title bar / WM_DELETE) → window gone, app stays.
-        click(menu, by_label["Abrir painel"])
+        open_and_close("panel", cycles=3)
+        open_and_close("health")
+        open_and_close("review-static")
+        open_and_close("sessions")
+        open_and_close("review")
+        open_and_close("settings", settings=True)
+        # Ajustes over a window that is already open.
+        click(menu, by_action["panel"])
         check(
-            "window open before compositor close",
-            until(lambda: len(windows()) == 1, 15, "reopen for close test"),
+            "window open before Ajustes",
+            until(lambda: len(windows()) == 1, 15, "open for Ajustes"),
+        )
+        click(menu, by_action["settings"])
+        check(
+            "Ajustes opens over the open window",
+            until(lambda: len(windows(SETTINGS_TITLE)) == 1 and len(windows()) == 1, 15, "Ajustes"),
+            f"windows: {windows()} / {windows(SETTINGS_TITLE)}",
         )
         close_request()
         check(
-            "compositor close destroys window, process alive",
-            until(lambda: not windows() and proc.poll() is None, 15, "WM close"),
+            "closed before the second instance",
+            until(lambda: not windows() and not windows(SETTINGS_TITLE), 15, "close"),
+            f"windows: {windows()} / {windows(SETTINGS_TITLE)}",
         )
-        rss.append(("wm-close", rss_kb(proc.pid)))
-        click(menu, by_label["Abrir painel"])
-        check(
-            "reopen after compositor close",
-            until(lambda: len(windows()) == 1, 15, "reopen"),
-        )
-        click(menu, by_label["Ocultar painel"])
-        until(lambda: not windows(), 15, "hide after reopen")
 
         # Second instance: forwards Show and exits 0; first reopens.
-        second = subprocess.run([binary], capture_output=True, text=True, timeout=15)
+        second = subprocess.run(
+            [binary], capture_output=True, text=True, timeout=15, env=env
+        )
         check("second instance exits 0", second.returncode == 0, second.stderr[:300])
         check(
             "second instance reopened the dashboard",
@@ -377,7 +478,7 @@ def scenario_with_watcher(binary):
         )
         rss.append(("reopen", rss_kb(proc.pid)))
 
-        click(menu, by_label["Sair do AI Monitor"])
+        click(menu, by_action["quit"])
         check(
             "Sair quits cleanly",
             until(lambda: proc.poll() == 0, 15, "process exit"),
@@ -390,6 +491,7 @@ def scenario_with_watcher(binary):
         stderr = proc.stderr.read() if proc.stderr else ""
         if stderr.strip():
             print("app stderr:", stderr.strip()[:500], flush=True)
+        shutil.rmtree(runtime, ignore_errors=True)
 
 
 _menu_cache = {}
