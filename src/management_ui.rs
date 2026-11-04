@@ -50,7 +50,7 @@ use crate::{
     monitor::Shared,
     sessions_ui::{age, dated, headline},
     theme,
-    widgets::{self, Answer, Button, Fact, Segment, Tone, Type, space},
+    widgets::{self, Answer, Button, Fact, Segment, Select, Tone, Type, space},
 };
 use chrono::{DateTime, Utc};
 use eframe::egui::{
@@ -639,9 +639,11 @@ impl Management {
                     picker(
                         ui,
                         "management-scope",
+                        "Projeto",
                         scope,
                         &shown,
                         room.max(PROJECT_WIDTH),
+                        false,
                         &projects,
                     );
                     widgets::segmented(ui, current, &items);
@@ -1375,9 +1377,11 @@ impl Management {
                     picker(
                         ui,
                         "maintenance-task",
+                        "Tarefa",
                         &mut self.task,
                         text,
                         FIELD,
+                        true,
                         &options,
                     );
                 });
@@ -1430,9 +1434,11 @@ impl Management {
                     picker(
                         ui,
                         "feedback-signal",
+                        "Sinal",
                         &mut self.signal,
                         &text,
                         FIELD,
+                        true,
                         &options,
                     );
                 });
@@ -1647,7 +1653,16 @@ fn actions(ui: &mut Ui, tab: u8, status: &mut String, days: &mut u32, locked: bo
                     .map(|(value, plural, _)| ((*value).to_owned(), format!("Estado: {plural}")))
                     .collect();
                 let text = format!("Estado: {}", status_label(status).1);
-                picker(ui, "proposal-state", status, &text, PROJECT_WIDTH, &options);
+                picker(
+                    ui,
+                    "proposal-state",
+                    "Estado",
+                    status,
+                    &text,
+                    PROJECT_WIDTH,
+                    false,
+                    &options,
+                );
             });
             ask
         }
@@ -1660,25 +1675,9 @@ fn actions(ui: &mut Ui, tab: u8, status: &mut String, days: &mut u32, locked: bo
                 ui.scope(|ui| {
                     // Como os campos de texto: 26 px, raio 5, fundo field,
                     // borda line (acc ao digitar) e texto 12.
-                    let p = theme::palette(ui.visuals());
-                    let visuals = ui.visuals_mut();
-                    visuals.text_edit_bg_color = Some(p.field);
-                    let widgets = &mut visuals.widgets;
-                    for state in [
-                        &mut widgets.inactive,
-                        &mut widgets.hovered,
-                        &mut widgets.active,
-                    ] {
-                        state.bg_fill = p.field;
-                        state.weak_bg_fill = p.field;
-                        state.bg_stroke = Stroke::new(1.0_f32, p.line);
-                        state.corner_radius = egui::CornerRadius::same(5);
-                        state.expansion = 0.;
-                    }
-                    widgets.active.bg_stroke = Stroke::new(1.0_f32, p.acc);
+                    widgets::drag_value_style(ui);
                     ui.spacing_mut().button_padding = vec2(8., 4.);
                     ui.spacing_mut().interact_size.y = 26.;
-                    ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
                     ui.add(egui::DragValue::new(days).range(0..=36500).suffix(" dias"))
                         .on_hover_text("Idade mínima dos handoffs a expirar. Zero dias abrange todos os abertos de sua propriedade ou compartilhados neste projeto.");
                 });
@@ -1726,70 +1725,44 @@ fn actions_width(ui: &Ui, tab: u8, status: &str) -> f32 {
     }
 }
 
-/// Seletor no estilo do botão secundário de 26 px (Review.dc.html): fundo
-/// surf, borda line, raio 6, texto 12 e a seta fina de 10 px; corta além de
-/// `width` (o texto inteiro vai ao tooltip). AccessKit: `ComboBox` com o
-/// texto como valor.
+/// O `Select` de `options` (valor, rótulo), que muda `current`: `id` guarda o
+/// estado do popup, `label` é o nome falado e `text`, o valor à vista. Na
+/// largura do texto (`picker_natural`), cortado além de `width` (o texto
+/// inteiro vai à dica); `raised` sobre um cartão. A opção escolhida sai
+/// marcada no AccessKit.
+#[allow(clippy::too_many_arguments)]
 fn picker<T: PartialEq + Clone>(
     ui: &mut Ui,
     id: &str,
+    label: &str,
     current: &mut T,
     text: &str,
     width: f32,
+    raised: bool,
     options: &[(T, String)],
 ) {
-    let p = theme::palette(ui.visuals());
-    ui.scope(|ui| {
-        let spacing = ui.spacing_mut();
-        spacing.interact_size.y = 26.;
-        spacing.button_padding = vec2(10., 4.);
-        spacing.icon_width = 10.;
-        spacing.icon_spacing = 6.;
-        ui.style_mut()
-            .text_styles
-            .insert(egui::TextStyle::Button, FontId::proportional(12.));
-        let widgets = &mut ui.visuals_mut().widgets;
-        for (state, fill) in [
-            (&mut widgets.inactive, p.surf),
-            (&mut widgets.hovered, p.surf2),
-            (&mut widgets.active, p.surf2),
-            (&mut widgets.open, p.surf2),
-        ] {
-            state.weak_bg_fill = fill;
-            state.bg_stroke = Stroke::new(1.0_f32, p.line);
-            state.corner_radius = 6.into();
-            state.expansion = 0.;
-        }
-        let natural = picker_natural(ui, text);
-        ui.allocate_ui_with_layout(
-            vec2(width.min(natural).max(80.), 26.),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                let response = egui::ComboBox::from_id_salt(id)
-                    .selected_text(text)
-                    .width(0.)
-                    .truncate()
-                    .icon(|ui, rect, _, _| {
-                        let p = theme::palette(ui.visuals());
-                        let icon = Rect::from_center_size(rect.center(), egui::Vec2::splat(10.));
-                        widgets::chevron(ui.painter(), icon, true, p.text);
-                    })
-                    .show_ui(ui, |ui| {
-                        for (value, label) in options {
-                            ui.selectable_value(current, value.clone(), label);
-                        }
-                    })
-                    .response;
-                if response.rect.width() + 0.5 < natural {
-                    response.on_hover_text(text);
+    let natural = picker_natural(ui, text);
+    let room = width.min(natural).max(80.);
+    ui.allocate_ui_with_layout(
+        vec2(room, 26.),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            let select = Select::new(id, label, text).min_width(natural.min(room));
+            let select = if raised { select.raised() } else { select };
+            select.show(ui, |ui| {
+                for (value, label) in options {
+                    if widgets::option(ui, current == value, label).clicked() {
+                        *current = value.clone();
+                    }
                 }
-            },
-        );
-    });
+            });
+        },
+    );
 }
 
 /// A largura de `picker` sem corte: o texto (12), a seta (10, a 6 dele) e
-/// as margens (10 de cada lado).
+/// 20 de margens (as do `Select` somam 18; os 2 a mais ficam entre o texto
+/// e a seta).
 fn picker_natural(ui: &Ui, text: &str) -> f32 {
     ui.painter()
         .layout_no_wrap(
@@ -5739,6 +5712,145 @@ mod tests {
     }
 
     #[test]
+    fn the_pickers_on_the_cards_are_raised_and_the_toolbar_ones_are_not() {
+        for (theme, p) in crate::widgets::tests::THEMES {
+            // (aba, página, [(seletor, num cartão?)])
+            for (tab, section, pickers) in [
+                (
+                    0,
+                    Section::Review,
+                    &[("Projeto", false), ("Estado", false)][..],
+                ),
+                (
+                    2,
+                    Section::Maintenance,
+                    &[("Projeto", false), ("Tarefa", true), ("Sinal", true)][..],
+                ),
+            ] {
+                let (_mock, shared, mut m) = quiet();
+                m.scope = Some(scope());
+                m.tab = tab;
+                let api = projects(&[scope()]);
+                let ctx = context(theme);
+                let mut add = |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, section);
+                };
+                // O ponteiro sai: sem o surf2 de quem está sob ele.
+                run_sized(&ctx, WINDOW, vec![egui::Event::PointerGone], &mut add);
+                let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+                for &(label, on_card) in pickers {
+                    let at = rect_of(&node(&out, Role::ComboBox, label));
+                    let fills: Vec<egui::Color32> = rects(&out)
+                        .into_iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect();
+                    let case = format!("{theme:?} {label}");
+                    if on_card {
+                        assert_eq!(fills, [p.raised], "{case}: on its card");
+                        assert_ne!(fills, [p.field], "{case}: like a field");
+                    } else {
+                        assert_eq!(fills, [p.surf], "{case}: on the page");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Os projetos `fixture / p00`, `fixture / p01`…
+    fn many(count: usize) -> Vec<Scope> {
+        (0..count)
+            .map(|i| Scope {
+                workspace: "fixture".into(),
+                project: format!("p{i:02}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_project_picker_popup_shows_its_scroll_bar_without_hover_when_long() {
+        // (projetos, transborda os 300?)
+        for (count, overflows) in [(3, false), (40, true)] {
+            for (theme, p) in crate::widgets::tests::THEMES {
+                let scopes = many(count);
+                let (_mock, shared, mut m) = quiet();
+                m.scope = Some(scopes[0].clone());
+                m.tab = 1;
+                let api = projects(&scopes);
+                let ctx = context(theme);
+                let mut add = |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                };
+                let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+                let combo = rect_of(&node(&out, Role::ComboBox, "Projeto"));
+                click_sized(&ctx, WINDOW, combo.center(), &mut add);
+                // O ponteiro fica no seletor, fora da lista; a barra aparece
+                // com uma animação curta.
+                let mut out = run_sized(&ctx, WINDOW, vec![], &mut add);
+                for _ in 0..10 {
+                    out = run_sized(&ctx, WINDOW, vec![], &mut add);
+                }
+                let first = rect_of(&node(&out, Role::Button, "fixture / p00"));
+                let handles: Vec<Rect> = rects(&out)
+                    .into_iter()
+                    .filter(|r| {
+                        r.fill == p.text2
+                            && r.rect.width() <= 10.
+                            && r.rect.top() >= first.top()
+                            && r.rect.left() > first.center().x
+                    })
+                    .map(|r| r.rect)
+                    .collect();
+                let case = format!("{theme:?} {count}");
+                assert_eq!(handles.len(), usize::from(overflows), "{case}: {handles:?}");
+                if let Some(handle) = handles.first() {
+                    assert_eq!(handle.width(), 4., "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_picker_option_in_use_is_selected_for_accesskit() {
+        let scopes = many(3);
+        // O do meio: nem o primeiro nem o último da lista.
+        for current in [1, 2] {
+            let (_mock, shared, mut m) = quiet();
+            m.scope = Some(scopes[current].clone());
+            m.tab = 1;
+            let api = projects(&scopes);
+            let ctx = context(egui::Theme::Dark);
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let combo = rect_of(&node(&out, Role::ComboBox, "Projeto"));
+            click_sized(&ctx, WINDOW, combo.center(), &mut add);
+            run_sized(&ctx, WINDOW, vec![], &mut add);
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let toggled: Vec<Option<Toggled>> = scopes
+                .iter()
+                .map(|s| node(&out, Role::Button, &s.label()).toggled())
+                .collect();
+            let want: Vec<Option<Toggled>> = (0..scopes.len())
+                .map(|i| {
+                    Some(if i == current {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
+                })
+                .collect();
+            assert_eq!(
+                toggled,
+                want,
+                "only {} is selected",
+                scopes[current].label()
+            );
+        }
+    }
+
+    #[test]
     fn the_project_picker_widens_into_what_the_line_leaves() {
         // ~60 caracteres: bem mais que os 260 de antes.
         let long = Scope {
@@ -6738,8 +6850,9 @@ mod tests {
             (1, expire(), &["Propostas"]),
             (1, expire(), &["Carregar histórico"]),
             (1, expire(), &["Expirar antigos…"]),
-            // O seletor abre com Enter; o Tab entra nas opções.
-            (0, expire(), &["fixture / demo", "fixture / other"]),
+            // O seletor (que fala o rótulo, Projeto) abre com Enter; o Tab
+            // entra nas opções.
+            (0, expire(), &["Projeto", "fixture / other"]),
         ];
         for (tab, intent, controls) in cases {
             for open in [true, false] {
@@ -6796,10 +6909,11 @@ mod tests {
     #[test]
     fn the_keyboard_never_rereads_or_swaps_the_list_under_the_sheet() {
         // (os controles a alcançar com Tab e apertar com Enter, o estado sem
-        // a folha). O seletor abre com Enter; o Tab entra nas opções.
+        // a folha). O seletor (que fala o rótulo, Estado) abre com Enter; o
+        // Tab entra nas opções.
         let cases: [(&[&str], &str); 2] = [
             (&["Atualizar"], "pending"),
-            (&["Estado: pendentes", "Estado: aprovadas"], "approved"),
+            (&["Estado", "Estado: aprovadas"], "approved"),
         ];
         for (controls, status) in cases {
             for open in [true, false] {

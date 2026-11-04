@@ -6,7 +6,7 @@ use crate::{
     queries::{Query, Worker},
     sessions_ui::dated,
     theme,
-    widgets::{self, Button, Fact, Segment, Tone, Type, space},
+    widgets::{self, Button, Fact, Segment, Select, Tone, Type, space},
 };
 use chrono::{Local, Utc};
 use eframe::egui::{self, RichText};
@@ -198,7 +198,8 @@ impl Console {
             ui,
             |ui| {
                 ui.allocate_ui(egui::vec2(room.max(200.), 26.), |ui| {
-                    widgets::select(ui, "Projeto", &text, 200., |ui| {
+                    let select = Select::new("explore-scope", "Projeto", &text).min_width(200.);
+                    select.show(ui, |ui| {
                         for p in projects {
                             let s = Scope {
                                 workspace: p.workspace_name.clone(),
@@ -393,7 +394,10 @@ impl Console {
                                 self.kind.clone()
                             };
                             let kind = &mut self.kind;
-                            widgets::select(ui, "Tipo de evento", &shown, 160., |ui| {
+                            let select = Select::new("observation-kind", "Tipo de evento", &shown)
+                                .min_width(160.)
+                                .raised();
+                            select.show(ui, |ui| {
                                 for k in KINDS {
                                     let label = if k.is_empty() { "Todos os tipos" } else { k };
                                     if widgets::option(ui, kind.as_str() == k, label).clicked() {
@@ -563,15 +567,17 @@ impl Console {
                 let versions = array(&data["versions"]);
                 card(ui, &format!("Histórico: {path}"), |ui| {
                     widgets::row(ui, |ui| {
-                        for (label, selected) in
-                            [("Comparar de", &mut self.from), ("Até", &mut self.to)]
-                        {
+                        for (id, label, selected) in [
+                            ("history-from", "Comparar de", &mut self.from),
+                            ("history-to", "Até", &mut self.to),
+                        ] {
                             let shown = if selected.is_empty() {
                                 label.to_owned()
                             } else {
                                 selected.clone()
                             };
-                            widgets::select(ui, label, &shown, 160., |ui| {
+                            let select = Select::new(id, label, &shown).min_width(160.).raised();
+                            select.show(ui, |ui| {
                                 if widgets::option(ui, selected.is_empty(), "Automático").clicked()
                                 {
                                     selected.clear();
@@ -1987,6 +1993,61 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_selects_on_the_cards_are_raised_and_the_project_one_is_not() {
+        // (consulta, resposta, os seletores no cartão dela)
+        let cases = [
+            (
+                Query::Observations {
+                    scope: fixture(),
+                    session: "s1".into(),
+                    offset: 0,
+                    text: String::new(),
+                    kind: String::new(),
+                },
+                json!({"observations": [{"id": "e1", "kind": "stop"}], "total": 1}),
+                &["Tipo de evento"][..],
+            ),
+            (
+                Query::History {
+                    scope: fixture(),
+                    path: "a.md".into(),
+                    offset: 0,
+                    from: String::new(),
+                    to: String::new(),
+                },
+                json!({"versions": [{"id": "v1", "body_chars": 1}], "total": 1, "diff": {}}),
+                &["Comparar de", "Até"][..],
+            ),
+        ];
+        for (theme, p) in THEMES {
+            for (query, data, on_card) in cases.clone() {
+                let (_mock, shared, mut console) = explore(true);
+                console.result = Some((query, data));
+                let ctx = context(theme);
+                let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+                // O ponteiro sai: sem o surf2 de quem está sob ele.
+                run_sized(&ctx, TALL, vec![egui::Event::PointerGone], &mut add);
+                let out = frames(&ctx, &mut add);
+                let fill = |label: &str| -> Vec<egui::Color32> {
+                    let at = rect_of(&node(&out, Role::ComboBox, label));
+                    rects(&out)
+                        .into_iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect()
+                };
+                for label in on_card {
+                    let case = format!("{theme:?} {label}");
+                    assert_eq!(fill(label), [p.raised], "{case}: on its card");
+                    assert_ne!(fill(label), [p.field], "{case}: like a field");
+                }
+                // O do projeto fica na linha de ferramentas, sobre o fundo.
+                assert_eq!(fill("Projeto"), [p.surf], "{theme:?} Projeto");
             }
         }
     }

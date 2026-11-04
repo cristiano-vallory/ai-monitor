@@ -876,7 +876,7 @@ impl Docker {
                         ui.set_min_width(ui.available_width());
                         if back
                             && ui
-                                .add(Button::secondary("← Voltar").small().on_surf())
+                                .add(Button::secondary("← Voltar").small().raised())
                                 .clicked()
                         {
                             self.open = false;
@@ -2803,7 +2803,7 @@ mod tests {
             let out = page.frame(vec![Event::PointerGone]);
             node(&out, Role::Pane, "Inspetor do contêiner");
             let painted = rects(&out);
-            for button in ["Copiar ID", "Copiar nome"] {
+            for button in ["← Voltar", "Copiar ID", "Copiar nome"] {
                 let at = rect_of(&node(&out, Role::Button, button));
                 let fills: Vec<Color32> = painted
                     .iter()

@@ -1264,24 +1264,9 @@ fn interval(
         ui.spacing_mut().item_spacing.x = 10.;
         let field = ui
             .scope(|ui| {
-                let visuals = ui.visuals_mut();
-                visuals.text_edit_bg_color = Some(p.field);
-                let widgets = &mut visuals.widgets;
-                for state in [
-                    &mut widgets.inactive,
-                    &mut widgets.hovered,
-                    &mut widgets.active,
-                ] {
-                    state.bg_fill = p.field;
-                    state.weak_bg_fill = p.field;
-                    state.bg_stroke = Stroke::new(1.0_f32, p.line);
-                    state.corner_radius = egui::CornerRadius::same(5);
-                    state.expansion = 0.;
-                }
-                widgets.active.bg_stroke = Stroke::new(1.0_f32, p.acc);
+                crate::widgets::drag_value_style(ui);
                 ui.spacing_mut().interact_size = Vec2::new(56., 24.);
                 ui.spacing_mut().button_padding = Vec2::new(6., 0.);
-                ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
                 ui.add_sized([56., 24.], egui::DragValue::new(value).range(range))
             })
             .inner;
@@ -2013,15 +1998,8 @@ fn freshness(
 /// Contador do item Sessões e handoffs: só com a API coletada e handoffs
 /// abertos; sem o total do servidor, a lista pode estar cortada ("+").
 fn handoff_badge(api: &ApiSnapshot) -> Option<String> {
-    api.at?;
-    let open = api.handoff_total.unwrap_or(api.handoffs.len());
-    (open > 0).then(|| {
-        format!(
-            "{}{}",
-            number(open),
-            if api.handoff_total.is_some() { "" } else { "+" }
-        )
-    })
+    let (open, text) = api.open_handoffs()?;
+    (open > 0).then_some(text)
 }
 
 /// Contador do item Revisão: propostas pendentes do projeto vigiado, com a
@@ -4667,6 +4645,48 @@ mod tests {
                 assert!(
                     !painted.iter().any(|(t, _)| t == text),
                     "{tab:?}: {text:?} painted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_intervals_are_fields_with_the_line_border_in_both_themes() {
+        use crate::widgets::tests::{THEMES, rects};
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for (theme, p) in THEMES {
+            let mut app = app_with_unsaved_draft();
+            app.settings.tab = SettingsTab::General;
+            app.open_settings();
+            let ctx = styled();
+            ctx.set_theme(theme);
+            ctx.enable_accesskit();
+            // A janela embutida aparece com uma animação curta (1/60 s por
+            // frame): as cores só valem depois dela. O ponteiro fica fora.
+            let mut out = frame(&mut app, &ctx, size, vec![egui::Event::PointerGone]);
+            for _ in 0..20 {
+                out = frame(&mut app, &ctx, size, vec![]);
+            }
+            for field in [
+                "Intervalo de recursos em segundos",
+                "Intervalo de sessões em segundos",
+            ] {
+                let at = widget_rect(&out, Role::SpinButton, field);
+                assert_eq!(at.size(), egui::vec2(56., 24.), "{theme:?} {field}");
+                let boxes: Vec<_> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| (r.fill, r.stroke, r.corner_radius))
+                    .collect();
+                assert_eq!(
+                    boxes,
+                    [(
+                        p.field,
+                        Stroke::new(1.0_f32, p.line),
+                        egui::CornerRadius::same(5)
+                    )],
+                    "{theme:?} {field}: like the text fields"
                 );
             }
         }

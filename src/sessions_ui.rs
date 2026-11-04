@@ -215,13 +215,9 @@ impl Sessions {
         now: DateTime<Utc>,
     ) -> Option<(String, String)> {
         let collected = api.at.is_some();
-        let total = api.handoff_total.map(number).unwrap_or_else(|| {
-            if collected {
-                format!("{}+", number(api.handoffs.len()))
-            } else {
-                "—".into()
-            }
-        });
+        let total = api
+            .open_handoffs()
+            .map_or_else(|| "—".into(), |(_, text)| text);
         self.toolbar(ui, api, &total);
         self.filters(ui, api);
         let key = self.filter_key();
@@ -1581,13 +1577,15 @@ mod tests {
                 one_unknown,
                 ["1.234", "—", "14"],
             ),
+            // Sem coleta, "—" mesmo com um total, como a lateral e a Visão
+            // geral (`ApiSnapshot::open_handoffs`).
             (
                 "total before the collection flag",
                 None,
                 Some(5),
                 0,
                 projects.clone(),
-                ["5", "—", "—"],
+                ["—", "—", "—"],
             ),
         ] {
             let api = ApiSnapshot {
