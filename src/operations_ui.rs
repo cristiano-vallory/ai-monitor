@@ -1,12 +1,13 @@
 use crate::{
     advanced::{self, Kind, Operation},
     client::Scope,
+    confirmation::Confirmation,
     local_service::{self, Backend, Kind as LocalKind},
-    maintenance::{Action, Confirmation, Intent, PREVIEW_TTL, Read, Receipt, Work, Worker},
+    maintenance::{Action, Intent, PREVIEW_TTL, Read, Receipt, Work, Worker},
     model::Project,
     monitor::Shared,
     theme,
-    widgets::{self, Answer, Button, Segment, Tone, Type},
+    widgets::{self, Answer, Button, Segment, Select, Tone, Type},
 };
 use eframe::egui::{self, RichText};
 use serde_json::Value;
@@ -203,7 +204,7 @@ impl Panel {
         }
         // A prévia vence pela idade do recibo, como a contagem da folha:
         // a folha fecha e o formulário destrava no mesmo frame.
-        if self.receipt.as_ref().is_some_and(|r| r.left().is_zero()) {
+        if self.receipt.as_ref().is_some_and(Receipt::expired) {
             self.clear();
             self.notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.".into();
         } else if self.result_at.is_some_and(|at| at.elapsed() > PREVIEW_TTL) {
@@ -356,7 +357,10 @@ impl Panel {
         let mut kind = old;
         widgets::row(ui, |ui| {
             let group = Group::of(kind);
-            widgets::select(ui, "Grupo", group.label(), 150., |ui| {
+            let select = Select::new("remote-group", "Grupo", group.label())
+                .min_width(150.)
+                .raised();
+            select.show(ui, |ui| {
                 for other in GROUPS {
                     if widgets::option(ui, other == group, other.label()).clicked()
                         && other != group
@@ -366,7 +370,10 @@ impl Panel {
                     }
                 }
             });
-            widgets::select(ui, "Operação", name(kind), 240., |ui| {
+            let select = Select::new("remote-operation", "Operação", name(kind))
+                .min_width(240.)
+                .raised();
+            select.show(ui, |ui| {
                 for each in Group::of(kind).kinds() {
                     if widgets::option(ui, each == kind, name(each)).clicked() {
                         kind = each;
@@ -379,27 +386,28 @@ impl Panel {
             self.op = Operation::new(kind);
         }
         if self.op.values.contains_key("workspace") {
-            widgets::select(
-                ui,
+            let select = Select::new(
+                "remote-project",
                 "Projeto conhecido",
                 "Preencher a partir de um projeto conhecido…",
-                300.,
-                |ui| {
-                    for p in projects {
-                        let label = format!("{} / {}", p.workspace_name, p.project_name);
-                        if widgets::option(ui, false, &label).clicked() {
+            )
+            .min_width(300.)
+            .raised();
+            select.show(ui, |ui| {
+                for p in projects {
+                    let label = format!("{} / {}", p.workspace_name, p.project_name);
+                    if widgets::option(ui, false, &label).clicked() {
+                        self.op
+                            .values
+                            .insert("workspace".into(), p.workspace_name.clone());
+                        if self.op.values.contains_key("project") {
                             self.op
                                 .values
-                                .insert("workspace".into(), p.workspace_name.clone());
-                            if self.op.values.contains_key("project") {
-                                self.op
-                                    .values
-                                    .insert("project".into(), p.project_name.clone());
-                            }
+                                .insert("project".into(), p.project_name.clone());
                         }
                     }
-                },
-            );
+                }
+            });
         }
         let width = ui.available_width().min(560.);
         for field in self.op.kind.fields() {
@@ -456,7 +464,10 @@ impl Panel {
             widgets::segmented(ui, &mut self.local.backend, &backends);
             let label = self.local.label();
             let (backend, kind) = (self.local.backend, &mut self.local.kind);
-            widgets::select(ui, "Operação", label, 240., |ui| {
+            let select = Select::new("local-operation", "Operação", label)
+                .min_width(240.)
+                .raised();
+            select.show(ui, |ui| {
                 for each in LOCAL {
                     let label = local_service::Operation::new(backend, each).label();
                     if widgets::option(ui, *kind == each, label).clicked() {
@@ -882,6 +893,37 @@ mod tests {
                 .collect();
             assert_eq!(fills, [p.raised], "{theme:?}");
             assert_ne!(p.raised, p.field, "{theme:?}: like a field");
+        }
+    }
+    #[test]
+    fn every_select_on_the_form_card_is_raised_and_never_the_field_color() {
+        for (theme, p) in THEMES {
+            // (aba local?, os seletores do cartão do formulário)
+            for (local_tab, selects) in [
+                (false, &["Grupo", "Operação", "Projeto conhecido"][..]),
+                (true, &["Operação"][..]),
+            ] {
+                let (_mock, shared, mut panel) = idle();
+                // Com "workspace": o seletor de projeto conhecido aparece.
+                panel.op = Operation::new(Kind::SendMessage);
+                panel.local_tab = local_tab;
+                let ctx = context(theme);
+                let mut add = |ui: &mut egui::Ui| panel.show(ui, &shared, &[]);
+                // O ponteiro sai: sem o surf2 de quem está sob ele.
+                run_sized(&ctx, WINDOW, vec![egui::Event::PointerGone], &mut add);
+                let out = frames(&ctx, &mut add);
+                for label in selects {
+                    let at = rect_of(&node(&out, Role::ComboBox, label));
+                    let fills: Vec<egui::Color32> = rects(&out)
+                        .into_iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect();
+                    let case = format!("{theme:?} local {local_tab} {label}");
+                    assert_eq!(fills, [p.raised], "{case}");
+                    assert_ne!(fills, [p.field], "{case}: like a field");
+                }
+            }
         }
     }
     #[test]

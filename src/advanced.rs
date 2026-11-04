@@ -2,7 +2,7 @@
 //! No arbitrary route, command or JSON editor is exposed by the UI.
 use crate::{
     client::{Connection, Error},
-    maintenance::Confirmation,
+    confirmation::Confirmation,
 };
 use reqwest::Method;
 use serde_json::{Value, json};

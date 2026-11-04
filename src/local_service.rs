@@ -1,5 +1,5 @@
 //! Host operations are explicit, loopback-only, bounded and never shell-expanded.
-use crate::{client::Error, docker::local_command, maintenance::Confirmation, model::Config};
+use crate::{client::Error, confirmation::Confirmation, docker::local_command, model::Config};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,

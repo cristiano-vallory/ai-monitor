@@ -508,6 +508,7 @@ impl MonitorApp {
                                 Utc::now(),
                                 self.resources.at,
                                 self.api.at,
+                                self.api.error.is_some(),
                                 self.config.resource_seconds,
                                 self.config.api_seconds,
                                 self.paused,
@@ -692,6 +693,11 @@ impl MonitorApp {
             }
         });
     }
+    /// Revisão, o login ou Administração em andamento: Salvar e conectar e
+    /// Carregar do Keychain/chaveiro esperam.
+    fn busy(&self) -> bool {
+        self.management.busy || self.authentication.busy || self.operations.busy
+    }
     /// O conteúdo da janela em `rect`: cromo com as abas, corpo que rola e
     /// rodapé de 52. `native` = janela própria (no macOS, com a faixa do
     /// título, que arrasta a janela).
@@ -738,17 +744,19 @@ impl MonitorApp {
             }
         }
         // A barra de rolagem à vista (`scroll_bar`), a 8 da borda da janela,
-        // na margem de 40 do conteúdo.
+        // na margem de 40 do conteúdo; o corpo não herda o estilo da barra.
         let mut content = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(body.with_max_x(body.right() - 8.))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
+        let style = content.style().clone();
         crate::widgets::scroll_bar(&mut content);
         egui::ScrollArea::vertical()
             .id_salt("settings-body")
             .auto_shrink(false)
             .show(&mut content, |ui| {
+                ui.set_style(style);
                 egui::Frame::new()
                     .inner_margin(egui::Margin {
                         left: 40,
@@ -771,7 +779,7 @@ impl MonitorApp {
                         }
                     });
             });
-        let busy = self.management.busy || self.authentication.busy || self.operations.busy;
+        let busy = self.busy();
         let mut bottom = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(footer.shrink2(Vec2::new(20., 0.)))
@@ -843,7 +851,7 @@ impl MonitorApp {
             widgets::{Button, caption, checkbox, mono_field, text_field},
         };
         let p = theme::palette(ui.visuals());
-        let busy = self.management.busy || self.authentication.busy || self.operations.busy;
+        let busy = self.busy();
         setting_row(ui, "Servidor ai-memory:", |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.;
@@ -1256,24 +1264,9 @@ fn interval(
         ui.spacing_mut().item_spacing.x = 10.;
         let field = ui
             .scope(|ui| {
-                let visuals = ui.visuals_mut();
-                visuals.text_edit_bg_color = Some(p.field);
-                let widgets = &mut visuals.widgets;
-                for state in [
-                    &mut widgets.inactive,
-                    &mut widgets.hovered,
-                    &mut widgets.active,
-                ] {
-                    state.bg_fill = p.field;
-                    state.weak_bg_fill = p.field;
-                    state.bg_stroke = Stroke::new(1.0_f32, p.line);
-                    state.corner_radius = egui::CornerRadius::same(5);
-                    state.expansion = 0.;
-                }
-                widgets.active.bg_stroke = Stroke::new(1.0_f32, p.acc);
+                crate::widgets::drag_value_style(ui);
                 ui.spacing_mut().interact_size = Vec2::new(56., 24.);
                 ui.spacing_mut().button_padding = Vec2::new(6., 0.);
-                ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
                 ui.add_sized([56., 24.], egui::DragValue::new(value).range(range))
             })
             .inner;
@@ -1816,9 +1809,10 @@ fn freshness_chip(ui: &mut egui::Ui, state: Freshness) {
         Freshness::Paused => (p.surf2, p.text),
         Freshness::Connecting => (p.surf2, p.text2),
         Freshness::Live(_) => (p.sel, p.acc),
-        Freshness::ApiLate(_) | Freshness::ResourcesLate(_) | Freshness::BothLate(_) => {
-            (p.warn.gamma_multiply(0.14), p.warn)
-        }
+        Freshness::ApiDown
+        | Freshness::ApiLate(_)
+        | Freshness::ResourcesLate(_)
+        | Freshness::BothLate(_) => (p.warn.gamma_multiply(0.14), p.warn),
     };
     let font = egui::FontId::proportional(12.);
     let mut job = egui::text::LayoutJob::default();
@@ -1942,6 +1936,8 @@ pub(crate) fn ago(secs: i64) -> String {
 enum Freshness {
     Paused,
     Connecting,
+    /// A última coleta da API falhou por inteiro (`ApiSnapshot::error`).
+    ApiDown,
     Live(i64),
     ApiLate(i64),
     ResourcesLate(i64),
@@ -1952,6 +1948,7 @@ impl Freshness {
         match self {
             Freshness::Paused => "Pausado".into(),
             Freshness::Connecting => "Conectando…".into(),
+            Freshness::ApiDown => "API indisponível".into(),
             Freshness::Live(age) => format!("Ao vivo · atualizado {}", ago(age)),
             Freshness::ApiLate(age) => format!("API atrasada · {}", ago(age)),
             Freshness::ResourcesLate(age) => format!("Recursos atrasados · {}", ago(age)),
@@ -1959,12 +1956,19 @@ impl Freshness {
         }
     }
 }
-/// Uma fonte atrasa quando a última coleta tem mais de três intervalos; só
-/// conta a fonte que já coletou. Pausado vence qualquer outro estado.
+/// Uma coleta atrasa quando passa de três intervalos, e nunca antes de 10 s.
+/// A mesma regra no chip e na barra de menus (e na bandeja).
+pub(crate) fn is_late(age: i64, interval: u64) -> bool {
+    age > interval.saturating_mul(3).max(10) as i64
+}
+/// Uma fonte atrasa pela regra de `is_late`; só conta a fonte que já
+/// coletou. Pausado vence qualquer outro estado; depois, a API indisponível
+/// (`api_down`: a última coleta dela falhou por inteiro).
 fn freshness(
     now: DateTime<Utc>,
     resources_at: Option<DateTime<Utc>>,
     api_at: Option<DateTime<Utc>>,
+    api_down: bool,
     resource_seconds: u64,
     api_seconds: u64,
     paused: bool,
@@ -1972,8 +1976,11 @@ fn freshness(
     if paused {
         return Freshness::Paused;
     }
+    if api_down {
+        return Freshness::ApiDown;
+    }
     let age = |at: Option<DateTime<Utc>>| at.map(|at| (now - at).num_seconds().max(0));
-    let late = |age: Option<i64>, seconds: u64| age.filter(|&age| age > seconds as i64 * 3);
+    let late = |age: Option<i64>, seconds: u64| age.filter(|&age| is_late(age, seconds));
     let (resources, api) = (age(resources_at), age(api_at));
     match (
         late(resources, resource_seconds),
@@ -1991,15 +1998,8 @@ fn freshness(
 /// Contador do item Sessões e handoffs: só com a API coletada e handoffs
 /// abertos; sem o total do servidor, a lista pode estar cortada ("+").
 fn handoff_badge(api: &ApiSnapshot) -> Option<String> {
-    api.at?;
-    let open = api.handoff_total.unwrap_or(api.handoffs.len());
-    (open > 0).then(|| {
-        format!(
-            "{}{}",
-            number(open),
-            if api.handoff_total.is_some() { "" } else { "+" }
-        )
-    })
+    let (open, text) = api.open_handoffs()?;
+    (open > 0).then_some(text)
 }
 
 /// Contador do item Revisão: propostas pendentes do projeto vigiado, com a
@@ -3328,7 +3328,8 @@ mod tests {
         use Freshness::*;
         let now = Utc::now();
         let at = |secs: i64| Some(now - chrono::Duration::seconds(secs));
-        // resource_seconds = 2 (atrasa acima de 6 s); api_seconds = 60 (acima de 180 s).
+        // resource_seconds = 2 (3 × 2 = 6 s, abaixo do piso: atrasa acima de
+        // 10 s); api_seconds = 60 (acima de 180 s).
         for (case, resources, api, paused, want) in [
             ("paused", at(1), at(1), true, Paused),
             (
@@ -3343,7 +3344,21 @@ mod tests {
             ("live: youngest source", at(6), at(3), false, Live(3)),
             ("live: youngest is resources", at(2), at(45), false, Live(2)),
             ("resources exactly 3x", at(6), at(1), false, Live(1)),
-            ("resources 3x + 1 s", at(7), at(1), false, ResourcesLate(7)),
+            (
+                "resources 3x + 1 s, under 10 s",
+                at(7),
+                at(1),
+                false,
+                Live(1),
+            ),
+            ("resources exactly 10 s", at(10), at(1), false, Live(1)),
+            (
+                "resources 10 s + 1 s",
+                at(11),
+                at(1),
+                false,
+                ResourcesLate(11),
+            ),
             ("api exactly 3x", at(1), at(180), false, Live(1)),
             ("api 3x + 1 s", at(1), at(181), false, ApiLate(181)),
             ("only api late", at(2), at(600), false, ApiLate(600)),
@@ -3371,10 +3386,10 @@ mod tests {
             ("api absent, resources live", at(3), None, false, Live(3)),
             (
                 "api absent, resources late",
-                at(10),
+                at(11),
                 None,
                 false,
-                ResourcesLate(10),
+                ResourcesLate(11),
             ),
             ("resources absent, api live", None, at(30), false, Live(30)),
             (
@@ -3394,9 +3409,36 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                freshness(now, resources, api, 2, 60, paused),
+                freshness(now, resources, api, false, 2, 60, paused),
                 want,
                 "{case}"
+            );
+        }
+        // A API indisponível (a última coleta falhou por inteiro): só Pausado
+        // vence. (caso, recursos, API, pausado, sem o erro, com ele)
+        for (case, resources, api, paused, up, down) in [
+            ("paused", at(1), None, true, Paused, Paused),
+            ("no collection", None, None, false, Connecting, ApiDown),
+            ("resources live", at(1), None, false, Live(1), ApiDown),
+            (
+                "resources late",
+                at(30),
+                None,
+                false,
+                ResourcesLate(30),
+                ApiDown,
+            ),
+            ("api late", at(1), at(600), false, ApiLate(600), ApiDown),
+        ] {
+            assert_eq!(
+                freshness(now, resources, api, false, 2, 60, paused),
+                up,
+                "{case}"
+            );
+            assert_eq!(
+                freshness(now, resources, api, true, 2, 60, paused),
+                down,
+                "{case}: api down"
             );
         }
     }
@@ -3407,6 +3449,7 @@ mod tests {
         for state in [
             Paused,
             Connecting,
+            ApiDown,
             Live(3),
             ApiLate(181),
             ResourcesLate(7),
@@ -3415,12 +3458,56 @@ mod tests {
             let want = match state {
                 Paused => "Pausado",
                 Connecting => "Conectando…",
+                ApiDown => "API indisponível",
                 Live(_) => "Ao vivo · atualizado há 3 s",
                 ApiLate(_) => "API atrasada · há 3 min",
                 ResourcesLate(_) => "Recursos atrasados · há 7 s",
                 BothLate(_) => "Atrasado · há 1 h",
             };
             assert_eq!(state.text(), want, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn the_api_down_chip_is_painted_like_the_late_ones_in_both_themes() {
+        use crate::widgets::tests::{THEMES, rects, texts};
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for (theme, p) in THEMES {
+            // Recursos em dia: sem o erro, o chip diria "Ao vivo".
+            let mut app = app_with_unsaved_draft();
+            app.resources.at = Some(Utc::now());
+            let ctx = styled();
+            ctx.set_theme(theme);
+            ctx.enable_accesskit();
+            // (texto do chip, a API): falha total, ou só atrasada.
+            let mut painted = Vec::new();
+            for (text, error, at) in [
+                ("API indisponível", Some("Falha de conexão."), None),
+                (
+                    "API atrasada · há 10 min",
+                    None,
+                    Some(Utc::now() - chrono::Duration::seconds(600)),
+                ),
+            ] {
+                app.api.error = error.map(Into::into);
+                app.api.at = at;
+                let out = frame(&mut app, &ctx, size, vec![]);
+                let chip = widget_rect(&out, Role::Label, text);
+                let fill: Vec<_> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect == chip)
+                    .map(|r| r.fill)
+                    .collect();
+                let color: Vec<_> = texts(&out)
+                    .into_iter()
+                    .filter(|(t, _)| t == text)
+                    .map(|(_, c)| c)
+                    .collect();
+                painted.push((fill, color));
+            }
+            let want = (vec![p.warn.gamma_multiply(0.14)], vec![p.warn]);
+            assert_eq!(painted, [want.clone(), want], "{theme:?}");
         }
     }
 
@@ -4418,6 +4505,67 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_body_paints_with_the_theme_widget_colors_not_the_scroll_bar_ones() {
+        use crate::widgets::tests::{THEMES, shapes, texts};
+        let size = [1320., 860.];
+        let mut wrong = Vec::new();
+        for (theme, p) in THEMES {
+            // O traço dos widgets em repouso; `scroll_bar` o troca por text2.
+            let normal = theme::visuals(theme).widgets.inactive.fg_stroke.color;
+            assert_ne!(normal, p.text2, "{theme:?}: precondition");
+            // (aba, um texto pintado no traço do controle dele)
+            for (tab, probe) in [
+                (SettingsTab::General, "2"),
+                (SettingsTab::Connection, "https://draft.example"),
+                (SettingsTab::Tray, "Desativado"),
+                (SettingsTab::Account, "grupo"),
+            ] {
+                let mut app = app_with_unsaved_draft();
+                app.settings.tab = tab;
+                // Na Conta, um cabeçalho que abre (`CollapsingHeader`).
+                app.authentication
+                    .hold_info(serde_json::json!({"grupo": {"campo": "valor"}}));
+                app.open_settings();
+                let ctx = styled();
+                // A sonda: sem a cor fixa do tema, o texto de cada controle
+                // sai no traço do estado dele, o do estilo que o corpo herda.
+                ctx.style_mut_of(theme, |s| s.visuals.override_text_color = None);
+                ctx.set_theme(theme);
+                // A janela embutida aparece com uma animação curta.
+                let mut out = frame(&mut app, &ctx, size, vec![]);
+                for _ in 0..20 {
+                    out = frame(&mut app, &ctx, size, vec![]);
+                }
+                let colors: Vec<_> = texts(&out)
+                    .into_iter()
+                    .filter(|(t, _)| t == probe)
+                    .map(|(_, c)| c)
+                    .collect();
+                if colors != [normal] {
+                    wrong.push(format!("{theme:?} {tab:?} {probe}: {colors:?}"));
+                }
+                if tab == SettingsTab::Account {
+                    // A seta do cabeçalho não depende da sonda: é o que se vê
+                    // com o tema de verdade.
+                    let arrows: Vec<_> = shapes(&out)
+                        .into_iter()
+                        .filter_map(|s| match s {
+                            egui::Shape::Path(path) if path.closed && path.points.len() == 3 => {
+                                Some(path.fill)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if arrows != [normal] {
+                        wrong.push(format!("{theme:?} {tab:?} arrow: {arrows:?}"));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
     fn every_control_is_on_its_tab_and_the_ones_left_out_do_not_exist() {
         use SettingsTab::*;
         use egui::accesskit::Role;
@@ -4497,6 +4645,48 @@ mod tests {
                 assert!(
                     !painted.iter().any(|(t, _)| t == text),
                     "{tab:?}: {text:?} painted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_intervals_are_fields_with_the_line_border_in_both_themes() {
+        use crate::widgets::tests::{THEMES, rects};
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        for (theme, p) in THEMES {
+            let mut app = app_with_unsaved_draft();
+            app.settings.tab = SettingsTab::General;
+            app.open_settings();
+            let ctx = styled();
+            ctx.set_theme(theme);
+            ctx.enable_accesskit();
+            // A janela embutida aparece com uma animação curta (1/60 s por
+            // frame): as cores só valem depois dela. O ponteiro fica fora.
+            let mut out = frame(&mut app, &ctx, size, vec![egui::Event::PointerGone]);
+            for _ in 0..20 {
+                out = frame(&mut app, &ctx, size, vec![]);
+            }
+            for field in [
+                "Intervalo de recursos em segundos",
+                "Intervalo de sessões em segundos",
+            ] {
+                let at = widget_rect(&out, Role::SpinButton, field);
+                assert_eq!(at.size(), egui::vec2(56., 24.), "{theme:?} {field}");
+                let boxes: Vec<_> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| (r.fill, r.stroke, r.corner_radius))
+                    .collect();
+                assert_eq!(
+                    boxes,
+                    [(
+                        p.field,
+                        Stroke::new(1.0_f32, p.line),
+                        egui::CornerRadius::same(5)
+                    )],
+                    "{theme:?} {field}: like the text fields"
                 );
             }
         }

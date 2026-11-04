@@ -6,7 +6,7 @@ use crate::{
     queries::{Query, Worker},
     sessions_ui::dated,
     theme,
-    widgets::{self, Button, Fact, Segment, Tone, Type, space},
+    widgets::{self, Button, Fact, Segment, Select, Tone, Type, space},
 };
 use chrono::{Local, Utc};
 use eframe::egui::{self, RichText};
@@ -198,7 +198,8 @@ impl Console {
             ui,
             |ui| {
                 ui.allocate_ui(egui::vec2(room.max(200.), 26.), |ui| {
-                    widgets::select(ui, "Projeto", &text, 200., |ui| {
+                    let select = Select::new("explore-scope", "Projeto", &text).min_width(200.);
+                    select.show(ui, |ui| {
                         for p in projects {
                             let s = Scope {
                                 workspace: p.workspace_name.clone(),
@@ -393,7 +394,10 @@ impl Console {
                                 self.kind.clone()
                             };
                             let kind = &mut self.kind;
-                            widgets::select(ui, "Tipo de evento", &shown, 160., |ui| {
+                            let select = Select::new("observation-kind", "Tipo de evento", &shown)
+                                .min_width(160.)
+                                .raised();
+                            select.show(ui, |ui| {
                                 for k in KINDS {
                                     let label = if k.is_empty() { "Todos os tipos" } else { k };
                                     if widgets::option(ui, kind.as_str() == k, label).clicked() {
@@ -563,15 +567,17 @@ impl Console {
                 let versions = array(&data["versions"]);
                 card(ui, &format!("Histórico: {path}"), |ui| {
                     widgets::row(ui, |ui| {
-                        for (label, selected) in
-                            [("Comparar de", &mut self.from), ("Até", &mut self.to)]
-                        {
+                        for (id, label, selected) in [
+                            ("history-from", "Comparar de", &mut self.from),
+                            ("history-to", "Até", &mut self.to),
+                        ] {
                             let shown = if selected.is_empty() {
                                 label.to_owned()
                             } else {
                                 selected.clone()
                             };
-                            widgets::select(ui, label, &shown, 160., |ui| {
+                            let select = Select::new(id, label, &shown).min_width(160.).raised();
+                            select.show(ui, |ui| {
                                 if widgets::option(ui, selected.is_empty(), "Automático").clicked()
                                 {
                                     selected.clear();
@@ -728,7 +734,7 @@ impl Console {
                 if edges.is_empty() {
                     widgets::caption(ui, "Nenhuma relação.");
                 }
-                let range = explore_page(ui, edges.len());
+                let range = local_page(ui, edges.len());
                 for edge in &edges[range] {
                     ui.label(format!(
                         "{} / {} : {} → {} / {} : {}",
@@ -790,7 +796,7 @@ impl Console {
         if rows.is_empty() {
             widgets::caption(ui, "Nenhuma página.");
         }
-        let range = explore_page(ui, rows.len());
+        let range = local_page(ui, rows.len());
         for row in &rows[range] {
             let target = related_scope(scope, row);
             ui.horizontal_wrapped(|ui| {
@@ -810,7 +816,7 @@ impl Console {
             });
         }
     }
-    /// A paginação do servidor, de 50 em 50; `on_surf` dentro de um cartão.
+    /// A paginação do servidor, de 50 em 50; `raised` dentro de um cartão.
     #[allow(clippy::too_many_arguments)]
     fn pager(
         &mut self,
@@ -819,7 +825,7 @@ impl Console {
         offset: usize,
         count: usize,
         total: Option<u64>,
-        on_surf: bool,
+        raised: bool,
         query: impl Fn(usize) -> Query,
     ) {
         let more = total
@@ -831,7 +837,7 @@ impl Console {
             &label,
             !self.busy && offset > 0,
             !self.busy && more,
-            on_surf,
+            raised,
         );
         if back {
             self.begin(shared, query(offset.saturating_sub(50)));
@@ -853,17 +859,12 @@ fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R)
         })
         .inner
 }
-/// "N–M de T" e os botões Secundários Anterior e Próxima; devolve os cliques.
-fn pager_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    back: bool,
-    next: bool,
-    on_surf: bool,
-) -> (bool, bool) {
+/// "N–M de T" e os botões Secundários Anterior e Próxima (`raised` dentro de
+/// um cartão: no escuro, o bg é o do campo); devolve os cliques.
+fn pager_row(ui: &mut egui::Ui, label: &str, back: bool, next: bool, raised: bool) -> (bool, bool) {
     let button = |text| {
         let button = Button::secondary(text).small();
-        if on_surf { button.on_surf() } else { button }
+        if raised { button.raised() } else { button }
     };
     ui.horizontal(|ui| {
         ui.set_min_height(24.);
@@ -919,29 +920,10 @@ fn local_offset(
     ui.data_mut(|d| d.insert_temp(id, offset));
     offset..(offset + 100).min(total)
 }
-fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
-    local_offset(ui, total, |ui, mut offset| {
-        ui.horizontal(|ui| {
-            ui.small(range_label(offset, (total - offset).min(100), Some(total)));
-            if ui
-                .add_enabled(offset > 0, egui::Button::new("← 100"))
-                .clicked()
-            {
-                offset = offset.saturating_sub(100);
-            }
-            if ui
-                .add_enabled(offset + 100 < total, egui::Button::new("100 →"))
-                .clicked()
-            {
-                offset += 100;
-            }
-        });
-        offset
-    })
-}
-/// A página local das listas de Explorar, dentro de cartões: "N–M de T" e
+/// A página local das listas de Explorar e de `show_values`, sempre sobre
+/// surf (cartões, corpo de Ajustes, prévia da folha): "N–M de T" e
 /// Anterior/Próxima.
-fn explore_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
+fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
     local_offset(ui, total, |ui, offset| {
         let label = range_label(offset, (total - offset).min(100), Some(total));
         match pager_row(ui, &label, offset > 0, offset + 100 < total, true) {
@@ -1553,6 +1535,55 @@ mod tests {
     }
 
     #[test]
+    fn show_values_pages_long_lists_with_the_explore_pager_raised_on_its_card() {
+        // Saúde, Ajustes, Administração e Revisão mostram os dados num cartão.
+        let data = json!((0..250).map(|i| format!("item {i}")).collect::<Vec<_>>());
+        for (theme, p) in THEMES {
+            let ctx = context(theme);
+            let mut add = |ui: &mut egui::Ui| {
+                widgets::card(ui).show(ui, |ui| show_values(ui, &data, 0));
+            };
+            let fills = |out: &egui::FullOutput, button: &str| -> Vec<egui::Color32> {
+                let at = rect_of(&node(out, Role::Button, button));
+                rects(out)
+                    .into_iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| r.fill)
+                    .collect()
+            };
+            let out = frames(&ctx, &mut add);
+            node(&out, Role::Label, "1–100 de 250");
+            node(&out, Role::Label, "item 99");
+            assert!(nodes(&out, Role::Label, "item 100").is_empty(), "{theme:?}");
+            assert!(
+                node(&out, Role::Button, "Anterior").is_disabled(),
+                "{theme:?}"
+            );
+            assert!(
+                !node(&out, Role::Button, "Próxima").is_disabled(),
+                "{theme:?}"
+            );
+            assert_eq!(fills(&out, "Próxima"), [p.raised], "{theme:?}");
+            press(&ctx, &mut add, Role::Button, "Próxima");
+            // O ponteiro sai: sem o surf2 de quem está sob ele.
+            run_sized(&ctx, TALL, vec![egui::Event::PointerGone], &mut add);
+            let out = frames(&ctx, &mut add);
+            node(&out, Role::Label, "101–200 de 250");
+            node(&out, Role::Label, "item 100");
+            assert!(nodes(&out, Role::Label, "item 99").is_empty(), "{theme:?}");
+            for button in ["Anterior", "Próxima"] {
+                assert!(!node(&out, Role::Button, button).is_disabled(), "{theme:?}");
+                let fills = fills(&out, button);
+                assert_eq!(fills, [p.raised], "{theme:?} {button}");
+                assert!(
+                    !fills.contains(&p.field),
+                    "{theme:?} {button}: like a field"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_graph_draws_its_links_at_3_to_1_on_its_card() {
         use crate::theme::tests::contrast;
         for (theme, p) in THEMES {
@@ -1859,6 +1890,165 @@ mod tests {
                     .collect();
                 assert_eq!(fills, [p.raised], "{theme:?} {button}");
                 assert_ne!(p.raised, p.field, "{theme:?} {button}: like a field");
+            }
+        }
+    }
+
+    #[test]
+    fn the_pagers_on_the_cards_are_raised_and_the_sessions_one_is_not() {
+        let rows = |n: usize, row: fn(usize) -> Value| -> Vec<Value> { (0..n).map(row).collect() };
+        let observations = rows(50, |i| json!({"id": format!("e{i}"), "kind": "stop"}));
+        let versions = rows(50, |i| json!({"id": format!("v{i}"), "body_chars": 1}));
+        let sessions = rows(
+            50,
+            |i| json!({"session_id": format!("s{i}"), "agent_kind": "codex"}),
+        );
+        let pages = rows(
+            250,
+            |i| json!({"title": format!("Página {i}"), "path": "p.md"}),
+        );
+        let edges = rows(
+            250,
+            |i| json!({"from_path": format!("a{i}.md"), "to_path": "b.md"}),
+        );
+        // (caso, consulta, resposta, página local?, num cartão?)
+        let cases = [
+            (
+                "observations",
+                Query::Observations {
+                    scope: fixture(),
+                    session: "s1".into(),
+                    offset: 50,
+                    text: String::new(),
+                    kind: String::new(),
+                },
+                json!({"observations": observations, "total": 500}),
+                false,
+                true,
+            ),
+            (
+                "history",
+                Query::History {
+                    scope: fixture(),
+                    path: "a.md".into(),
+                    offset: 50,
+                    from: String::new(),
+                    to: String::new(),
+                },
+                json!({"versions": versions, "total": 500, "diff": {}}),
+                false,
+                true,
+            ),
+            ("pages", Query::Pages(fixture()), json!(pages), true, true),
+            (
+                "cross graph",
+                Query::CrossGraph,
+                json!({"edges": edges}),
+                true,
+                true,
+            ),
+            // A das sessões fica sobre o fundo da página, fora de cartão.
+            (
+                "sessions",
+                Query::Sessions {
+                    scope: fixture(),
+                    offset: 50,
+                    include_open: true,
+                },
+                json!({"sessions": sessions}),
+                false,
+                false,
+            ),
+        ];
+        for (theme, p) in THEMES {
+            for (case, query, data, local, on_card) in cases.clone() {
+                let (_mock, shared, mut console) = explore(true);
+                console.result = Some((query, data));
+                let ctx = context(theme);
+                let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+                // A página local abre na primeira: na segunda, as duas valem.
+                if local {
+                    press(&ctx, &mut add, Role::Button, "Próxima");
+                }
+                // O ponteiro sai: sem o surf2 de quem está sob ele.
+                run_sized(&ctx, TALL, vec![egui::Event::PointerGone], &mut add);
+                let out = frames(&ctx, &mut add);
+                if local {
+                    node(&out, Role::Label, "101–200 de 250");
+                }
+                let want = if on_card { p.raised } else { p.surf };
+                for button in ["Anterior", "Próxima"] {
+                    let found = node(&out, Role::Button, button);
+                    assert!(!found.is_disabled(), "{theme:?} {case} {button}");
+                    let at = rect_of(&found);
+                    let fills: Vec<egui::Color32> = rects(&out)
+                        .into_iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect();
+                    assert_eq!(fills, [want], "{theme:?} {case} {button}");
+                    if on_card {
+                        assert!(
+                            !fills.contains(&p.field),
+                            "{theme:?} {case} {button}: like a field"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_selects_on_the_cards_are_raised_and_the_project_one_is_not() {
+        // (consulta, resposta, os seletores no cartão dela)
+        let cases = [
+            (
+                Query::Observations {
+                    scope: fixture(),
+                    session: "s1".into(),
+                    offset: 0,
+                    text: String::new(),
+                    kind: String::new(),
+                },
+                json!({"observations": [{"id": "e1", "kind": "stop"}], "total": 1}),
+                &["Tipo de evento"][..],
+            ),
+            (
+                Query::History {
+                    scope: fixture(),
+                    path: "a.md".into(),
+                    offset: 0,
+                    from: String::new(),
+                    to: String::new(),
+                },
+                json!({"versions": [{"id": "v1", "body_chars": 1}], "total": 1, "diff": {}}),
+                &["Comparar de", "Até"][..],
+            ),
+        ];
+        for (theme, p) in THEMES {
+            for (query, data, on_card) in cases.clone() {
+                let (_mock, shared, mut console) = explore(true);
+                console.result = Some((query, data));
+                let ctx = context(theme);
+                let mut add = |ui: &mut egui::Ui| console.show(ui, &shared, &[]);
+                // O ponteiro sai: sem o surf2 de quem está sob ele.
+                run_sized(&ctx, TALL, vec![egui::Event::PointerGone], &mut add);
+                let out = frames(&ctx, &mut add);
+                let fill = |label: &str| -> Vec<egui::Color32> {
+                    let at = rect_of(&node(&out, Role::ComboBox, label));
+                    rects(&out)
+                        .into_iter()
+                        .filter(|r| r.rect == at)
+                        .map(|r| r.fill)
+                        .collect()
+                };
+                for label in on_card {
+                    let case = format!("{theme:?} {label}");
+                    assert_eq!(fill(label), [p.raised], "{case}: on its card");
+                    assert_ne!(fill(label), [p.field], "{case}: like a field");
+                }
+                // O do projeto fica na linha de ferramentas, sobre o fundo.
+                assert_eq!(fill("Projeto"), [p.surf], "{theme:?} Projeto");
             }
         }
     }
