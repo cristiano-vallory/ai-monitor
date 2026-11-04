@@ -388,6 +388,31 @@ fn short(id: &str) -> String {
     id.chars().take(12).collect()
 }
 
+/// A busca, sem diferenciar maiúsculas: `needle` (já em minúsculas) nos
+/// `fields` unidos por espaço, o `join(" ").to_lowercase()` de sempre, montado
+/// em `key`. O `key` passa de linha em linha e de frame em frame: com o texto
+/// ASCII do Docker (nomes, imagens e IDs), a busca não aloca; fora do ASCII,
+/// a conversão do `str`.
+fn search_matches<'a>(
+    key: &mut String,
+    fields: impl IntoIterator<Item = &'a str>,
+    needle: &str,
+) -> bool {
+    key.clear();
+    for (i, field) in fields.into_iter().enumerate() {
+        if i > 0 {
+            key.push(' ');
+        }
+        key.push_str(field);
+    }
+    if key.is_ascii() {
+        key.make_ascii_lowercase();
+        key.contains(needle)
+    } else {
+        key.to_lowercase().contains(needle)
+    }
+}
+
 pub(crate) struct Docker {
     tab: Tab,
     search: String,
@@ -399,6 +424,8 @@ pub(crate) struct Docker {
     open: bool,
     /// Busca e "Só em execução" do frame anterior.
     shown: (String, bool),
+    /// O texto de cada linha na busca (`search_matches`), reaproveitado.
+    key: String,
 }
 impl Default for Docker {
     fn default() -> Self {
@@ -410,6 +437,7 @@ impl Default for Docker {
             selected: None,
             open: false,
             shown: (String::new(), false),
+            key: String::new(),
         }
     }
 }
@@ -470,18 +498,19 @@ impl Docker {
         match self.tab {
             Tab::Containers => {
                 self.summary(ui, r);
-                let key = (self.search.clone(), self.running_only);
-                if key != self.shown {
-                    self.shown = key;
+                if (self.search.as_str(), self.running_only)
+                    != (self.shown.0.as_str(), self.shown.1)
+                {
+                    self.shown = (self.search.clone(), self.running_only);
                     self.open = false;
                 }
+                let key = &mut self.key;
                 let matching: Vec<&Container> = r
                     .containers
                     .iter()
                     .filter(|c| {
-                        format!("{} {} {}", c.name, c.image, c.id)
-                            .to_lowercase()
-                            .contains(&needle)
+                        let fields = [c.name.as_str(), c.image.as_str(), c.id.as_str()];
+                        search_matches(key, fields, &needle)
                     })
                     .collect();
                 let hidden = if self.running_only {
@@ -507,13 +536,16 @@ impl Docker {
                         None,
                     );
                 }
+                let key = &mut self.key;
                 let images: Vec<&DockerImage> = r
                     .images
                     .iter()
                     .filter(|i| {
-                        format!("{} {}", i.tags.join(" "), i.id)
-                            .to_lowercase()
-                            .contains(&needle)
+                        // As tags e o ID; sem tags, o espaço antes do ID fica,
+                        // como no `tags.join(" ")` seguido de " ID".
+                        let tags = i.tags.iter().map(String::as_str);
+                        let none = i.tags.is_empty().then_some("");
+                        search_matches(key, tags.chain(none).chain([i.id.as_str()]), &needle)
                     })
                     .collect();
                 let mut legend = vec![IMAGES_NOTE.to_owned(), SIZE_NOTE.to_owned()];
@@ -844,7 +876,7 @@ impl Docker {
                         ui.set_min_width(ui.available_width());
                         if back
                             && ui
-                                .add(Button::secondary("← Voltar").small().on_surf())
+                                .add(Button::secondary("← Voltar").small().raised())
                                 .clicked()
                         {
                             self.open = false;
@@ -1193,10 +1225,10 @@ fn inspector(ui: &mut Ui, c: &Container, r: &ResourceSnapshot, monitored: &str) 
     ui.add_space(10.);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = space::S;
-        if ui.add(Button::secondary("Copiar ID").on_surf()).clicked() {
+        if ui.add(Button::secondary("Copiar ID").raised()).clicked() {
             ui.ctx().copy_text(c.id.clone());
         }
-        if ui.add(Button::secondary("Copiar nome").on_surf()).clicked() {
+        if ui.add(Button::secondary("Copiar nome").raised()).clicked() {
             ui.ctx().copy_text(c.name.clone());
         }
     });
@@ -2673,7 +2705,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_values_wrap_left_aligned_in_12_px_and_the_buttons_stand_on_bg() {
+    fn inspector_values_wrap_left_aligned_in_12_px_and_the_buttons_are_raised() {
         let image = "docker.io/akitaonrails/ai-memory:latest-com-uma-tag-bem-comprida";
         for (theme, p) in THEMES {
             let mut c = running("ai-memory", 12.4, 421, 46, "127.0.0.1:49374->49374/tcp");
@@ -2744,7 +2776,8 @@ mod tests {
                 !status.galley.elided && status.galley.rows.len() == 2,
                 "{theme:?}"
             );
-            // Copiar ID e nome: fundo bg sobre o surf.
+            // Copiar ID e nome: fundo raised sobre o surf (no escuro, o bg é o
+            // do campo).
             let painted = rects(&out);
             for button in ["Copiar ID", "Copiar nome"] {
                 let at = rect_of(&node(&out, Role::Button, button));
@@ -2754,8 +2787,33 @@ mod tests {
                         .filter(|r| r.rect == at)
                         .map(|r| r.fill)
                         .collect::<Vec<_>>(),
-                    vec![p.bg],
+                    vec![p.raised],
                     "{theme:?}: {button}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_narrow_inspector_buttons_are_raised_and_never_the_field_color() {
+        for (theme, p) in THEMES {
+            let mut page = Page::new(theme, NARROW, collected(eight()));
+            page.click_row("postgres-dev");
+            // O ponteiro sai: sem o surf2 de quem está sob ele.
+            let out = page.frame(vec![Event::PointerGone]);
+            node(&out, Role::Pane, "Inspetor do contêiner");
+            let painted = rects(&out);
+            for button in ["← Voltar", "Copiar ID", "Copiar nome"] {
+                let at = rect_of(&node(&out, Role::Button, button));
+                let fills: Vec<Color32> = painted
+                    .iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| r.fill)
+                    .collect();
+                assert_eq!(fills, [p.raised], "{theme:?}: {button}");
+                assert!(
+                    !fills.contains(&p.field),
+                    "{theme:?}: {button} like a field"
                 );
             }
         }
@@ -3197,6 +3255,83 @@ mod tests {
     }
 
     #[test]
+    fn search_reads_the_fields_as_one_text_in_lowercase_like_before() {
+        // (campos, busca digitada, encontra?) num `key` só, de linha em linha.
+        let cases: [(&[&str], &str, bool); 10] = [
+            (&["Redis-Cache", "redis:7", "8F3C21"], "REDIS-cache", true),
+            // O `key` da linha anterior não vaza.
+            (&["postgres-dev", "postgres:16", "a1b2"], "redis", false),
+            // Os campos se juntam por espaço, e só por ele.
+            (
+                &["postgres-dev", "postgres:16", "a1b2"],
+                "dev POSTGRES:16",
+                true,
+            ),
+            (
+                &["postgres-dev", "postgres:16", "a1b2"],
+                "devpostgres",
+                false,
+            ),
+            (&["postgres-dev", "postgres:16", "a1b2"], "16 A1B", true),
+            // Fora do ASCII: a conversão do `str`, com o sigma final.
+            (&["ÁGUA-Box", "água:1", "ff"], "água-BOX", true),
+            (&["ΟΔΟΣ", "x", "y"], "ΟΔΟΣ X", true),
+            (&["redis"], "rédis", false),
+            (&["a"], "abc", false),
+            (&["web", "", ""], "", true),
+        ];
+        let mut key = String::new();
+        for (fields, typed, want) in cases {
+            let needle = typed.to_lowercase();
+            let before = fields.join(" ").to_lowercase().contains(&needle);
+            assert_eq!(before, want, "{fields:?} {typed:?}: the old search");
+            assert_eq!(
+                search_matches(&mut key, fields.iter().copied(), &needle),
+                want,
+                "{fields:?} {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_search_reads_the_tags_then_the_id() {
+        let image = |tags: &[&str], id: &str| DockerImage {
+            id: format!("sha256:{id}{}", "0".repeat(58)),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        let r = ResourceSnapshot {
+            images: vec![
+                image(&["web:latest", "web:v1"], "web000"),
+                image(&[], "abc000"),
+            ],
+            images_at: Some(Utc::now()),
+            ..collected(vec![])
+        };
+        let mut page = Page::new(egui::Theme::Dark, WIDE, r);
+        page.docker.tab = Tab::Images;
+        for (needle, want) in [
+            ("WEB:V1", vec!["web:latest"]),
+            // Entre as tags, e da última ao ID.
+            ("latest web:v1", vec!["web:latest"]),
+            ("v1 sha256:web", vec!["web:latest"]),
+            // Sem tags, o espaço antes do ID, como antes.
+            (" sha256:abc", vec!["<sem tag>"]),
+            ("sha256:", vec!["web:latest", "<sem tag>"]),
+            ("", vec!["web:latest", "<sem tag>"]),
+            ("nada", vec![]),
+        ] {
+            page.docker.search = needle.into();
+            let out = page.show();
+            let shown: Vec<&str> = ["web:latest", "<sem tag>"]
+                .into_iter()
+                .filter(|label| has(&out, Role::Label, label))
+                .collect();
+            assert_eq!(shown, want, "{needle:?}");
+        }
+    }
+
+    #[test]
     fn reset_clears_only_the_selection_and_open_shows_a_container() {
         let mut docker = Docker {
             tab: Tab::Images,
@@ -3209,6 +3344,7 @@ mod tests {
             selected: Some("id".into()),
             open: true,
             shown: ("busca".into(), true),
+            key: String::new(),
         };
         docker.reset();
         assert_eq!(

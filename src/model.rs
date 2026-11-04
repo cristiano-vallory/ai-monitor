@@ -563,10 +563,14 @@ impl ResourceSnapshot {
     /// A amostra do histórico desta coleta, com a origem do ai-memory
     /// (`name` = o contêiner monitorado); `None` antes da 1ª coleta.
     pub fn sample(&self, name: &str) -> Option<ResourceSample> {
-        let at = self.at?;
-        let ai = self.ai_measure(name);
+        self.at?;
+        self.sample_of(self.ai_measure(name))
+    }
+    /// `sample` com a medida do ai-memory já feita (`ai_measure`): quem
+    /// também mostra o uso mede uma vez só.
+    pub fn sample_of(&self, ai: Option<(Usage, bool)>) -> Option<ResourceSample> {
         Some(ResourceSample {
-            at,
+            at: self.at?,
             ai_in_docker: ai.as_ref().is_some_and(|&(_, in_docker)| in_docker),
             ai: ai.map(|(usage, _)| usage),
             docker: self.docker_total(),
@@ -639,6 +643,19 @@ impl ApiSnapshot {
         self.projects
             .iter()
             .try_fold(0u64, |a, p| p.open_session_count.map(|n| a + n))
+    }
+    /// Os handoffs abertos da coleta, (quantos, texto): o total do servidor
+    /// ("1.234") ou, sem ele, o tamanho da lista com "+" (pode estar
+    /// cortada). `None` antes da 1ª coleta, mesmo com um total.
+    pub fn open_handoffs(&self) -> Option<(usize, String)> {
+        self.at?;
+        let open = self.handoff_total.unwrap_or(self.handoffs.len());
+        let cut = if self.handoff_total.is_some() {
+            ""
+        } else {
+            "+"
+        };
+        Some((open, format!("{}{cut}", number(open))))
     }
     pub fn open_sessions(&self) -> usize {
         self.sessions
@@ -760,6 +777,40 @@ mod tests {
         assert_eq!(s.docker_total().unwrap().cpu, 250.);
         s.docker_error = Some("Offline".into());
         assert!(s.docker_total().is_none());
+    }
+
+    #[test]
+    fn open_handoffs_for_every_collection_state() {
+        // (total do servidor, listados, depois da coleta): o total vence a
+        // lista; sem ele, a lista com "+".
+        for (total, listed, want) in [
+            (None, 0, (0, "0+")),
+            (None, 1, (1, "1+")),
+            (None, 200, (200, "200+")),
+            (Some(0), 0, (0, "0")),
+            (Some(0), 1, (0, "0")),
+            (Some(0), 200, (0, "0")),
+            (Some(1), 0, (1, "1")),
+            (Some(1), 1, (1, "1")),
+            (Some(1), 200, (1, "1")),
+            (Some(1234), 0, (1234, "1.234")),
+            (Some(1234), 1, (1234, "1.234")),
+            (Some(1234), 200, (1234, "1.234")),
+        ] {
+            let mut api = ApiSnapshot {
+                handoff_total: total,
+                handoffs: vec![Handoff::default(); listed],
+                ..Default::default()
+            };
+            let case = format!("{total:?} {listed}");
+            assert_eq!(api.open_handoffs(), None, "{case}: before the collection");
+            api.at = Some(Utc::now());
+            assert_eq!(
+                api.open_handoffs(),
+                Some((want.0, want.1.to_owned())),
+                "{case}"
+            );
+        }
     }
 
     #[test]

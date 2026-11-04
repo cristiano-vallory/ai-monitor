@@ -204,9 +204,11 @@ impl Shared {
         });
         let health = shared.clone();
         thread::spawn(move || {
-            health_loop(&health, |config, cancelled| {
-                crate::health::collect(config, cancelled)
-            })
+            health_loop(
+                &health,
+                |config, cancelled| crate::health::collect(config, cancelled),
+                || {},
+            )
         });
         shared
     }
@@ -230,12 +232,15 @@ impl Shared {
 /// Coletor de saúde: coleta, publica se a conexão é a mesma e espera o
 /// intervalo, ou até um pedido de "Atualizar agora" ainda não atendido. A
 /// config é relida a cada coleta, então um pedido seguido de reconexão
-/// coleta com a config nova.
+/// coleta com a config nova. `waiting` roda a cada reavaliação da espera (os
+/// testes contam as voltas; no app, nada).
 pub(crate) fn health_loop(
     shared: &Shared,
     collect: impl Fn(&Config, &dyn Fn() -> bool) -> crate::health::Snapshot,
+    waiting: impl Fn(),
 ) {
     let due = || {
+        waiting();
         shared.health_asked.load(Ordering::Acquire) > shared.health_served.load(Ordering::Acquire)
     };
     loop {
@@ -502,12 +507,14 @@ pub(crate) mod tests {
     /// O coletor de saúde rodando numa thread, com uma coleta falsa (sem
     /// rede): cada coleta avisa em `calls` com o endpoint da config usada e
     /// espera `release` antes de devolver. A coleta devolvida traz o endpoint
-    /// em `status`, mesmo se cancelada: quem descarta é o laço.
+    /// em `status`, mesmo se cancelada: quem descarta é o laço. `rounds` conta
+    /// as reavaliações da espera.
     pub(crate) struct HealthProbe {
         pub shared: Arc<Shared>,
         pub calls: mpsc::Receiver<String>,
         release: Option<mpsc::Sender<()>>,
         pub most_in_flight: Arc<AtomicUsize>,
+        rounds: Arc<AtomicU64>,
         thread: Option<thread::JoinHandle<()>>,
     }
     impl HealthProbe {
@@ -516,27 +523,35 @@ pub(crate) mod tests {
             let (release, gate) = mpsc::channel::<()>();
             let in_flight = Arc::new(AtomicUsize::new(0));
             let most_in_flight = Arc::new(AtomicUsize::new(0));
-            let (now, most) = (in_flight.clone(), most_in_flight.clone());
+            let rounds = Arc::new(AtomicU64::new(0));
+            let (now, most, round) = (in_flight.clone(), most_in_flight.clone(), rounds.clone());
             let looping = shared.clone();
             let thread = thread::spawn(move || {
-                health_loop(&looping, |config, _cancelled| {
-                    let running = now.fetch_add(1, Ordering::SeqCst) + 1;
-                    most.fetch_max(running, Ordering::SeqCst);
-                    let _ = calls_tx.send(config.endpoint.clone());
-                    let _ = gate.recv();
-                    now.fetch_sub(1, Ordering::SeqCst);
-                    crate::health::Snapshot {
-                        at: Some(Utc::now()),
-                        status: Some(serde_json::json!({ "endpoint": config.endpoint })),
-                        ..Default::default()
-                    }
-                })
+                health_loop(
+                    &looping,
+                    |config, _cancelled| {
+                        let running = now.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(running, Ordering::SeqCst);
+                        let _ = calls_tx.send(config.endpoint.clone());
+                        let _ = gate.recv();
+                        now.fetch_sub(1, Ordering::SeqCst);
+                        crate::health::Snapshot {
+                            at: Some(Utc::now()),
+                            status: Some(serde_json::json!({ "endpoint": config.endpoint })),
+                            ..Default::default()
+                        }
+                    },
+                    || {
+                        round.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
             });
             Self {
                 shared,
                 calls,
                 release: Some(release),
                 most_in_flight,
+                rounds,
                 thread: Some(thread),
             }
         }
@@ -546,12 +561,27 @@ pub(crate) mod tests {
                 .recv_timeout(Duration::from_secs(3))
                 .expect("the collector must collect now, not after the 30 s cycle")
         }
-        /// Nenhuma coleta nova por 400 ms (o laço reavalia a cada 100 ms).
+        /// O laço segue esperando: cinco reavaliações da espera depois desta
+        /// chamada (as quatro primeiras disseram "esperar"; ≈ os 400 ms de
+        /// antes, contados no laço e não no relógio) e nenhuma coleta até
+        /// ali. Uma coleta indevida tira o laço da espera e o prende no
+        /// `release`: as voltas param e a coleta chega, mesmo sob carga.
         pub(crate) fn quiet(&self) -> bool {
-            matches!(
-                self.calls.recv_timeout(Duration::from_millis(400)),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            )
+            let start = self.rounds.load(Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_secs(3);
+            loop {
+                if self.calls.try_recv().is_ok() {
+                    return false;
+                }
+                if self.rounds.load(Ordering::SeqCst) >= start + 5 {
+                    return true;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "the collector never went back to waiting"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
         }
         pub(crate) fn release(&self) {
             self.release.as_ref().unwrap().send(()).unwrap();
@@ -625,7 +655,11 @@ pub(crate) mod tests {
         );
         probe.shared.refresh_health();
         probe.shared.refresh_health();
-        assert!(probe.quiet(), "no second collection while one is in flight");
+        // O laço está preso nesta coleta até o `release`: nada mais começou.
+        assert!(
+            matches!(probe.calls.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "no second collection while one is in flight"
+        );
         probe.release();
         assert_eq!(probe.next(), "http://old.example", "the pending request");
         assert_eq!(

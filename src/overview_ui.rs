@@ -275,8 +275,8 @@ pub(crate) fn kpi_lines(width: f32) -> Vec<Vec<(usize, f32)>> {
         .collect()
 }
 
-/// Cartões nas `lines` (índice, largura), com a mesma altura na linha; cada
-/// um é um nó `Pane` com o seu título.
+/// Cartões nas `lines` (índice, largura), com a mesma altura na linha
+/// (`widgets::card_row`); cada um é um nó `Pane` com o seu título.
 fn cards(
     ui: &mut Ui,
     titles: &[&str],
@@ -287,37 +287,14 @@ fn cards(
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = GAP;
         for line in lines {
-            let top = ui.next_widget_position().y;
-            let mut x = ui.max_rect().left();
-            let mut cells = Vec::new();
-            for (index, w) in line {
-                let rect = Rect::from_min_size(pos2(x, top), vec2(w, f32::INFINITY));
-                x += w + GAP;
-                let mut child = ui.new_child(
-                    UiBuilder::new()
-                        .id_salt(("overview-card", titles[index]))
-                        .max_rect(rect)
-                        .layout(Layout::top_down(Align::Min)),
-                );
-                let mut prepared = widgets::card(&child).inner_margin(margin).begin(&mut child);
-                let content = &mut prepared.content_ui;
-                content.set_min_width(content.available_width());
-                add(content, index);
-                cells.push((child, prepared, titles[index]));
-            }
-            let height = cells
-                .iter()
-                .map(|(_, prepared, _)| prepared.content_ui.min_rect().height())
-                .fold(0., f32::max);
-            let mut row = Rect::NOTHING;
-            for (mut child, mut prepared, title) in cells {
-                let top = prepared.content_ui.min_rect().top();
-                prepared.content_ui.expand_to_include_y(top + height);
-                let response = prepared.end(&mut child);
-                response.widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, title));
-                row = row.union(response.rect);
-            }
-            ui.advance_cursor_after_rect(row);
+            widgets::card_row(
+                ui,
+                titles,
+                &line,
+                margin,
+                |index| ("overview-card", titles[index]),
+                &mut add,
+            );
         }
     });
 }
@@ -515,17 +492,6 @@ fn window(history: &VecDeque<Sample>, minutes: i64) -> Vec<&Sample> {
     let start = end - chrono::Duration::minutes(minutes);
     history.iter().filter(|s| s.at >= start).collect()
 }
-/// Handoffs abertos como hoje (lateral e cartão antigo): o total do servidor,
-/// "N+" só com a lista, `None` antes da 1ª coleta.
-fn open_handoffs(api: &ApiSnapshot) -> Option<String> {
-    api.at.map(|_| {
-        format!(
-            "{}{}",
-            number(api.handoff_total.unwrap_or(api.handoffs.len())),
-            if api.handoff_total.is_some() { "" } else { "+" }
-        )
-    })
-}
 /// "421,0 MiB" em valor e unidade.
 fn split_unit(text: String) -> (String, String) {
     match text.rsplit_once(' ') {
@@ -545,7 +511,9 @@ struct Kpi {
 }
 fn kpi_list(d: &Data<'_>, minutes: i64) -> [Kpi; 4] {
     let r = d.resources;
-    let ai = r.ai_usage(&d.config.container);
+    // Uma medida só do ai-memory por frame: o valor e a amostra (`others`).
+    let measure = r.ai_measure(&d.config.container);
+    let ai = measure.as_ref().map(|(usage, _)| usage.clone());
     let samples = window(d.history, minutes);
     let ai_values = |m: Metric| -> Vec<f64> {
         samples
@@ -561,12 +529,12 @@ fn kpi_list(d: &Data<'_>, minutes: i64) -> [Kpi; 4] {
         .map(|v| bytes(v as u64));
     let docker = r.at.is_some() && r.docker_error.is_none();
     // A mesma conta do gráfico (`stack`), na coleta atual.
-    let others = r.sample(&d.config.container).and_then(|s| {
+    let others = r.sample_of(measure).and_then(|s| {
         let cpu = stack(&s, Metric::Cpu).1?;
         let memory = stack(&s, Metric::Memory).1?;
         Some(format!("{}% · {}", decimal(cpu, 1), bytes(memory as u64)))
     });
-    let handoffs = open_handoffs(d.api);
+    let handoffs = d.api.open_handoffs().map(|(_, text)| text);
     let sessions = match d.api.open_session_links() {
         Some(1) => "1 sessão aberta".to_owned(),
         Some(n) => format!("{} sessões abertas", number(n as usize)),
@@ -1407,7 +1375,7 @@ fn containers(ui: &mut Ui, r: &ResourceSnapshot) -> Option<Go> {
 fn recents(ui: &mut Ui, api: &ApiSnapshot, now: DateTime<Utc>) -> bool {
     let p = theme::palette(ui.visuals());
     ui.spacing_mut().item_spacing.y = 0.;
-    let count = match open_handoffs(api) {
+    let count = match api.open_handoffs().map(|(_, text)| text) {
         Some(n) if n == "1" => "1 aberto".to_owned(),
         Some(n) => format!("{n} abertos"),
         None => "—".to_owned(),
@@ -1740,6 +1708,55 @@ mod tests {
     }
     fn has(out: &egui::FullOutput, role: Role, text: &str) -> bool {
         !nodes(out, role, text).is_empty()
+    }
+
+    #[test]
+    fn cards_on_a_line_take_the_height_of_the_tallest_in_both_kinds_of_line() {
+        let titles = ["Um", "Dois", "Três", "Quatro"];
+        // Conteúdos de alturas diferentes: 20, 50, 80 e 110.
+        let content = |i: usize| 20. + 30. * i as f32;
+        let kpi = egui::Margin {
+            left: 16,
+            right: 16,
+            top: 14,
+            bottom: 12,
+        };
+        // (caso, linhas, margem): os indicadores em 2 + 2 e a linha de baixo.
+        for (case, lines, margin) in [
+            ("kpis", kpi_lines(594.), kpi),
+            (
+                "bottom",
+                flex_lines(1084., &[(420., 3.), (300., 2.)], GAP),
+                egui::Margin::ZERO,
+            ),
+        ] {
+            let count: usize = lines.iter().map(Vec::len).sum();
+            let ctx = context(egui::Theme::Dark);
+            let out = run_sized(&ctx, WIDE, vec![], |ui| {
+                cards(ui, &titles[..count], lines.clone(), margin, |ui, i| {
+                    ui.allocate_exact_size(vec2(10., content(i)), Sense::hover());
+                });
+            });
+            for line in &lines {
+                let heights: Vec<f32> = line
+                    .iter()
+                    .map(|&(i, _)| pane(&out, titles[i]).height())
+                    .collect();
+                let sizes: Vec<f32> = line.iter().map(|&(i, _)| content(i)).collect();
+                let tallest = sizes.iter().copied().fold(0., f32::max);
+                assert!(
+                    sizes.iter().any(|&s| s < tallest),
+                    "{case}: precondition, the contents differ: {sizes:?}"
+                );
+                assert!(
+                    heights.iter().all(|h| (h - heights[0]).abs() < 0.5),
+                    "{case}: same line, same height: {heights:?}"
+                );
+                // O mais baixo cresceu até o conteúdo mais alto e as margens.
+                let room = tallest + f32::from(margin.top) + f32::from(margin.bottom);
+                assert!(heights[0] >= room, "{case}: {heights:?} / {room}");
+            }
+        }
     }
 
     #[test]

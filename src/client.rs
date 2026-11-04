@@ -7,6 +7,9 @@ use serde_json::Value;
 use std::{fmt, io::Read, time::Duration};
 
 pub const RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;
+/// Prazo de uma requisição, conexão incluída, quando ela não pede outro (as
+/// escritas, o MCP e o download pedem mais).
+pub const TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -92,7 +95,7 @@ impl Connection {
         config.validate().map_err(Error::Invalid)?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(12))
+            .timeout(TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .retry(reqwest::retry::never())
