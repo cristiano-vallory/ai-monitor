@@ -108,7 +108,8 @@ pub struct Load {
 /// Propostas pendentes do projeto vigiado (Ajustes › Barra de menus).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Proposals {
-    /// Sem leitura da saúde.
+    /// Sem leitura da saúde: nenhuma coleta terminou ainda (ou nenhuma
+    /// leitura foi passada).
     Waiting,
     NoProject,
     /// `pending` = `None`: desconhecido (atrasada, recusada, de outro projeto).
@@ -138,6 +139,11 @@ pub struct MenuReading {
 }
 
 impl MenuReading {
+    /// A leitura provisória, antes de qualquer dado (ou com os locks
+    /// ocupados no começo): o menu já tem texto em todas as linhas.
+    pub fn waiting(now: DateTime<Utc>) -> Self {
+        Self::from_snapshot(&ResourceSnapshot::default(), "ai-memory", 2, now)
+    }
     pub fn from_snapshot(
         snapshot: &ResourceSnapshot,
         container: &str,
@@ -195,12 +201,13 @@ impl MenuReading {
                 .and(a.handoff_total)
         });
         self.proposals = match (health, &config.proposal_watch) {
-            (None, _) => Proposals::Waiting,
             (Some(_), None) => Proposals::NoProject,
-            (Some(health), Some(scope)) => Proposals::Watched {
+            // Antes da 1ª coleta da saúde, "aguardando", não "—".
+            (Some(health), Some(scope)) if health.at.is_some() => Proposals::Watched {
                 scope: scope.label(),
                 pending: health.watched_pending(scope, now),
             },
+            _ => Proposals::Waiting,
         };
         self
     }
@@ -1119,6 +1126,22 @@ mod tests {
                 watching(),
                 "Propostas: aguardando".into(),
             ),
+            (
+                "before the 1st health collection",
+                Some(crate::health::Snapshot {
+                    pending_scope: Some(scope()),
+                    pending: Some(3),
+                    ..Default::default()
+                }),
+                watching(),
+                "Propostas: aguardando".into(),
+            ),
+            (
+                "no project before the 1st collection",
+                Some(crate::health::Snapshot::default()),
+                Config::default(),
+                "Propostas: selecione um projeto em Ajustes".into(),
+            ),
         ] {
             let reading = base().with_context(None, health.as_ref(), &config, now);
             assert_eq!(label_of(&reading, "review"), want, "{case}");
@@ -1324,13 +1347,40 @@ mod tests {
     }
 
     #[test]
+    fn the_provisional_reading_already_says_something_on_every_line() {
+        let flat = flats(&MenuReading::waiting(Utc::now()));
+        let shown: Vec<&str> = flat
+            .iter()
+            .filter(|f| f.visible && !f.separator)
+            .map(|f| f.label.as_str())
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "AI Monitor · aguardando a primeira coleta",
+                "ai-memory · indisponível",
+                "Docker · indisponível",
+                "Handoffs abertos: —",
+                "Propostas: aguardando",
+                "Abrir painel",
+                "Saúde do ai-memory",
+                "Revisar propostas…",
+                "Ajustes…",
+                "Sair do AI Monitor",
+            ]
+        );
+        assert!(!flat[3].visible, "no alert band yet");
+    }
+
+    #[test]
     fn print_menu_is_the_flat_menu_of_a_reading_without_data() {
         for (config, proposals) in [
             (
                 Config::default(),
                 "Propostas: selecione um projeto em Ajustes",
             ),
-            (watching(), "Propostas: — · acme / api-pagamentos"),
+            // A saúde ainda sem leitura: aguardando, não "—".
+            (watching(), "Propostas: aguardando"),
         ] {
             let json: serde_json::Value = serde_json::from_str(&print_menu(&config)).unwrap();
             let rows = json.as_array().expect("an array");

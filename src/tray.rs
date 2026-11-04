@@ -154,20 +154,66 @@ fn symbolic_name(dot: bool) -> &'static str {
         "ai-monitor-symbolic"
     }
 }
-/// Onde gravar os ícones: `$XDG_RUNTIME_DIR/ai-monitor`; sem ele, o cache do
-/// usuário (`$XDG_CACHE_HOME` ou `~/.cache`). Só valem caminhos absolutos.
-/// Sem os dois, nenhum: um caminho previsível no /tmp compartilhado seguiria
-/// symlinks de outro usuário (CWE-377/CWE-59), e a bandeja fica no pixmap.
+/// Uma pasta em que só o usuário efetivo grava: dele (`uid` = `euid`) e sem
+/// os bits de `mask` (0o022: escrita de grupo e outros; o runtime dir do XDG
+/// pede 0700, então 0o077).
+fn private(uid: u32, mode: u32, euid: u32, mask: u32) -> bool {
+    uid == euid && mode & mask == 0
+}
+fn private_dir(meta: &std::fs::Metadata, mask: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid não falha nem tem pré-condições.
+    meta.is_dir() && private(meta.uid(), meta.mode(), unsafe { libc::geteuid() }, mask)
+}
+/// Onde gravar os ícones: `$XDG_RUNTIME_DIR/ai-monitor`; senão, o cache do
+/// usuário (`$XDG_CACHE_HOME`, senão `~/.cache`). Cada candidato tem de ser
+/// absoluto, existir e ser privado (`private_dir`); senão vale o próximo. Sem
+/// nenhum, `None` e só o pixmap: nunca o /tmp compartilhado nem uma pasta
+/// em que outro usuário grave (seguiria symlinks dele: CWE-377/CWE-59).
 fn icon_base(
     runtime: Option<OsString>,
     cache: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
     let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
-    absolute(runtime)
-        .or_else(|| absolute(cache))
-        .or_else(|| absolute(home).map(|h| h.join(".cache")))
+    let trusted = |dir: Option<PathBuf>, mask: u32| {
+        dir.filter(|d| std::fs::metadata(d).is_ok_and(|m| private_dir(&m, mask)))
+    };
+    trusted(absolute(runtime), 0o077)
+        .or_else(|| trusted(absolute(cache), 0o022))
+        .or_else(|| trusted(absolute(home).map(|h| h.join(".cache")), 0o022))
         .map(|dir| dir.join("ai-monitor"))
+}
+/// Uma subpasta nossa: criada 0700 se faltar e conferida sem seguir symlink
+/// (`symlink_metadata`: um symlink no lugar dela não é pasta).
+fn private_subdir(dir: &Path) -> Option<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    private_dir(&meta, 0o022).then_some(())
+}
+/// Grava `name` em `dir` sem seguir um symlink no lugar do arquivo: um
+/// temporário novo (`create_new`, O_EXCL, nunca segue symlink) e `rename`,
+/// que troca o próprio nome (um symlink ali some; o alvo dele, não).
+fn write_icon(dir: &Path, name: &str, svg: &str) -> Option<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let tmp = dir.join(format!(".{name}.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(svg.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, dir.join(name)));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.ok()
 }
 /// Grava os dois ícones simbólicos em `base/icons` (no tema hicolor e soltos,
 /// para hosts que não leem o tema) e devolve esse `IconThemePath`; `None`
@@ -175,11 +221,24 @@ fn icon_base(
 /// do caminho tem de ser `icons`: o Plasma só acha o tema assim.
 fn install_icons(base: &Path) -> Option<PathBuf> {
     let root = base.join("icons");
-    for dir in [root.join("hicolor/scalable/status"), root.clone()] {
-        std::fs::create_dir_all(&dir).ok()?;
+    let themed = root.join("hicolor/scalable/status");
+    // De `base` (o `ai-monitor` sob o candidato) para dentro, um trecho por vez.
+    for dir in [
+        base.to_path_buf(),
+        root.clone(),
+        root.join("hicolor"),
+        root.join("hicolor/scalable"),
+        themed.clone(),
+    ] {
+        private_subdir(&dir)?;
+    }
+    for dir in [&themed, &root] {
         for dot in [false, true] {
-            let file = dir.join(format!("{}.svg", symbolic_name(dot)));
-            std::fs::write(file, symbolic_svg(dot)).ok()?;
+            write_icon(
+                dir,
+                &format!("{}.svg", symbolic_name(dot)),
+                &symbolic_svg(dot),
+            )?;
         }
     }
     Some(root)
@@ -260,15 +319,29 @@ fn current_reading(shared: &Shared) -> Option<MenuReading> {
     crate::menu::read(shared, Utc::now()).map(|(reading, _)| reading)
 }
 
+/// A leitura que a bandeja mostra. Começa com exatamente a leitura com que
+/// a bandeja foi construída; uma nova só é publicada se difere dela.
+struct Published(MenuReading);
+impl Published {
+    fn next(&mut self, reading: MenuReading) -> Option<MenuReading> {
+        if reading == self.0 {
+            return None;
+        }
+        self.0 = reading.clone();
+        Some(reading)
+    }
+}
+
 pub fn start(
     shared: &Arc<Shared>,
     control: &Arc<Control>,
 ) -> Option<ksni::blocking::Handle<AiTray>> {
     // O Handle precisa ficar vivo: ao ser descartado a bandeja sai do ar.
     use ksni::blocking::TrayMethods;
-    let reading = current_reading(shared).unwrap_or_else(|| {
-        MenuReading::from_snapshot(&Default::default(), "ai-memory", 2, Utc::now())
-    });
+    let reading = current_reading(shared).unwrap_or_else(|| MenuReading::waiting(Utc::now()));
+    // O worker parte da mesma leitura, não de uma segunda: se esta foi a
+    // provisória, a 1ª leitura real sai no próximo tique.
+    let mut published = Published(reading.clone());
     let base = icon_base(
         std::env::var_os("XDG_RUNTIME_DIR"),
         std::env::var_os("XDG_CACHE_HOME"),
@@ -286,7 +359,6 @@ pub fn start(
     let trace = std::env::args().any(|a| a == "--trace-menu");
     thread::spawn(move || {
         let mut remaining = if trace { 120u32 } else { 0 };
-        let mut last = current_reading(&shared);
         loop {
             if shared.stop.load(Ordering::Relaxed) {
                 break;
@@ -295,14 +367,12 @@ pub fn start(
             let Some(reading) = current_reading(&shared) else {
                 continue;
             };
-            if last.as_ref() != Some(&reading) {
-                let next = reading.clone();
+            if let Some(next) = published.next(reading) {
                 worker.update(|t| t.reading = next);
-                last = Some(reading);
             }
             if remaining > 0 {
                 remaining -= 1;
-                let r = last.as_ref().unwrap();
+                let r = &published.0;
                 println!(
                     "{}",
                     serde_json::json!({
@@ -705,52 +775,256 @@ mod tests {
         assert!(!tray.icon_pixmap().is_empty(), "the pixmap stays");
     }
 
+    fn mkdir(path: &Path, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path.to_path_buf()
+    }
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).unwrap().mode() & 0o7777
+    }
+
     #[test]
-    fn the_icons_go_to_the_runtime_dir_else_the_cache_else_nowhere() {
-        let os = |s: &str| Some(OsString::from(s));
-        let at = |s: &str| Some(PathBuf::from(s));
-        for (case, runtime, cache, home, want) in [
+    fn private_needs_the_owner_and_no_write_by_others() {
+        // (dono, modo, uid efetivo, máscara, privada?)
+        for (uid, mode, euid, mask, want) in [
+            (1000, 0o700, 1000, 0o077, true),
+            (1000, 0o40700, 1000, 0o077, true),
+            (1000, 0o755, 1000, 0o022, true),
+            (1000, 0o755, 1000, 0o077, false),
+            (1000, 0o750, 1000, 0o077, false),
+            (1000, 0o720, 1000, 0o022, false),
+            (1000, 0o702, 1000, 0o022, false),
+            (1000, 0o777, 1000, 0o022, false),
+            (1000, 0o41777, 1000, 0o022, false),
+            // Outro dono, mesmo com o modo certo.
+            (0, 0o700, 1000, 0o077, false),
+            (1001, 0o700, 1000, 0o022, false),
+        ] {
+            assert_eq!(
+                private(uid, mode, euid, mask),
+                want,
+                "uid {uid} mode {mode:o} euid {euid} mask {mask:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_icons_go_to_a_private_runtime_dir_else_a_private_cache_else_nowhere() {
+        let dir = TempDir::new("icon-base");
+        mkdir(&dir.0, 0o700);
+        let run = mkdir(&dir.0.join("run"), 0o700);
+        let run_750 = mkdir(&dir.0.join("run-750"), 0o750);
+        let open = mkdir(&dir.0.join("open"), 0o777);
+        let cache = mkdir(&dir.0.join("cache"), 0o755);
+        let home = mkdir(&dir.0.join("home"), 0o755);
+        mkdir(&home.join(".cache"), 0o700);
+        let file = dir.0.join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let missing = dir.0.join("missing");
+        let os = |p: &Path| Some(p.as_os_str().to_owned());
+        let raw = |s: &str| Some(OsString::from(s));
+        let at = |p: &Path| Some(p.join("ai-monitor"));
+        // O mesmo diretório por um caminho relativo (a partir do diretório
+        // atual), que existe e é privado: o XDG manda ignorá-lo mesmo assim.
+        let up: PathBuf = std::env::current_dir()
+            .unwrap()
+            .components()
+            .skip(1)
+            .map(|_| "..")
+            .collect();
+        let relative = |p: &Path| Some(up.join(p.strip_prefix("/").unwrap()).into_os_string());
+        assert!(
+            std::fs::metadata(up.join(run.strip_prefix("/").unwrap())).is_ok(),
+            "precondition: the relative path reaches the folder"
+        );
+        for (case, runtime, xdg_cache, home_dir, want) in [
+            ("runtime", os(&run), os(&cache), os(&home), at(&run)),
             (
-                "runtime",
-                os("/run/user/1000"),
-                os("/c"),
-                os("/h"),
-                at("/run/user/1000/ai-monitor"),
+                "runtime 0750: not 0700",
+                os(&run_750),
+                os(&cache),
+                os(&home),
+                at(&cache),
             ),
             (
-                "no runtime: cache",
-                None,
-                os("/c"),
-                os("/h"),
-                at("/c/ai-monitor"),
+                "runtime open to all",
+                os(&open),
+                os(&cache),
+                os(&home),
+                at(&cache),
             ),
             (
-                "empty runtime",
-                os(""),
-                os("/c"),
-                os("/h"),
-                at("/c/ai-monitor"),
+                "runtime missing",
+                os(&missing),
+                os(&cache),
+                os(&home),
+                at(&cache),
             ),
+            (
+                "runtime is a file",
+                os(&file),
+                os(&cache),
+                os(&home),
+                at(&cache),
+            ),
+            ("no runtime", None, os(&cache), os(&home), at(&cache)),
+            ("empty runtime", raw(""), os(&cache), os(&home), at(&cache)),
             (
                 "relative runtime",
-                os("run"),
+                raw("run"),
                 None,
-                os("/h"),
-                at("/h/.cache/ai-monitor"),
+                os(&home),
+                at(&home.join(".cache")),
             ),
             (
-                "relative cache: home",
+                "cache open to all",
                 None,
-                os("c"),
-                os("/h"),
-                at("/h/.cache/ai-monitor"),
+                os(&open),
+                os(&home),
+                at(&home.join(".cache")),
             ),
-            // Nunca o /tmp compartilhado: sem diretório do usuário, nada.
+            (
+                "relative cache",
+                None,
+                raw("c"),
+                os(&home),
+                at(&home.join(".cache")),
+            ),
+            ("home without .cache", None, None, os(&cache), None),
+            ("all open to all", os(&open), os(&open), os(&open), None),
             ("nothing", None, None, None, None),
-            ("relative home", None, None, os("h"), None),
-            ("only relative", os("r"), os("c"), os("h"), None),
+            ("only relative", raw("r"), raw("c"), raw("h"), None),
+            (
+                "relative runtime that exists",
+                relative(&run),
+                os(&cache),
+                os(&home),
+                at(&cache),
+            ),
+            (
+                "relative cache that exists",
+                None,
+                relative(&cache),
+                os(&home),
+                at(&home.join(".cache")),
+            ),
+            (
+                "relative home that exists",
+                None,
+                None,
+                relative(&home),
+                None,
+            ),
         ] {
-            assert_eq!(icon_base(runtime, cache, home), want, "{case}");
+            assert_eq!(icon_base(runtime, xdg_cache, home_dir), want, "{case}");
         }
+    }
+
+    #[test]
+    fn the_folders_we_create_are_0700_and_an_open_one_is_refused() {
+        let dir = TempDir::new("icons-mode");
+        mkdir(&dir.0, 0o700);
+        let base = dir.0.join("ai-monitor");
+        let icons = install_icons(&base).expect("written");
+        for created in [
+            base.clone(),
+            icons.clone(),
+            icons.join("hicolor"),
+            icons.join("hicolor/scalable"),
+            icons.join("hicolor/scalable/status"),
+        ] {
+            assert_eq!(mode_of(&created), 0o700, "{}", created.display());
+        }
+        // Uma subpasta nossa aberta a todos (por outra mão): nada é gravado.
+        mkdir(&icons.join("hicolor"), 0o777);
+        assert_eq!(install_icons(&base), None);
+    }
+
+    #[test]
+    fn a_symlink_in_place_of_a_subfolder_is_refused() {
+        use std::os::unix::fs::symlink;
+        for link in ["", "icons", "icons/hicolor/scalable/status"] {
+            let dir = TempDir::new("icons-sublink");
+            mkdir(&dir.0, 0o700);
+            // O alvo é privado e nosso: só o symlink no caminho já recusa.
+            let elsewhere = mkdir(&dir.0.join("elsewhere"), 0o700);
+            let base = dir.0.join("ai-monitor");
+            let at = if link.is_empty() {
+                base.clone()
+            } else {
+                base.join(link)
+            };
+            mkdir(at.parent().unwrap(), 0o700);
+            symlink(&elsewhere, &at).unwrap();
+            assert_eq!(install_icons(&base), None, "symlink at {link:?}");
+            assert_eq!(
+                std::fs::read_dir(&elsewhere).unwrap().count(),
+                0,
+                "{link:?}: nothing written through the link"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlink_in_place_of_an_icon_is_replaced_and_its_target_kept() {
+        use std::os::unix::fs::symlink;
+        let dir = TempDir::new("icons-filelink");
+        mkdir(&dir.0, 0o700);
+        let base = dir.0.join("ai-monitor");
+        let icons = install_icons(&base).expect("first install");
+        let target = dir.0.join("outside.txt");
+        std::fs::write(&target, "keep").unwrap();
+        let themed = icons.join("hicolor/scalable/status/ai-monitor-symbolic.svg");
+        std::fs::remove_file(&themed).unwrap();
+        symlink(&target, &themed).unwrap();
+        // E um symlink pendente: seguir criaria o alvo.
+        let loose = icons.join("ai-monitor-alert-symbolic.svg");
+        std::fs::remove_file(&loose).unwrap();
+        let nowhere = dir.0.join("nowhere.svg");
+        symlink(&nowhere, &loose).unwrap();
+        assert_eq!(install_icons(&base), Some(icons.clone()));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        assert!(!nowhere.exists(), "the dangling link was not followed");
+        for (file, dot) in [(&themed, false), (&loose, true)] {
+            assert!(
+                std::fs::symlink_metadata(file).unwrap().is_file(),
+                "{}",
+                file.display()
+            );
+            assert_eq!(std::fs::read_to_string(file).unwrap(), symbolic_svg(dot));
+        }
+        // Sem temporários sobrando.
+        let mut names: Vec<String> = std::fs::read_dir(icons.join("hicolor/scalable/status"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["ai-monitor-alert-symbolic.svg", "ai-monitor-symbolic.svg"]
+        );
+    }
+
+    #[test]
+    fn the_worker_publishes_the_first_real_reading_after_the_provisional_one() {
+        let now = Utc::now();
+        let provisional = MenuReading::waiting(now);
+        let real = alerting();
+        assert_ne!(real, provisional, "precondition");
+        // A bandeja foi construída com a provisória (lock ocupado).
+        let mut published = Published(provisional.clone());
+        assert_eq!(published.next(provisional), None, "the same: nothing");
+        assert_eq!(
+            published.next(real.clone()),
+            Some(real.clone()),
+            "the real one"
+        );
+        // A seguinte, igual: não republica, e a mostrada é a real.
+        assert_eq!(published.next(real.clone()), None);
+        assert_eq!(published.0, real);
+        assert_eq!(published.next(empty()), Some(empty()), "a change");
     }
 }

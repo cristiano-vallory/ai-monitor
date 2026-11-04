@@ -181,14 +181,17 @@ mod native {
             unsafe { msg_send![super(this), init] }
         }
         fn refresh(&self) {
-            let state = self.ivars();
-            let mtm = self.mtm();
-            let now = Utc::now();
             // Never wait for a collector or a configuration change on AppKit:
             // a busy lock skips the tick and keeps the last reading.
-            let Some((reading, mode)) = menu::read(&state.shared, now) else {
+            let Some((reading, mode)) = menu::read(&self.ivars().shared, Utc::now()) else {
                 return;
             };
+            self.apply(reading, mode);
+        }
+        /// Shows `reading` on the item and in the menu (only what changed).
+        fn apply(&self, reading: MenuReading, mode: BarMode) {
+            let state = self.ivars();
+            let mtm = self.mtm();
             let current = (reading, mode, dark(mtm));
             let Some(button) = state.status.button(mtm) else {
                 return;
@@ -659,9 +662,9 @@ mod native {
             menu.setAutoenablesItems(false);
             // Sem a coluna de marcação: o texto começa onde começam as views.
             menu.setShowsStateColumn(false);
-            // A estrutura vem de uma leitura vazia; `refresh` aplica a real.
+            // A estrutura vem da leitura provisória; `refresh` aplica a real.
             let mut actions = Vec::new();
-            let empty = MenuReading::from_snapshot(&Default::default(), "ai-memory", 2, Utc::now());
+            let empty = MenuReading::waiting(Utc::now());
             let rows: Vec<Native> = menu::entries(&empty)
                 .iter()
                 .map(|entry| build(mtm, entry, &mut actions))
@@ -710,6 +713,15 @@ mod native {
             };
             NSApplication::sharedApplication(mtm)
                 .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            // A provisória primeiro: com um lock ocupado no 1º tique, o menu
+            // já tem nome nas métricas e estado no cabeçalho.
+            let mode = actions
+                .ivars()
+                .shared
+                .config
+                .try_read()
+                .map_or(BarMode::default(), |c| c.bar_mode);
+            actions.apply(empty, mode);
             actions.refresh();
             // Keep real-time sampling eligible while the dashboard is hidden,
             // without preventing display sleep or normal system sleep.

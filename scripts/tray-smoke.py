@@ -12,8 +12,10 @@ prints (src/menu.rs), compared with the dbusmenu layout.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import gi
@@ -332,8 +334,12 @@ def scenario_with_watcher(binary):
     conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     watcher = FakeWatcher(conn)
     pump(0.5)  # let the well-known names be owned before the client connects
+    # A session's private runtime dir (logind gives one, 0700): without a
+    # private folder the app writes no SVG and keeps the pixmap only.
+    runtime = tempfile.mkdtemp(prefix="ai-monitor-smoke-")
+    env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
     proc = subprocess.Popen(
-        [binary], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        [binary], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env
     )
     try:
         check(
@@ -365,7 +371,9 @@ def scenario_with_watcher(binary):
         svg = os.path.join(path, "hicolor", "scalable", "status", f"{name}.svg")
         check(
             "IconName is a written symbolic SVG",
-            name.endswith("-symbolic") and os.path.isfile(svg),
+            name.endswith("-symbolic")
+            and path.startswith(runtime + os.sep)
+            and os.path.isfile(svg),
             f"name={name!r} path={path!r}",
         )
 
@@ -459,7 +467,9 @@ def scenario_with_watcher(binary):
         )
 
         # Second instance: forwards Show and exits 0; first reopens.
-        second = subprocess.run([binary], capture_output=True, text=True, timeout=15)
+        second = subprocess.run(
+            [binary], capture_output=True, text=True, timeout=15, env=env
+        )
         check("second instance exits 0", second.returncode == 0, second.stderr[:300])
         check(
             "second instance reopened the dashboard",
@@ -481,6 +491,7 @@ def scenario_with_watcher(binary):
         stderr = proc.stderr.read() if proc.stderr else ""
         if stderr.strip():
             print("app stderr:", stderr.strip()[:500], flush=True)
+        shutil.rmtree(runtime, ignore_errors=True)
 
 
 _menu_cache = {}
