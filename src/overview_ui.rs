@@ -545,7 +545,9 @@ struct Kpi {
 }
 fn kpi_list(d: &Data<'_>, minutes: i64) -> [Kpi; 4] {
     let r = d.resources;
-    let ai = r.ai_usage(&d.config.container);
+    // Uma medida só do ai-memory por frame: o valor e a amostra (`others`).
+    let measure = r.ai_measure(&d.config.container);
+    let ai = measure.as_ref().map(|(usage, _)| usage.clone());
     let samples = window(d.history, minutes);
     let ai_values = |m: Metric| -> Vec<f64> {
         samples
@@ -561,7 +563,7 @@ fn kpi_list(d: &Data<'_>, minutes: i64) -> [Kpi; 4] {
         .map(|v| bytes(v as u64));
     let docker = r.at.is_some() && r.docker_error.is_none();
     // A mesma conta do gráfico (`stack`), na coleta atual.
-    let others = r.sample(&d.config.container).and_then(|s| {
+    let others = r.sample_of(measure).and_then(|s| {
         let cpu = stack(&s, Metric::Cpu).1?;
         let memory = stack(&s, Metric::Memory).1?;
         Some(format!("{}% · {}", decimal(cpu, 1), bytes(memory as u64)))
