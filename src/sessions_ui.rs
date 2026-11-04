@@ -1269,15 +1269,18 @@ fn sessions_table(ui: &mut Ui, api: &ApiSnapshot, rows: &[&Session], top: bool) 
                         ui.spacing_mut().item_spacing.y = 0.;
                         ui.add_space(((TABLE_ROW - two_lines) / 2.).max(0.));
                         cell_text(ui, short_project(&s.scope)).on_hover_text(&s.scope);
-                        ui.add(
+                        let id = ui.add(
                             Label::new(
                                 RichText::new(short_id(&s.session_id))
                                     .font(Type::Mono.font())
                                     .color(p.text2),
                             )
                             .truncate(),
-                        )
-                        .on_hover_text(s.cwd.as_deref().unwrap_or(""));
+                        );
+                        // Sem pasta (ausente ou vazia), sem tooltip.
+                        if let Some(cwd) = s.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+                            id.on_hover_text(cwd);
+                        }
                     });
                 }
                 2 => {
@@ -2781,6 +2784,43 @@ mod tests {
             3,
             "unknown open, events and activity are —, not 0"
         );
+    }
+
+    #[test]
+    fn the_session_id_shows_its_folder_on_hover_and_no_tooltip_without_one() {
+        let now = Utc::now();
+        let folder = "/home/fixture/projetos/acme";
+        // (cwd, tooltip com a pasta?): ausente e vazio não mostram nada.
+        for (cwd, shown) in [(Some(folder), true), (None, false), (Some(""), false)] {
+            let mut api = collected(vec![]);
+            api.sessions = vec![Session {
+                session_id: "sessao-0000-0000-4000-8000-000000000000".into(),
+                agent_kind: "codex".into(),
+                started_at: at(now, 1),
+                cwd: cwd.map(Into::into),
+                scope: "acme / api".into(),
+                ..Default::default()
+            }];
+            let mut page = Page::new(egui::Theme::Dark, WIDE, api, now);
+            page.sessions.tab = Tab::Sessions;
+            let out = page.show();
+            let id = rect_of(&node(&out, Role::Label, "sessao-0000-0000-4"));
+            assert!(!has(&out, Role::Label, folder), "{cwd:?}: precondition");
+            // Repousa o ponteiro sobre o ID além do atraso do tooltip.
+            let mut out = page.frame(vec![Event::PointerMoved(id.center())]);
+            for _ in 0..45 {
+                out = page.show();
+            }
+            let tooltips = page.ctx.memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .iter()
+                    .filter(|l| l.order == egui::Order::Tooltip)
+                    .count()
+            });
+            assert_eq!(has(&out, Role::Label, folder), shown, "{cwd:?}");
+            assert_eq!(tooltips, usize::from(shown), "{cwd:?}: tooltips");
+        }
     }
 
     #[test]

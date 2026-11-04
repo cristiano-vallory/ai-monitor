@@ -24,7 +24,7 @@ impl MenuReading {
         now: DateTime<Utc>,
     ) -> Self {
         let age = snapshot.at.map(|at| (now - at).num_seconds().max(0));
-        let fresh = age.is_some_and(|age| age <= (interval.saturating_mul(3).max(10)) as i64);
+        let fresh = age.is_some_and(|age| !crate::app::is_late(age, interval));
         let ai = fresh.then(|| snapshot.ai_usage(container)).flatten();
         let docker = fresh.then(|| snapshot.docker_total()).flatten();
         Self {
@@ -517,6 +517,40 @@ mod tests {
                 .freshness
                 .contains("primeira")
         );
+    }
+    #[test]
+    fn samples_are_late_after_three_intervals_and_never_before_10_s() {
+        let now = Utc::now();
+        // (intervalo, idade, atrasada?): com 2 s, 3 × 2 = 6 fica abaixo do
+        // piso de 10 s; com 60 s, valem os 180.
+        for (interval, age, late) in [
+            (2, 6, false),
+            (2, 7, false),
+            (2, 10, false),
+            (2, 11, true),
+            (60, 180, false),
+            (60, 181, true),
+        ] {
+            let snapshot = ResourceSnapshot {
+                at: Some(now - chrono::Duration::seconds(age)),
+                ..snapshot()
+            };
+            let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", interval, now);
+            let (freshness, title) = if late {
+                (
+                    format!("Coleta atrasada: última atualização há {age} s"),
+                    "AI —% —  |  Docker —% —",
+                )
+            } else {
+                (
+                    format!("Recursos atualizados há {age} s"),
+                    "AI 235% 512M  |  Docker 247% 1,5G",
+                )
+            };
+            let case = format!("{interval} s, {age} s old");
+            assert_eq!(reading.freshness, freshness, "{case}");
+            assert_eq!(reading.title, title, "{case}");
+        }
     }
 
     #[test]

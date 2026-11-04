@@ -125,8 +125,9 @@
 //! - `details(ui, &[Fact::new(rótulo, valor)…])`: a variante do inspetor do
 //!   Docker: rótulos (12, text2) numa coluna da largura do maior e valores
 //!   (12, Regular, `cor` ou text; `.mono()` = `Type::Mono`) à esquerda, que
-//!   quebram linha em vez de cortar; linhas a 8, colunas a 14. AccessKit:
-//!   um `Label` "rótulo: valor" por linha.
+//!   quebram linha em vez de cortar; linhas a 8, colunas a 14. A dica de
+//!   `.hint(texto)` vai ao tooltip da linha. AccessKit: um `Label`
+//!   "rótulo: valor" por linha.
 //! - `tone(cor, alfa) -> Color32`: o tom translúcido de chips e faixas.
 //! - `chevron(painter, rect, aberto, cor)`: a seta fina dos recolhíveis (para
 //!   baixo se aberto), também a dos filtros (`ComboBox::icon`).
@@ -154,7 +155,7 @@
 //!   o conteúdo passa da área; sem transbordo, nenhuma. Nas listas e
 //!   tabelas, na página (`main-scroll`), nos detalhes, nas prévias e no
 //!   corpo de Ajustes. Chamar antes de montar a `ScrollArea`; o conteúdo
-//!   herda o estilo (a página principal o desfaz).
+//!   herda o estilo (a página principal e o corpo de Ajustes o desfazem).
 use crate::theme;
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Galley, Layout, Pos2, Rect, Response,
@@ -898,7 +899,8 @@ impl<'a> Fact<'a> {
         self.mono = true;
         self
     }
-    /// Dica da linha em `facts` (o texto bruto de uma data formatada).
+    /// Dica da linha em `facts` e `details` (o texto bruto de uma data
+    /// formatada).
     pub(crate) fn hint(mut self, hint: &'a str) -> Self {
         self.hint = Some(hint);
         self
@@ -992,7 +994,8 @@ pub(crate) fn facts(ui: &mut Ui, rows: &[Fact<'_>]) {
 /// coluna da largura do maior; valores (12, Regular, `cor` ou text;
 /// `.mono()` = `Type::Mono`) alinhados à esquerda, que quebram linha (em
 /// qualquer ponto, se preciso) em vez de cortar. Linhas a 8, colunas a 14.
-/// AccessKit: um `Label` "rótulo: valor" por linha.
+/// A dica (`.hint`) vai ao tooltip da linha. AccessKit: um `Label`
+/// "rótulo: valor" por linha.
 pub(crate) fn details(ui: &mut Ui, rows: &[Fact<'_>]) {
     let p = theme::palette(ui.visuals());
     let labels: Vec<Arc<Galley>> = rows
@@ -1026,6 +1029,10 @@ pub(crate) fn details(ui: &mut Ui, rows: &[Fact<'_>]) {
             ui.painter().galley(rect.min, label, p.text2);
             ui.painter()
                 .galley(pos2(rect.left() + column + 14., rect.top()), value, color);
+            // Nada corta aqui: o tooltip é só a dica, como em `facts`.
+            if let Some(hint) = fact.hint {
+                response.on_hover_text(hint);
+            }
         }
     });
 }
@@ -1662,8 +1669,10 @@ pub(crate) fn confirm_sheet(
                     // só a prévia encolhe, até `PREVIEW_MIN`; abaixo disso, o
                     // meio (fatos e prévia) rola, até sumir. `tail` é a
                     // medida do frame anterior (no 1º, o da medida da `Area`,
-                    // que não aparece).
-                    let tail_id = ui.id().with("tail");
+                    // que não aparece). Guardada pelo aviso e pelo alvo, que
+                    // decidem a altura: outra folha, aberta depois desta,
+                    // começa da medida dela (ou de 0), não da desta.
+                    let tail_id = ui.id().with(("tail", confirm.warning, confirm.typed));
                     let tail = ui.data(|d| d.get_temp::<f32>(tail_id)).unwrap_or(0.);
                     let body =
                         (area.bottom() - 16. - 18. - 28. - 14. - tail - 14. - ui.cursor().top())
@@ -2808,6 +2817,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_hint_in_details_shows_on_its_row_and_a_row_without_one_has_no_tooltip() {
+        let raw = "2026-11-03T19:03:14.938122Z";
+        let mut add = |ui: &mut Ui| {
+            details(
+                ui,
+                &[
+                    Fact::new("Criado", "03/11 19:03").hint(raw),
+                    Fact::new("Estado", "running"),
+                ],
+            );
+        };
+        let tooltips = |ctx: &egui::Context| {
+            ctx.memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .iter()
+                    .filter(|l| l.order == egui::Order::Tooltip)
+                    .count()
+            })
+        };
+        // (linha, a dica no tooltip?): cada uma num contexto novo.
+        for (row, hinted) in [("Criado: 03/11 19:03", true), ("Estado: running", false)] {
+            let ctx = context(egui::Theme::Dark);
+            let out = run(&ctx, vec![], &mut add);
+            let at = rect_of(&node(&out, Role::Label, row));
+            assert!(!texts(&out).iter().any(|(t, _)| t == raw), "precondition");
+            let shown = tooltip_at(&ctx, at.center(), &mut add);
+            assert_eq!(shown.contains(&raw.to_owned()), hinted, "{row}: {shown:?}");
+            assert_eq!(tooltips(&ctx), usize::from(hinted), "{row}: tooltips");
+        }
+    }
+
+    #[test]
     fn meter_and_stacked_bar_fill_by_value_over_a_line_track() {
         for (theme, p) in THEMES {
             let ctx = context(theme);
@@ -3793,6 +3835,56 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn in_a_short_window_the_preview_stops_at_its_minimum_and_the_middle_scrolls() {
+        for (theme, p) in THEMES {
+            let show = |height: f32| {
+                let ctx = context(theme);
+                let mut input = String::new();
+                let mut add = |ui: &mut Ui| {
+                    confirm_sheet(
+                        ui,
+                        &sheet_with(Some("acme / legado"), FIVE_MINUTES),
+                        &mut input,
+                        |ui| {
+                            for i in 0..200 {
+                                ui.label(format!("linha {i}"));
+                            }
+                        },
+                    );
+                };
+                // A barra aparece com uma animação curta.
+                let mut out = open(&ctx, [800., height], &mut add);
+                for _ in 0..10 {
+                    out = run_sized(&ctx, [800., height], vec![], &mut add);
+                }
+                out
+            };
+            // Numa janela alta a prévia fica no máximo: o resto da caixa
+            // (bordas, cabeçalho, margens) é a altura dela menos 240.
+            let chrome = preview_frame(&show(860.), p).height() - PREVIEW_HEIGHT;
+            // A 300, não sobra altura no meio para a prévia (sem o mínimo,
+            // ela mediria 0): fica no mínimo, e o meio rola.
+            let out = show(300.);
+            let preview = preview_frame(&out, p);
+            let content = preview.height() - chrome;
+            let case = format!("{theme:?}: the preview measures {content} in {preview:?}");
+            // ± 0,5: o egui arredonda as bordas da área ao pixel.
+            assert!((content - PREVIEW_MIN).abs() <= 0.5, "{case}");
+            let frame = rects(&out)
+                .into_iter()
+                .find(|r| r.corner_radius.se == 12 && r.corner_radius.nw == 0 && r.blur_width == 0.)
+                .expect("the sheet")
+                .rect;
+            let middle: Vec<Rect> =
+                scroll_handles(&out, frame.with_max_x(frame.right() - 23.), p.text2)
+                    .into_iter()
+                    .filter(|h| !preview.contains_rect(*h))
+                    .collect();
+            assert_eq!(middle.len(), 1, "{case}: the middle scrolls: {middle:?}");
+        }
+    }
+
     /// Os retângulos dos textos pintados dentro de `area`.
     fn texts_in(out: &egui::FullOutput, area: Rect) -> Vec<Rect> {
         text_rects(out)
@@ -3864,6 +3956,59 @@ pub(crate) mod tests {
                 .collect();
             assert_eq!(middle.len(), 1, "{case}: {middle:?}");
         }
+    }
+
+    #[test]
+    fn a_sheet_opened_after_another_starts_from_its_own_tail_not_the_last_one() {
+        // A: digitação e um aviso de cinco linhas (cauda alta). B: clique e
+        // um aviso de uma linha (cauda baixa).
+        let long = "Mover para um destino existente pode perder histórico no processo de copiar e excluir. Mesclar workspace pode aplicar parte dos projetos antes de falhar. Conflitos de páginas bloqueiam a operação; leases ativos não são forçados. Faça backup antes. A prévia por inventário não é uma simulação transacional.";
+        let a = Confirm {
+            warning: long,
+            ..sheet_with(Some("acme / legado"), FIVE_MINUTES)
+        };
+        let b = sheet_with(None, FIVE_MINUTES);
+        let size = [800., 560.];
+        let ctx = context(egui::Theme::Dark);
+        let mut input = String::new();
+        let mut show = |sheet: Option<&Confirm<'_>>| {
+            run_sized(&ctx, size, vec![], |ui| {
+                if let Some(sheet) = sheet {
+                    confirm_sheet(ui, sheet, &mut input, |ui| {
+                        for i in 0..200 {
+                            ui.label(format!("linha {i}"));
+                        }
+                    });
+                }
+            })
+        };
+        // A cauda: da faixa de aviso ao rodapé (14 acima do Cancelar). O meio
+        // acaba 14 acima da faixa.
+        let tail = |out: &egui::FullOutput, warning: &str| {
+            let strip = rect_of(&node(out, Role::Label, &format!("Atenção. {warning}")));
+            let cancel = rect_of(&node(out, Role::Button, "Cancelar"));
+            (strip.top(), cancel.top() - 14. - strip.top())
+        };
+        let mut out = show(Some(&a));
+        for _ in 0..10 {
+            out = show(Some(&a));
+        }
+        let (_, tail_a) = tail(&out, long);
+        // Fecha; a `Area` da folha guarda o estado e não mede de novo.
+        for _ in 0..3 {
+            show(None);
+        }
+        let first = tail(&show(Some(&b)), b.warning);
+        let mut out = show(Some(&b));
+        for _ in 0..10 {
+            out = show(Some(&b));
+        }
+        let settled = tail(&out, b.warning);
+        let case = format!("A {tail_a}, B first {first:?}, settled {settled:?}");
+        assert!(tail_a > settled.1 + 40., "precondition: {case}");
+        // A esta altura, com a cauda de B (ou 0) o meio cabe inteiro; com a
+        // de A, encolheria e a faixa subiria.
+        assert!((first.0 - settled.0).abs() <= 0.5, "{case}");
     }
 
     #[test]
