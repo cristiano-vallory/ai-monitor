@@ -518,10 +518,14 @@ impl ResourceSnapshot {
     /// A amostra do histórico desta coleta, com a origem do ai-memory
     /// (`name` = o contêiner monitorado); `None` antes da 1ª coleta.
     pub fn sample(&self, name: &str) -> Option<ResourceSample> {
-        let at = self.at?;
-        let ai = self.ai_measure(name);
+        self.at?;
+        self.sample_of(self.ai_measure(name))
+    }
+    /// `sample` com a medida do ai-memory já feita (`ai_measure`): quem
+    /// também mostra o uso mede uma vez só.
+    pub fn sample_of(&self, ai: Option<(Usage, bool)>) -> Option<ResourceSample> {
         Some(ResourceSample {
-            at,
+            at: self.at?,
             ai_in_docker: ai.as_ref().is_some_and(|&(_, in_docker)| in_docker),
             ai: ai.map(|(usage, _)| usage),
             docker: self.docker_total(),
