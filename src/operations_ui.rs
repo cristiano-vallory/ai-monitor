@@ -1,8 +1,9 @@
 use crate::{
     advanced::{self, Kind, Operation},
     client::Scope,
+    confirmation::Confirmation,
     local_service::{self, Backend, Kind as LocalKind},
-    maintenance::{Action, Confirmation, Intent, PREVIEW_TTL, Read, Receipt, Work, Worker},
+    maintenance::{Action, Intent, PREVIEW_TTL, Read, Receipt, Work, Worker},
     model::Project,
     monitor::Shared,
     theme,
@@ -203,7 +204,7 @@ impl Panel {
         }
         // A prévia vence pela idade do recibo, como a contagem da folha:
         // a folha fecha e o formulário destrava no mesmo frame.
-        if self.receipt.as_ref().is_some_and(|r| r.left().is_zero()) {
+        if self.receipt.as_ref().is_some_and(Receipt::expired) {
             self.clear();
             self.notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.".into();
         } else if self.result_at.is_some_and(|at| at.elapsed() > PREVIEW_TTL) {

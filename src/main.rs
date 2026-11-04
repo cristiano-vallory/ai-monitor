@@ -5,6 +5,7 @@ mod auth;
 mod client;
 #[cfg(any(target_os = "linux", test))]
 mod commands;
+mod confirmation;
 mod console;
 mod docker;
 mod docker_ui;

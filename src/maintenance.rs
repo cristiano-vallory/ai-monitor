@@ -1,6 +1,7 @@
 //! Explicit administrative intents. Every mutation follows a bound review receipt.
 use crate::{
     client::{Connection, Error, Scope, check_status, page_segments},
+    confirmation::Confirmation,
     model::Config,
     monitor::Shared,
     queries::Query,
@@ -88,15 +89,6 @@ pub enum Intent {
 }
 /// Validade de uma prévia: depois disso o recibo não executa e a folha fecha.
 pub const PREVIEW_TTL: Duration = Duration::from_secs(300);
-/// O que uma escrita pede antes de executar (Review.dc.html). Leitura não
-/// pede nada: os `confirmation()` devolvem `None`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Confirmation {
-    /// Um clique no botão final basta.
-    Click,
-    /// O botão final só habilita com este texto digitado, exato.
-    Type(String),
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Action {
     pub scope: Scope,
@@ -699,11 +691,16 @@ impl Receipt {
     pub fn left(&self) -> Duration {
         PREVIEW_TTL.saturating_sub(self.at.elapsed())
     }
+    /// A prévia venceu: não falta nada (`left`). A contagem da folha, os
+    /// painéis e o envio vencem juntos, por aqui.
+    pub fn expired(&self) -> bool {
+        self.left().is_zero()
+    }
     fn validate(&self, shared: &Shared) -> Result<(), Error> {
         if shared.generation.load(Ordering::Acquire) != self.generation {
             return Err(Error::Cancelled);
         }
-        if self.at.elapsed() > PREVIEW_TTL {
+        if self.expired() {
             return Err(Error::Invalid(
                 "A prévia expirou. Prepare a operação novamente.".into(),
             ));
@@ -765,6 +762,14 @@ impl Worker {
                     match job.work {
                         Work::Read(read) => read.execute(&client),
                         Work::Preview(mut action) => {
+                            // O motivo sem os espaços em volta (só espaços =
+                            // nenhum): a validação, a folha e o corpo leem o
+                            // mesmo texto, o do recibo.
+                            if let Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } =
+                                &mut action.intent
+                            {
+                                *reason = reason.trim().to_owned();
+                            }
                             let v = action.preview(&client, cancelled)?;
                             if cancelled() {
                                 return Err(Error::Cancelled);
@@ -923,10 +928,11 @@ mod tests {
             generation: 0,
             at: Instant::now() - Duration::from_secs(301),
         };
-        assert!(
-            worker
-                .submit(1, &shared, Work::Apply(receipt.clone()))
-                .is_err()
+        assert_eq!(
+            worker.submit(1, &shared, Work::Apply(receipt.clone())),
+            Err(Error::Invalid(
+                "A prévia expirou. Prepare a operação novamente.".into()
+            ))
         );
         shared.apply(mock.config());
         let receipt = Receipt {
@@ -963,6 +969,114 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].body["confirm"], true);
         assert_eq!(r[0].body["older_than_days"], 14);
+    }
+    #[test]
+    fn the_reason_goes_trimmed_blank_goes_empty_and_500_counts_after_the_trim() {
+        // Servidor sintético: a proposta p-1 pendente e a comparação dela, a
+        // página notes/a.md, o MCP e, no resto (a rejeição), 200.
+        let mock = Mock::new(|r| {
+            let path = r.path.as_str();
+            if path.starts_with("/admin/pending-writes/p-1/diff?") {
+                Response::json(200, json!({"diff": "a -> b", "proposal_id": "p-1"}))
+            } else if path.starts_with("/admin/pending-writes/p-1?") {
+                Response::json(200, json!({"summary": {"id": "p-1", "status": "pending"}}))
+            } else if path.ends_with("/pages/notes/a.md") {
+                Response::json(
+                    200,
+                    json!({"workspace": "synthetic team", "project": "demo", "path": "notes/a.md",
+                           "id": "v1", "body_markdown": "corpo", "links": [], "backlinks": []}),
+                )
+            } else if path == "/mcp" && r.body["method"] == "initialize" {
+                Response::json(
+                    200,
+                    json!({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05"}}),
+                )
+            } else if path == "/mcp" {
+                Response::json(
+                    200,
+                    json!({"jsonrpc": "2.0", "id": 2, "result": {"structuredContent": {"ok": true}}}),
+                )
+            } else {
+                Response::json(200, json!({"ok": true}))
+            }
+        });
+        let shared = Shared::unstarted(mock.config());
+        let worker = Worker::new(shared.clone());
+        let mut ticket = 0;
+        // A prévia e, aceita, a aplicação do recibo, como na tela: devolve o
+        // motivo do recibo (o da folha) e o que chegou ao servidor.
+        let mut send = |intent: Intent| -> Result<(String, Value), Error> {
+            ticket += 1;
+            worker
+                .submit(ticket, &shared, Work::Preview(action(intent)))
+                .unwrap();
+            let reply = worker.replies.recv_timeout(Duration::from_secs(5)).unwrap();
+            reply.result?;
+            let receipt = reply.receipt.expect("a preview brings its receipt");
+            let kept = match &receipt.action.intent {
+                Intent::Reject { reason, .. } | Intent::Feedback { reason, .. } => reason.clone(),
+                other => panic!("{other:?}"),
+            };
+            let before = mock.requests().len();
+            ticket += 1;
+            worker
+                .submit(ticket, &shared, Work::Apply(receipt))
+                .unwrap();
+            let reply = worker.replies.recv_timeout(Duration::from_secs(5)).unwrap();
+            reply.result.unwrap();
+            let sent = mock.requests().split_off(before).into_iter().find_map(|r| {
+                if r.path.contains("/p-1/reject?") {
+                    Some(r.body["reason"].clone())
+                } else if r.body["method"] == "tools/call" {
+                    Some(r.body["params"]["arguments"]["reason"].clone())
+                } else {
+                    None
+                }
+            });
+            Ok((kept, sent.expect("the apply reached the server")))
+        };
+        let long = "x".repeat(500);
+        // (motivo digitado, o que chega; `None` = a prévia recusa)
+        let cases = [
+            ("  texto  ".to_owned(), Some("texto")),
+            ("\ttexto\n".to_owned(), Some("texto")),
+            ("texto".to_owned(), Some("texto")),
+            ("   ".to_owned(), Some("")),
+            (String::new(), Some("")),
+            (format!("  {long}  "), Some(long.as_str())),
+            (format!("  {long}x  "), None),
+        ];
+        for (typed, want) in &cases {
+            for (kind, intent, refused) in [
+                (
+                    "Reject",
+                    Intent::Reject {
+                        id: "p-1".into(),
+                        reason: typed.clone(),
+                    },
+                    "Motivo limitado a 500 caracteres.",
+                ),
+                (
+                    "Feedback",
+                    Intent::Feedback {
+                        path: "notes/a.md".into(),
+                        signal: "helpful".into(),
+                        reason: typed.clone(),
+                    },
+                    "Feedback inválido ou motivo acima de 500 caracteres.",
+                ),
+            ] {
+                let case = format!("{kind} {typed:?}");
+                match (send(intent), want) {
+                    (Ok((kept, sent)), Some(want)) => {
+                        assert_eq!(kept, *want, "{case}: the receipt (the sheet)");
+                        assert_eq!(sent, json!(want), "{case}: the body");
+                    }
+                    (Err(e), None) => assert_eq!(e, Error::Invalid(refused.into()), "{case}"),
+                    (got, _) => panic!("{case}: {got:?}"),
+                }
+            }
+        }
     }
     #[test]
     fn private_download_refuses_overwrite_and_removes_failed_partial_file() {

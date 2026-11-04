@@ -36,13 +36,16 @@
 //! - Um resultado, um erro ou o aviso de prévia vencida ficam na página até
 //!   "Limpar", trocar de aba ou de projeto; uma operação em andamento prende o
 //!   painel até a resposta.
-//! - A folha de confirmação trava o que descartaria a prévia: o projeto, as
-//!   abas e as ações de Handoffs. O véu só engole cliques; sem a trava, o
-//!   teclado (Tab e Enter) chegaria a eles.
+//! - A folha de confirmação trava o que descartaria a prévia ou mexeria
+//!   atrás dela: o projeto, as abas e as ações das duas abas (as de
+//!   Propostas, Atualizar e Estado, só a folha trava: a lista tem voo
+//!   próprio). O véu só engole cliques; sem a trava, o teclado (Tab e Enter)
+//!   chegaria a eles.
 use crate::{
     client::{Error, Scope},
+    confirmation::Confirmation,
     console, handoff_text,
-    maintenance::{Action, Confirmation, Intent, PREVIEW_TTL, Read, Receipt, Task, Work, Worker},
+    maintenance::{Action, Intent, Read, Receipt, Task, Work, Worker},
     model::{ApiSnapshot, Handoff, Project, number},
     monitor::Shared,
     sessions_ui::{age, dated, headline},
@@ -497,11 +500,7 @@ impl Management {
         if refresh {
             self.refresh(shared);
         }
-        if self
-            .receipt
-            .as_ref()
-            .is_some_and(|r| r.at.elapsed() > PREVIEW_TTL)
-        {
+        if self.receipt.as_ref().is_some_and(Receipt::expired) {
             self.clear();
             self.notice = "A prévia expirou após 5 minutos. Prepare a operação novamente.".into();
             self.expired = true;
@@ -617,6 +616,14 @@ impl Management {
             self.busy || self.receipt.is_some(),
             self.scope.is_some(),
         );
+        // As ações de Propostas só leem a lista, que tem voo próprio: a
+        // operação em andamento não as trava, a folha sim (o teclado
+        // releria ou trocaria a lista atrás do véu).
+        let held = if tab == 0 {
+            self.receipt.is_some()
+        } else {
+            locked
+        };
         let (scope, current, status, days) = (
             &mut self.scope,
             &mut self.tab,
@@ -648,7 +655,7 @@ impl Management {
                     below = true;
                     return None;
                 }
-                actions(ui, tab, status, days, locked)
+                actions(ui, tab, status, days, held)
             },
         );
         if below {
@@ -658,7 +665,7 @@ impl Management {
                     Layout::right_to_left(Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = space::S;
-                        actions(ui, tab, &mut self.status, &mut self.days, locked)
+                        actions(ui, tab, &mut self.status, &mut self.days, held)
                     },
                 )
                 .inner;
@@ -714,7 +721,9 @@ impl Management {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Resultado").font(Type::Section.font()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        clear = ui.add(Button::secondary("Limpar").small()).clicked();
+                        clear = ui
+                            .add(Button::secondary("Limpar").small().raised())
+                            .clicked();
                     });
                 });
                 if !self.notice.is_empty() {
@@ -893,6 +902,9 @@ impl Management {
             let (foot, entered) = self.id_foot(ui, column, &mut ask);
             let list = Rect::from_min_max(column.min, pos2(column.right(), foot.top()));
             let mut area = ui.new_child(UiBuilder::new().max_rect(list));
+            // O landmark da lista, na mesma área em todo estado (linhas,
+            // vazia, carregando ou erro).
+            widgets::pane(&mut area, list, "Lista de propostas");
             let picked = match (&self.list.value, self.list.loaded(&key)) {
                 (_, Some([])) => {
                     empty_in(
@@ -906,7 +918,6 @@ impl Management {
                 (_, Some(rows)) => rows_view(
                     &mut area,
                     list,
-                    "Lista de propostas",
                     "proposals",
                     rows.len(),
                     false,
@@ -1203,6 +1214,9 @@ impl Management {
                 return;
             }
             let list = list_rect(rect, wide);
+            // O landmark da lista, na mesma área em todo estado (linhas,
+            // vazia ou aguardando a coleta).
+            widgets::pane(ui, list, "Lista de handoffs");
             let picked = if shown.is_empty() {
                 if api.at.is_some() {
                     empty_in(
@@ -1221,29 +1235,21 @@ impl Management {
                 }
                 None
             } else {
-                rows_view(
-                    ui,
-                    list,
-                    "Lista de handoffs",
-                    "handoffs",
-                    shown.len(),
-                    !wide,
-                    |ui, rect, i| {
-                        let h = shown[i];
-                        let (title, preview) = headline(h);
-                        let agent = if h.agent.is_empty() { "—" } else { &h.agent };
-                        let second = if preview.is_empty() {
-                            agent.to_owned()
-                        } else {
-                            format!("{agent} · {preview}")
-                        };
-                        let when = age(&h.at, now).map_or_else(|| "—".to_owned(), |a| a.short());
-                        let picked = h.id == self.identifier.trim();
-                        row_view(ui, rect, i, (&title, &second, &when), false, picked)
-                            .clicked()
-                            .then(|| h.id.clone())
-                    },
-                )
+                rows_view(ui, list, "handoffs", shown.len(), !wide, |ui, rect, i| {
+                    let h = shown[i];
+                    let (title, preview) = headline(h);
+                    let agent = if h.agent.is_empty() { "—" } else { &h.agent };
+                    let second = if preview.is_empty() {
+                        agent.to_owned()
+                    } else {
+                        format!("{agent} · {preview}")
+                    };
+                    let when = age(&h.at, now).map_or_else(|| "—".to_owned(), |a| a.short());
+                    let picked = h.id == self.identifier.trim();
+                    row_view(ui, rect, i, (&title, &second, &when), false, picked)
+                        .clicked()
+                        .then(|| h.id.clone())
+                })
             };
             let foot = !wide && narrow_foot(ui, list);
             if let Some(id) = picked {
@@ -1387,7 +1393,7 @@ impl Management {
                 } else {
                     Button::secondary("Preparar prévia sem aplicar")
                 };
-                if ui.add(button).clicked() {
+                if ui.add(button.raised()).clicked() {
                     ask = Some(Intent::Maintain {
                         task: self.task,
                         reembed: self.reembed,
@@ -1397,7 +1403,7 @@ impl Management {
             form(ui, "Reconsolidação de sessão", |ui| {
                 field_line(ui, "ID exato da sessão", &mut self.session, 128);
                 if ui
-                    .add(Button::secondary("Preparar prévia de reconsolidação"))
+                    .add(Button::secondary("Preparar prévia de reconsolidação").raised())
                     .clicked()
                 {
                     ask = Some(Intent::Consolidate {
@@ -1431,7 +1437,10 @@ impl Management {
                     );
                 });
                 field_line(ui, "Motivo", &mut self.reason, 500);
-                if ui.add(Button::secondary("Revisar feedback")).clicked() {
+                if ui
+                    .add(Button::secondary("Revisar feedback").raised())
+                    .clicked()
+                {
                     ask = Some(Intent::Feedback {
                         path: self.path.trim().into(),
                         signal: self.signal.clone(),
@@ -1473,7 +1482,7 @@ impl Management {
                     4096,
                 );
                 if ui
-                    .add(Button::secondary("Revisar download privado"))
+                    .add(Button::secondary("Revisar download privado").raised())
                     .clicked()
                 {
                     ask = Some(Intent::Download {
@@ -1484,14 +1493,14 @@ impl Management {
             });
             form(ui, "Checkpoints da wiki", |ui| {
                 if ui
-                    .add(Button::secondary("Listar últimos 100 checkpoints"))
+                    .add(Button::secondary("Listar últimos 100 checkpoints").raised())
                     .clicked()
                 {
                     checkpoints = true;
                 }
                 field_line(ui, "Descrição do checkpoint", &mut self.message, 500);
                 if ui
-                    .add(Button::secondary("Revisar criação de checkpoint"))
+                    .add(Button::secondary("Revisar criação de checkpoint").raised())
                     .clicked()
                 {
                     ask = Some(Intent::Checkpoint {
@@ -1512,7 +1521,10 @@ impl Management {
                     &mut self.version,
                     128,
                 );
-                if ui.add(Button::secondary("Preparar restauração")).clicked() {
+                if ui
+                    .add(Button::secondary("Preparar restauração").raised())
+                    .clicked()
+                {
                     ask = Some(Intent::Restore {
                         path: self.path.trim().into(),
                         version: self.version.trim().into(),
@@ -1621,20 +1633,22 @@ fn proposal_meta(v: &Value, now: DateTime<Utc>) -> Option<String> {
 
 /// As ações da aba à direita da linha de ferramentas, montadas da direita
 /// para a esquerda: Propostas = Atualizar e Estado; Handoffs = expirar
-/// (com a idade) e o histórico, travados com `locked`.
+/// (com a idade) e o histórico; as de cada aba travadas com `locked`.
 fn actions(ui: &mut Ui, tab: u8, status: &mut String, days: &mut u32, locked: bool) -> Option<Ask> {
     match tab {
         0 => {
             let mut ask = None;
-            if ui.add(Button::secondary("Atualizar")).clicked() {
-                ask = Some(Ask::Refresh);
-            }
-            let options: Vec<(String, String)> = STATUSES
-                .iter()
-                .map(|(value, plural, _)| ((*value).to_owned(), format!("Estado: {plural}")))
-                .collect();
-            let text = format!("Estado: {}", status_label(status).1);
-            picker(ui, "proposal-state", status, &text, PROJECT_WIDTH, &options);
+            ui.add_enabled_ui(!locked, |ui| {
+                if ui.add(Button::secondary("Atualizar")).clicked() {
+                    ask = Some(Ask::Refresh);
+                }
+                let options: Vec<(String, String)> = STATUSES
+                    .iter()
+                    .map(|(value, plural, _)| ((*value).to_owned(), format!("Estado: {plural}")))
+                    .collect();
+                let text = format!("Estado: {}", status_label(status).1);
+                picker(ui, "proposal-state", status, &text, PROJECT_WIDTH, &options);
+            });
             ask
         }
         1 => {
@@ -1832,17 +1846,16 @@ fn narrow_foot(ui: &mut Ui, list: Rect) -> bool {
 }
 /// A lista rolável de `n` linhas de `ROW_HEIGHT` em `rect` (menos o pé, na
 /// tela estreita); só as linhas visíveis são montadas. `row` desenha a
-/// linha `i` e devolve o ID clicado.
+/// linha `i` e devolve o ID clicado. O landmark (`widgets::pane`) é de quem
+/// chama: existe também sem linhas.
 fn rows_view(
     ui: &mut Ui,
     rect: Rect,
-    pane: &str,
     id: &str,
     n: usize,
     foot: bool,
     mut row: impl FnMut(&mut Ui, Rect, usize) -> Option<String>,
 ) -> Option<String> {
-    widgets::pane(ui, rect, pane);
     let bottom = if foot {
         rect.bottom() - LIST_FOOT
     } else {
@@ -2229,9 +2242,10 @@ fn diff_view(ui: &mut Ui, lines: &[(Mark, String)]) {
 mod tests {
     use super::*;
     use crate::{
+        maintenance::PREVIEW_TTL,
         test_support::{Mock, Request, Response},
         widgets::tests::{
-            click, click_sized, context, node, nodes, rect_of, rects, run, run_sized,
+            click, click_sized, context, focused, node, nodes, rect_of, rects, run, run_sized,
             tab_and_enter, texts,
         },
     };
@@ -2357,8 +2371,10 @@ mod tests {
     }
     /// Teto de segurança das esperas dos testes (e das porteiras dos
     /// servidores sintéticos): cada uma termina assim que a condição vale;
-    /// o prazo só impede que um teste quebrado trave para sempre.
-    const PATIENCE: Duration = Duration::from_secs(30);
+    /// o prazo só impede que um teste quebrado trave para sempre. Uma GET sem
+    /// resposta falha no prazo do cliente (`client::TIMEOUT`); a folga cobre
+    /// a volta do trabalhador, e passar dela é falha, com o que se esperava.
+    const PATIENCE: Duration = crate::client::TIMEOUT.saturating_add(Duration::from_secs(3));
     /// Espera a resposta do trabalhador.
     fn settle(m: &mut Management, shared: &Shared) {
         let until = Instant::now() + PATIENCE;
@@ -2954,6 +2970,34 @@ mod tests {
     }
 
     #[test]
+    fn the_result_clear_button_is_raised_and_never_the_field_color() {
+        for (theme, p) in crate::widgets::tests::THEMES {
+            for tab in [0, 1, 2, 3] {
+                let (_mock, shared, mut m) = quiet();
+                m.scope = Some(scope());
+                m.tab = tab;
+                m.result = Some(json!({"saved": true}));
+                let ctx = context(theme);
+                let api = ApiSnapshot::default();
+                let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+                    page(&mut m, ui, &shared, &api, Section::of(tab));
+                });
+                let case = format!("{theme:?} tab {tab}");
+                // O "Limpar" do cartão Resultado.
+                node(&out, Role::Label, "Resultado");
+                let at = rect_of(&node(&out, Role::Button, "Limpar"));
+                let fills: Vec<egui::Color32> = rects(&out)
+                    .into_iter()
+                    .filter(|r| r.rect == at)
+                    .map(|r| r.fill)
+                    .collect();
+                assert_eq!(fills, [p.raised], "{case}");
+                assert_ne!(p.raised, p.field, "{case}: like a field");
+            }
+        }
+    }
+
+    #[test]
     fn the_list_loads_once_per_project_and_state_and_when_the_tab_opens() {
         let mock = server(|_, _| Response::json(200, json!([])));
         let shared = Shared::unstarted(mock.config());
@@ -3444,9 +3488,10 @@ mod tests {
             let until = Instant::now() + PATIENCE;
             let out = loop {
                 let out = run_sized(&ctx, NARROW, vec![], &mut add);
-                if !rows_of(&out).is_empty() || Instant::now() > until {
+                if !rows_of(&out).is_empty() {
                     break out;
                 }
+                assert!(Instant::now() < until, "{option}: the rows never showed");
                 std::thread::sleep(Duration::from_millis(2));
             };
             let row = rect_of(&node(
@@ -3458,13 +3503,18 @@ mod tests {
             let out = run_sized(&ctx, NARROW, vec![], &mut add);
             assert_eq!(panes(&out), (0, 1), "{option}: precondition");
             choose(&ctx, NARROW, &mut add, shown, option);
-            // A lista nova carrega (o show faz o poll) e aparece sozinha.
+            // A lista nova carrega (o show faz o poll) e aparece sozinha. O
+            // landmark existe já carregando: espera as linhas.
             let until = Instant::now() + PATIENCE;
             let out = loop {
                 let out = run_sized(&ctx, NARROW, vec![], &mut add);
-                if panes(&out).0 == 1 || Instant::now() > until {
+                if !rows_of(&out).is_empty() {
                     break out;
                 }
+                assert!(
+                    Instant::now() < until,
+                    "{option}: the new list never showed"
+                );
                 std::thread::sleep(Duration::from_millis(2));
             };
             assert_eq!(panes(&out), (1, 0), "{option}");
@@ -3584,6 +3634,108 @@ mod tests {
         node(&out, Role::Button, "Informar ID…");
         drop(add);
         assert_eq!(m.identifier, "h-2");
+    }
+
+    #[test]
+    fn the_list_landmark_covers_the_list_in_every_state() {
+        const NARROW: [f32; 2] = [720., 600.];
+        for size in [WINDOW, NARROW] {
+            // Propostas: (estado, o que a lista mostra). Carregando segura a
+            // resposta até o fim do caso.
+            let mut area = None;
+            for (state, shown) in [
+                ("rows", "Proposta 1 · decisions/p-1.md · 25 min"),
+                ("empty", "Nenhuma proposta pendente"),
+                ("loading", "Carregando propostas…"),
+                ("error", "Não foi possível carregar as propostas"),
+            ] {
+                let (release, gate) = mpsc::channel::<()>();
+                let gate = Mutex::new(gate);
+                let mock = server(move |_, _| match state {
+                    "rows" => Response::json(200, json!([proposal(1)])),
+                    "empty" => Response::json(200, json!([])),
+                    "loading" => {
+                        let _ = gate.lock().unwrap().recv_timeout(PATIENCE);
+                        Response::json(200, json!([]))
+                    }
+                    _ => Response::json(500, json!({})),
+                });
+                let shared = Shared::unstarted(mock.config());
+                let mut m = Management::new(shared.clone());
+                m.scope = Some(scope());
+                let api = projects(&[scope()]);
+                let ctx = context(egui::Theme::Dark);
+                run_sized(&ctx, size, vec![], |ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                });
+                if state != "loading" {
+                    settle_list(&mut m, &shared);
+                }
+                let out = run_sized(&ctx, size, vec![], |ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                });
+                let case = format!("proposals {state} at {size:?}");
+                let role = if state == "rows" {
+                    Role::Button
+                } else {
+                    Role::Label
+                };
+                assert_eq!(nodes(&out, role, shown).len(), 1, "{case}: precondition");
+                let panes = nodes(&out, Role::Pane, "Lista de propostas");
+                assert_eq!(panes.len(), 1, "{case}");
+                let rect = rect_of(&panes[0]);
+                assert_eq!(*area.get_or_insert(rect), rect, "{case}: the same area");
+                drop(release);
+            }
+            // Handoffs: (estado, o que a lista mostra). A lista vem da coleta
+            // e não tem erro próprio: com a coleta falha, espera a próxima.
+            let now = Utc::now();
+            let open = Handoff {
+                id: "h-1".into(),
+                agent: "codex".into(),
+                at: (now - chrono::Duration::minutes(4)).to_rfc3339(),
+                state: "open".into(),
+                summary: Some("## Handoff 1".into()),
+                scope: scope().label(),
+                ..Default::default()
+            };
+            let mut area = None;
+            for (state, shown) in [
+                ("rows", "Handoff 1 · codex · 4 min"),
+                ("empty", "Nenhum handoff aberto"),
+                ("loading", "Aguardando a coleta"),
+                ("error", "Aguardando a coleta"),
+            ] {
+                let mut api = projects(&[scope()]);
+                match state {
+                    "rows" => {
+                        api.at = Some(now);
+                        api.handoffs = vec![open.clone()];
+                    }
+                    "empty" => api.at = Some(now),
+                    "loading" => {}
+                    _ => api.error = Some("Servidor indisponível.".into()),
+                }
+                let (_mock, shared, mut m) = quiet();
+                m.scope = Some(scope());
+                m.tab = 1;
+                let ctx = context(egui::Theme::Dark);
+                let out = run_sized(&ctx, size, vec![], |ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                });
+                let case = format!("handoffs {state} at {size:?}");
+                let role = if state == "rows" {
+                    Role::Button
+                } else {
+                    Role::Label
+                };
+                assert_eq!(nodes(&out, role, shown).len(), 1, "{case}: precondition");
+                let panes = nodes(&out, Role::Pane, "Lista de handoffs");
+                assert_eq!(panes.len(), 1, "{case}");
+                let rect = rect_of(&panes[0]);
+                assert_eq!(*area.get_or_insert(rect), rect, "{case}: the same area");
+            }
+        }
     }
     /// Os textos pintados e a parte de cada um que fica à vista (dentro do
     /// recorte da rolagem).
@@ -3777,6 +3929,79 @@ mod tests {
                 (1, 1, 2),
                 "{theme:?}: one GET per selection"
             );
+        }
+    }
+
+    #[test]
+    fn the_typed_id_is_read_when_tab_or_a_click_elsewhere_leaves_the_field() {
+        // Enter tem o seu teste (acima); aqui, os outros dois jeitos de sair
+        // do campo.
+        for way in ["Tab", "click"] {
+            let mock = catalog(vec![proposal(1), proposal(2)]);
+            let shared = Shared::unstarted(mock.config());
+            let mut m = Management::new(shared.clone());
+            m.scope = Some(scope());
+            // O motivo separa o campo dele do de ID, vazio.
+            m.reason = "motivo".into();
+            let api = projects(&[scope()]);
+            let ctx = context(egui::Theme::Light);
+            run(&ctx, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            settle_list(&mut m, &shared);
+            let asked = m.detail.ticket;
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            let field = rect_of(&node(&out, Role::TextInput, "")).center();
+            // Um ponto vazio do detalhe, longe do campo e das linhas.
+            let elsewhere = rect_of(&node(&out, Role::Pane, "Proposta selecionada")).center();
+            click_sized(&ctx, WINDOW, field, &mut add);
+            for typed in ["p", "-", "1"] {
+                run_sized(
+                    &ctx,
+                    WINDOW,
+                    vec![egui::Event::Text(typed.into())],
+                    &mut add,
+                );
+            }
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            drop(add);
+            assert_eq!(
+                focused(&out).as_deref(),
+                Some("p-1"),
+                "{way}: precondition, typing in the field"
+            );
+            assert_eq!(m.detail.ticket, asked, "{way}: nothing asked while typing");
+            let mut add = |ui: &mut Ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            };
+            match way {
+                "Tab" => {
+                    run_sized(&ctx, WINDOW, vec![key(egui::Key::Tab)], &mut add);
+                }
+                _ => click_sized(&ctx, WINDOW, elsewhere, &mut add),
+            }
+            let out = run_sized(&ctx, WINDOW, vec![], &mut add);
+            drop(add);
+            assert_ne!(
+                focused(&out).as_deref(),
+                Some("p-1"),
+                "{way}: left the field"
+            );
+            assert_eq!(m.detail.ticket, asked + 1, "{way}: leaving asks once");
+            assert_eq!(
+                m.detail.key,
+                Some((scope(), "p-1".to_owned())),
+                "{way}: the typed ID"
+            );
+            settle_detail(&mut m, &shared);
+            let out = run_sized(&ctx, WINDOW, vec![], |ui| {
+                page(&mut m, ui, &shared, &api, Section::Review);
+            });
+            node(&out, Role::Label, "Proposta 1");
+            assert_eq!(read(&mock, "p-1"), 1, "{way}: one GET");
         }
     }
 
@@ -5615,13 +5840,16 @@ mod tests {
                         .filter(|r| r.rect == at)
                         .map(|r| (r.fill, r.stroke))
                         .collect();
+                    // Sobre o cartão surf, ao lado de campos: raised (no
+                    // escuro, o bg seria o do campo).
                     assert_eq!(
                         fills,
-                        [(p.surf, Stroke::new(1.0_f32, p.line))],
-                        "{case}: no fill of its own"
+                        [(p.raised, Stroke::new(1.0_f32, p.line))],
+                        "{case}: raised"
                     );
                     let want = if destructive { p.bad } else { p.text };
                     assert_eq!(painted(&out, at, label), [(want, 13.)], "{case}");
+                    assert_ne!(p.raised, p.field, "{case}: like a field");
                 }
                 // O verde fica com o botão final da folha.
                 assert!(
@@ -5777,7 +6005,10 @@ mod tests {
             assert!(!refresh.is_disabled(), "busy {busy}: the list is its own");
             let until = Instant::now() + PATIENCE;
             while listed(&mock, "demo") == 0 {
-                assert!(Instant::now() < until);
+                assert!(
+                    Instant::now() < until,
+                    "busy {busy}: the list was never asked"
+                );
                 std::thread::sleep(Duration::from_millis(2));
             }
             click_sized(&ctx, WINDOW, rect_of(&refresh).center(), &mut add);
@@ -6558,6 +6789,60 @@ mod tests {
                     // O teclado andou: só não chega ao que está sob o véu.
                     assert!(seen.iter().any(|l| l == "Cancelar"), "{case}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_keyboard_never_rereads_or_swaps_the_list_under_the_sheet() {
+        // (os controles a alcançar com Tab e apertar com Enter, o estado sem
+        // a folha). O seletor abre com Enter; o Tab entra nas opções.
+        let cases: [(&[&str], &str); 2] = [
+            (&["Atualizar"], "pending"),
+            (&["Estado: pendentes", "Estado: aprovadas"], "approved"),
+        ];
+        for (controls, status) in cases {
+            for open in [true, false] {
+                let (mock, shared, mut m) = previewing(Intent::Approve { id: "p-1".into() }, 0);
+                if !open {
+                    m.receipt = None;
+                }
+                let ctx = context(egui::Theme::Dark);
+                let api = projects(&[scope(), other()]);
+                frames(&ctx, &mut |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                });
+                // A lista da abertura respondeu: um pedido novo é do teclado.
+                settle_list(&mut m, &shared);
+                let ticket = m.list.ticket;
+                let mut add = |ui: &mut Ui| {
+                    page(&mut m, ui, &shared, &api, Section::Review);
+                };
+                let mut seen = Vec::new();
+                for control in controls {
+                    seen.extend(tab_and_enter(&ctx, WINDOW, &mut add, |l| l == *control, 40));
+                }
+                drop(add);
+                let case = format!("{controls:?}, sheet open: {open}, focus: {seen:?}");
+                assert_eq!(m.receipt.is_some(), open, "{case}");
+                // Sem a folha, o Enter faz o que o clique faria: Atualizar
+                // relê a lista e Estado a troca. Com ela, nada muda atrás.
+                assert_eq!(m.list.ticket != ticket, !open, "{case}: the list asked");
+                assert_eq!(m.status, if open { "pending" } else { status }, "{case}");
+                for control in controls {
+                    assert_eq!(
+                        seen.iter().any(|l| l == control),
+                        !open,
+                        "{case}: {control}"
+                    );
+                }
+                if open {
+                    // O teclado andou: só não chega ao que está sob o véu.
+                    assert!(seen.iter().any(|l| l == "Cancelar"), "{case}");
+                } else {
+                    settle_list(&mut m, &shared);
+                }
+                assert_eq!(listed(&mock, "demo"), 1 + usize::from(!open), "{case}");
             }
         }
     }
