@@ -5,6 +5,9 @@ tag="$1"; distdir="$2"
 v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 [ "$tag" = "v$v" ] || { echo "tag $tag != versão do Cargo.toml v$v" >&2; exit 1; }
 [ -f "docs/releases/v$v.md" ] || { echo "notas ausentes: docs/releases/v$v.md" >&2; exit 1; }
+# título = cabeçalho "# …" da 1ª linha das notas, que precisa citar a versão
+title=$(sed -n '1s/^# //p' "docs/releases/v$v.md")
+case "$title" in *"v$v"*) ;; *) echo "1ª linha de docs/releases/v$v.md deve ser '# … v$v …': '$title'" >&2; exit 1;; esac
 shopt -s nullglob
 files=(
   "$distdir"/ai-monitor-macos/*.dmg
@@ -27,7 +30,7 @@ bash scripts/render-pkgbuild.sh "$v" \
   "$(awk '{print $1}' "$distdir"/ai-monitor-linux-x86_64/ai-monitor-*-linux-x86_64.tar.gz.sha256)" \
   "$(awk '{print $1}' "$distdir"/ai-monitor-linux-aarch64/ai-monitor-*-linux-aarch64.tar.gz.sha256)"
 files+=(packaging/arch/PKGBUILD)
-create=(gh release create "$tag" --draft --title "AI Monitor $v — Linux (Ubuntu e Omarchy)" --notes-file "docs/releases/v$v.md" "${files[@]}")
+create=(gh release create "$tag" --draft --title "$title" --notes-file "docs/releases/v$v.md" "${files[@]}")
 edit=(gh release edit "$tag" --draft=false)
 if [ "${DRY_RUN:-0}" = 1 ]; then
   echo "DRY: ${create[*]}"; echo "DRY: ${edit[*]}"; exit 0

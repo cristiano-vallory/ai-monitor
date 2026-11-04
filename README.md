@@ -10,9 +10,9 @@ Linux (Ubuntu ≥ 22.04 e Omarchy 4): consulte a [seção Linux do guia de insta
 
 ## Instalar sem compilar Rust
 
-A versão **0.6.2** passa o intervalo padrão de sessões/handoffs para 60 s, reduzindo a carga constante no servidor ai-memory. Desde a 0.6.0 há suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD`. Veja as [notas da atualização](docs/releases/v0.6.2.md) e o [guia das páginas ai-memory](docs/ADMINISTRATION.md).
+A versão **0.7.0** traz o novo visual do app inteiro: tema claro e escuro, lateral com grupos e modo compacto, barra superior com o estado da coleta, telas redesenhadas, Ajustes em janela própria, confirmação em níveis e um novo menu na barra (macOS) e na bandeja (Linux). Desde a 0.6.0 há suporte a Linux (Ubuntu ≥ 22.04 e Omarchy 4): bandeja de sistema, painel sob demanda, backend systemd de usuário e pacotes `.deb`/`PKGBUILD`. Veja as [notas da atualização](docs/releases/v0.7.0.md) e o [guia das páginas ai-memory](docs/ADMINISTRATION.md).
 
-1. Baixe **AI-Monitor-0.6.2-macos-universal.dmg** na [release v0.6.2](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.2).
+1. Baixe **AI-Monitor-0.7.0-macos-universal.dmg** na [release v0.7.0](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.7.0).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
 3. Ejete o disco, abra o app em Aplicativos e procure o ícone de pulso, com a CPU do ai-memory, na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
