@@ -103,7 +103,7 @@ const SETTINGS_SIZE: [f32; 2] = [780., 620.];
 const SETTINGS_TITLE: f32 = 34.;
 #[cfg(not(target_os = "macos"))]
 const SETTINGS_TITLE: f32 = 0.;
-fn settings_id() -> egui::ViewportId {
+pub(crate) fn settings_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("settings")
 }
 /// Abas da janela de Ajustes, na ordem do cromo.
@@ -134,11 +134,15 @@ impl SettingsTab {
 }
 /// A janela de Ajustes: aberta ou não, a aba, um pedido de trazê-la à frente
 /// e o último `SetTheme` enviado a ela (`None` = nada enviado a esta janela).
+/// `raise_again`: aberta pela barra ou pela bandeja, que trazem a principal à
+/// frente no mesmo frame (o Focus dela é tratado depois do de Ajustes); então
+/// Ajustes vem à frente de novo no frame seguinte.
 #[derive(Default)]
 struct SettingsWindow {
     open: bool,
     tab: SettingsTab,
     raise: bool,
+    raise_again: bool,
     theme: Option<egui::SystemTheme>,
 }
 
@@ -173,6 +177,8 @@ pub struct MonitorApp {
     /// Grava a troca de tema (`save_theme`); os testes trocam para não
     /// escrever no disco.
     save_theme: fn(Appearance) -> Result<(), String>,
+    /// Grava a config de "Salvar e conectar" (`Config::save`); idem.
+    save_config: fn(&Config) -> Result<(), String>,
 }
 
 impl MonitorApp {
@@ -249,6 +255,7 @@ impl MonitorApp {
             paused: false,
             settings: SettingsWindow::default(),
             save_theme,
+            save_config: Config::save,
         }
     }
     #[cfg(target_os = "macos")]
@@ -653,6 +660,7 @@ impl MonitorApp {
             if class == egui::ViewportClass::Embedded {
                 let mut open = true;
                 self.settings.raise = false;
+                self.settings.raise_again = false;
                 egui::Window::new(title)
                     .id(egui::Id::new("settings-window"))
                     .open(&mut open)
@@ -673,6 +681,10 @@ impl MonitorApp {
             if std::mem::take(&mut self.settings.raise) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                if std::mem::take(&mut self.settings.raise_again) {
+                    self.settings.raise = true;
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
             }
             // A barra de título acompanha o tema do app, como a da principal.
             let window = theme::window_theme(self.config.theme, theme::platform_theme());
@@ -945,55 +957,73 @@ impl MonitorApp {
             }
         });
     }
-    /// Barra de menus (macOS) ou bandeja (Linux): o projeto das propostas.
+    /// Barra de menus (macOS) ou bandeja (Linux): o modo do item (só no
+    /// macOS), o projeto das propostas e o ponto de alerta.
     fn tray(&mut self, ui: &mut egui::Ui) {
-        setting_row(ui, "Propostas:", |ui| {
+        use crate::widgets::{caption, checkbox, option, select};
+        #[cfg(target_os = "macos")]
+        setting_row(ui, "Mostrar na barra:", |ui| {
+            // A prévia mostra o que a barra mostraria agora.
+            let reading = crate::menu::MenuReading::from_snapshot(
+                &self.resources,
+                &self.config.container,
+                self.config.resource_seconds,
+                Utc::now(),
+            );
             ui.scope(|ui| {
-                ui.spacing_mut().icon_width = 10.;
-                ui.spacing_mut().icon_spacing = 6.;
-                ui.spacing_mut().button_padding = Vec2::new(10., 4.);
-                ui.spacing_mut().interact_size.y = 26.;
-                let selected = self
-                    .draft
-                    .proposal_watch
-                    .as_ref()
-                    .map(crate::client::Scope::label)
-                    .unwrap_or("Desativado".into());
-                egui::ComboBox::from_id_salt("watch-proposals")
-                    .width(280.)
-                    .selected_text(RichText::new(selected).size(12.))
-                    .icon(|ui, rect, _, _| {
-                        let p = theme::palette(ui.visuals());
-                        let icon = egui::Rect::from_center_size(rect.center(), Vec2::splat(10.));
-                        crate::widgets::chevron(ui.painter(), icon, true, p.text);
-                    })
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(&mut self.draft.proposal_watch, None, "Desativado")
-                            .clicked()
-                        {
-                            ui.close();
-                        }
-                        for p in &self.api.projects {
-                            let scope = crate::client::Scope {
-                                workspace: p.workspace_name.clone(),
-                                project: p.project_name.clone(),
-                            };
-                            let label = scope.label();
-                            if ui
-                                .selectable_value(
-                                    &mut self.draft.proposal_watch,
-                                    Some(scope),
-                                    label,
-                                )
-                                .clicked()
-                            {
-                                ui.close();
-                            }
-                        }
-                    });
+                ui.spacing_mut().item_spacing.y = 10.;
+                for (mode, label) in [
+                    (BarMode::Icon, "Só o ícone"),
+                    (BarMode::IconCpu, "Ícone + CPU"),
+                    (BarMode::Full, "Completo"),
+                ] {
+                    let preview = crate::menu::bar_title(&reading, mode).text;
+                    if bar_mode(ui, label, self.draft.bar_mode == mode, &preview).clicked() {
+                        self.draft.bar_mode = mode;
+                    }
+                }
             });
-            crate::widgets::caption(ui, crate::platform::PROPOSAL_WATCH_LABEL);
+            caption(
+                ui,
+                "Em Macs com notch, itens largos somem quando a barra lota. O modo completo fica no menu e na dica.",
+            );
+        });
+        setting_row(ui, "Propostas:", |ui| {
+            let selected = self
+                .draft
+                .proposal_watch
+                .as_ref()
+                .map(crate::client::Scope::label)
+                .unwrap_or("Desativado".into());
+            select(ui, "Propostas", &selected, 280., |ui| {
+                if option(ui, self.draft.proposal_watch.is_none(), "Desativado").clicked() {
+                    self.draft.proposal_watch = None;
+                }
+                for p in &self.api.projects {
+                    let scope = crate::client::Scope {
+                        workspace: p.workspace_name.clone(),
+                        project: p.project_name.clone(),
+                    };
+                    let label = scope.label();
+                    if option(
+                        ui,
+                        self.draft.proposal_watch.as_ref() == Some(&scope),
+                        &label,
+                    )
+                    .clicked()
+                    {
+                        self.draft.proposal_watch = Some(scope);
+                    }
+                }
+            });
+            caption(ui, crate::platform::PROPOSAL_WATCH_LABEL);
+        });
+        setting_row(ui, "Alertas:", |ui| {
+            checkbox(
+                ui,
+                &mut self.draft.alert_dot,
+                "Ponto âmbar no ícone quando a saúde tiver alertas",
+            );
         });
     }
     /// "Carregar do Keychain/chaveiro": o token guardado para o endereço do
@@ -1019,7 +1049,7 @@ impl MonitorApp {
                 KeychainChange::Forget(endpoint) => crate::keychain::forget(endpoint)?,
                 KeychainChange::Keep => {}
             }
-            self.draft.save()
+            (self.save_config)(&self.draft)
         }) {
             Ok(()) => {
                 self.reconnect(self.draft.clone());
@@ -1029,15 +1059,21 @@ impl MonitorApp {
             Err(e) => self.settings_message = e,
         }
     }
-    /// Destino de `shared.navigation` (barra de menus e bandeja): 1 = Saúde,
-    /// 2 = Revisão, 3 = Administração; o resto não navega.
+    /// Destino de `shared.navigation` (barra de menus e bandeja, um
+    /// `menu::Destination`): a página, ou Ajustes por cima da que estiver;
+    /// fora do domínio, nada.
     fn navigate(&mut self, code: u8) {
-        self.page = match code {
-            1 => Page::Health,
-            2 => Page::Review,
-            3 => Page::Admin,
-            _ => return,
-        };
+        use crate::menu::Destination;
+        match Destination::from_code(code) {
+            Some(Destination::Health) => self.page = Page::Health,
+            Some(Destination::Review) => self.page = Page::Review,
+            Some(Destination::Sessions) => self.page = Page::Sessions,
+            Some(Destination::Settings) => {
+                self.open_settings();
+                self.settings.raise_again = true;
+            }
+            Some(Destination::Panel) | None => {}
+        }
     }
     /// Um frame da janela: lateral, barras, a página e Ajustes, se aberta.
     /// Sem coleta nem navegação externa, para rodar sem janela nos testes.
@@ -1363,6 +1399,73 @@ fn appearance(ui: &mut egui::Ui, value: Appearance, label: &str, chosen: bool) -
     painter.galley(
         egui::pos2(rect.center().x - galley.size().x / 2., thumb.bottom() + 6.),
         galley,
+        p.text,
+    );
+    response
+}
+/// Uma opção de "Mostrar na barra:" (Settings.dc.html): o rádio de 14, o
+/// nome em 150 e a prévia do item da barra, o chip `menubar` (#2C2E34 no
+/// escuro, #ECECEF no claro: o raised e o side) com o pulso e `preview`.
+/// AccessKit: `RadioButton` marcado ou não.
+#[cfg(target_os = "macos")]
+fn bar_mode(ui: &mut egui::Ui, label: &str, chosen: bool, preview: &str) -> egui::Response {
+    let p = theme::palette(ui.visuals());
+    let chip_fill = if ui.visuals().dark_mode {
+        p.raised
+    } else {
+        p.side
+    };
+    let painter = ui.painter();
+    let name = painter.layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.), p.text);
+    let text = painter.layout_no_wrap(preview.to_owned(), egui::FontId::proportional(12.), p.text);
+    let gap = if preview.is_empty() { 0. } else { 5. };
+    let chip_width = 8. + 14. + gap + text.size().x + 8.;
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(14. + 10. + 150. + 10. + chip_width, 22.),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::RadioButton,
+            ui.is_enabled(),
+            chosen,
+            label,
+        )
+    });
+    let painter = ui.painter();
+    let center = egui::pos2(rect.left() + 7., rect.center().y);
+    // Como a caixa: desmarcado com a borda text2 sobre o field; marcado em
+    // acc com o miolo on_acc.
+    if chosen {
+        painter.circle_filled(center, 7., p.acc);
+        painter.circle_filled(center, 3., p.on_acc);
+    } else {
+        painter.circle(center, 6.5, p.field, Stroke::new(1.0_f32, p.text2));
+    }
+    painter.galley(
+        egui::pos2(rect.left() + 24., rect.center().y - name.size().y / 2.),
+        name,
+        p.text,
+    );
+    let chip = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 24. + 150. + 10., rect.top()),
+        Vec2::new(chip_width, 22.),
+    );
+    painter.rect_filled(chip, 5., chip_fill);
+    let icon = egui::Rect::from_min_size(
+        egui::pos2(chip.left() + 8., chip.center().y - 7.),
+        Vec2::splat(14.),
+    );
+    crate::widgets::strokes(
+        painter,
+        icon,
+        &[&crate::menu::PULSE],
+        crate::menu::PULSE_WIDTH,
+        p.text,
+    );
+    painter.galley(
+        egui::pos2(icon.right() + gap, chip.center().y - text.size().y / 2.),
+        text,
         p.text,
     );
     response
@@ -2209,8 +2312,9 @@ mod tests {
         let mut app = MonitorApp::build(config.clone(), Shared::unstarted(config));
         app.draft.endpoint = "https://draft.example".into();
         app.draft.container = "draft-ai".into();
-        // Nenhum teste grava o tema no disco de quem roda.
+        // Nenhum teste grava o tema nem a config no disco de quem roda.
         app.save_theme = |_| Ok(());
+        app.save_config = |_| Ok(());
         app
     }
 
@@ -2556,19 +2660,94 @@ mod tests {
     }
 
     #[test]
-    fn menu_navigation_opens_health_review_and_admin_and_ignores_the_rest() {
+    fn menu_navigation_opens_each_page_or_settings_and_ignores_the_rest() {
         for code in 0..=u8::MAX {
             let mut app = app_with_unsaved_draft();
             app.page = Page::Docker;
             app.navigate(code);
+            // (página, Ajustes aberta) de cada código; o resto não mexe.
             let want = match code {
-                1 => Page::Health,
-                2 => Page::Review,
-                3 => Page::Admin,
-                _ => Page::Docker,
+                1 => (Page::Health, false),
+                2 => (Page::Review, false),
+                3 => (Page::Sessions, false),
+                4 => (Page::Docker, true),
+                _ => (Page::Docker, false),
             };
-            assert_eq!(app.page, want, "navigation {code}");
+            assert_eq!((app.page, app.settings.open), want, "navigation {code}");
+            assert_eq!(app.settings.raise, want.1, "navigation {code}: raised");
         }
+    }
+
+    #[test]
+    fn the_settings_code_opens_settings_over_the_page_in_the_next_update() {
+        use crate::menu::Destination;
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.page = Page::Health;
+        let ctx = styled();
+        let _native = Native::install(&ctx);
+        let mut frame_ = eframe::Frame::_new_kittest();
+        let mut update = |app: &mut MonitorApp| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size.into())),
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(app, ctx, &mut frame_),
+            )
+        };
+        let out = update(&mut app);
+        assert!(settings_viewport(&out).is_none(), "precondition: closed");
+        use egui::ViewportCommand::Focus;
+        let root = |out: &egui::FullOutput| out.viewport_output[&egui::ViewportId::ROOT].clone();
+        // Janela nova do Linux: só o código, sem Focus da principal antes.
+        // O segundo Focus de Ajustes vem no frame seguinte, já, e não no tick
+        // de 500 ms.
+        app.shared
+            .navigation
+            .store(Destination::Settings.code(), Ordering::Release);
+        let out = update(&mut app);
+        assert!(commands(&out).contains(&Focus));
+        assert_eq!(
+            root(&out).repaint_delay,
+            Duration::ZERO,
+            "the next frame now"
+        );
+        let out = update(&mut app);
+        assert!(commands(&out).contains(&Focus), "again in the next frame");
+        app.close_settings();
+        let out = update(&mut app);
+        assert!(
+            settings_viewport(&out).is_none(),
+            "precondition: closed again"
+        );
+        // O que a barra (macOS) ou a bandeja (Linux) faz ao clicar Ajustes…:
+        // grava o código e traz a principal à frente (`show_dashboard`,
+        // `FocusAndNavigate`), com o Focus dela no mesmo frame.
+        app.shared
+            .navigation
+            .store(Destination::Settings.code(), Ordering::Release);
+        ctx.send_viewport_cmd(Focus);
+        let out = update(&mut app);
+        assert!(
+            root(&out).commands.contains(&Focus),
+            "precondition: the main window"
+        );
+        let window = settings_viewport(&out).expect("Ajustes opens");
+        assert!(window.commands.contains(&Focus));
+        assert_eq!(app.page, Page::Health, "over the page it was on");
+        assert_eq!(app.shared.navigation.load(Ordering::Acquire), 0, "consumed");
+        // O Focus da principal é tratado depois do pass imediato de Ajustes:
+        // no frame seguinte, só Ajustes pede o foco, e fica por cima.
+        let out = update(&mut app);
+        assert!(
+            commands(&out).contains(&Focus),
+            "Ajustes again, after the main window"
+        );
+        assert!(!root(&out).commands.contains(&Focus));
+        let out = update(&mut app);
+        assert!(!commands(&out).contains(&Focus), "then no more");
+        assert!(settings_viewport(&out).is_some(), "still open");
     }
 
     #[test]
@@ -2697,7 +2876,7 @@ mod tests {
 
     #[test]
     fn review_counter_matches_the_menu_bar_and_only_shows_pending_proposals() {
-        use crate::menu_bar::MenuReading;
+        use crate::menu::{MenuReading, entries};
         let now = Utc::now();
         let scope = crate::client::Scope {
             workspace: "ws".into(),
@@ -2713,70 +2892,70 @@ mod tests {
             pending_scope: Some(of.clone()),
             ..Default::default()
         };
-        // (caso, vigiado?, leitura, contador na lateral, número no menu)
+        // (caso, vigiado?, leitura, contador na lateral, linha do menu)
         for (case, watch, health, badge, menu) in [
             (
                 "nothing watched",
                 false,
                 reading(0, &scope, Some(3)),
                 None,
-                None,
+                "Propostas: selecione um projeto em Ajustes",
             ),
             (
                 "three pending",
                 true,
                 reading(0, &scope, Some(3)),
                 Some("3"),
-                Some("3"),
+                "3 propostas pendentes · ws / proj",
             ),
             (
                 "one pending",
                 true,
                 reading(0, &scope, Some(1)),
                 Some("1"),
-                Some("1"),
+                "1 proposta pendente · ws / proj",
             ),
             (
                 "199 pending",
                 true,
                 reading(0, &scope, Some(199)),
                 Some("199"),
-                Some("199"),
+                "199 propostas pendentes · ws / proj",
             ),
             (
                 "list limit",
                 true,
                 reading(0, &scope, Some(200)),
                 Some("200+"),
-                Some("200+"),
+                "200+ propostas pendentes · ws / proj",
             ),
             (
                 "zero is no counter",
                 true,
                 reading(0, &scope, Some(0)),
                 None,
-                Some("0"),
+                "0 propostas pendentes · ws / proj",
             ),
             (
                 "denied is unknown",
                 true,
                 reading(0, &scope, None),
                 None,
-                Some("—"),
+                "Propostas: — · ws / proj",
             ),
             (
                 "stale is unknown",
                 true,
                 reading(91, &scope, Some(3)),
                 None,
-                Some("—"),
+                "Propostas: — · ws / proj",
             ),
             (
                 "another project",
                 true,
                 reading(0, &other, Some(3)),
                 None,
-                Some("—"),
+                "Propostas: — · ws / proj",
             ),
         ] {
             let config = Config {
@@ -2788,13 +2967,15 @@ mod tests {
                 badge,
                 "{case}"
             );
-            let title = MenuReading::from_snapshot(&Default::default(), "ai-memory", 2, now)
-                .with_context(None, Some(&health), &config, now)
-                .title;
-            match menu {
-                Some(n) => assert!(title.ends_with(&format!(" P{n}")), "{case}: {title}"),
-                None => assert!(!title.contains(" P"), "{case}: {title}"),
-            }
+            let reading = MenuReading::from_snapshot(&Default::default(), "ai-memory", 2, now)
+                .with_context(None, Some(&health), &config, now);
+            // A linha das propostas é a que abre Revisão com texto da leitura.
+            let row = entries(&reading)
+                .iter()
+                .map(|e| e.flat())
+                .find(|f| f.action == Some("review") && f.dynamic)
+                .unwrap();
+            assert_eq!(row.label, menu, "{case}");
         }
     }
 
@@ -4424,7 +4605,7 @@ mod tests {
         let store = crate::platform::SECRET_STORE;
         let load = format!("Carregar do {store}");
         let remember = format!("Guardar no {store} para este servidor");
-        let controls: [(SettingsTab, Role, &str); 17] = [
+        let mut controls: Vec<(SettingsTab, Role, &str)> = vec![
             (General, Role::RadioButton, "Sistema"),
             (General, Role::RadioButton, "Claro"),
             (General, Role::RadioButton, "Escuro"),
@@ -4447,11 +4628,18 @@ mod tests {
             (Connection, Role::Label, "Diagnóstico da conexão"),
             (Tray, Role::ComboBox, "Desativado"),
             (Tray, Role::Label, crate::platform::PROPOSAL_WATCH_LABEL),
+            (
+                Tray,
+                Role::CheckBox,
+                "Ponto âmbar no ícone quando a saúde tiver alertas",
+            ),
             (Account, Role::TextInput, "Usuário"),
             (Account, Role::PasswordInput, "Senha"),
             (Account, Role::Button, "Entrar com sessão humana"),
         ];
-        let left_out = [
+        // Os modos do item só existem no macOS; no Linux, nem na Bandeja.
+        let modes = ["Só o ícone", "Ícone + CPU", "Completo"];
+        let mut left_out = vec![
             "Densidade:",
             "Densidade",
             "Confortável",
@@ -4459,12 +4647,6 @@ mod tests {
             "Ao iniciar:",
             "Abrir o painel",
             "Iniciar com a sessão do usuário",
-            "Mostrar na barra:",
-            "Só o ícone",
-            "Ícone + CPU",
-            "Completo",
-            "Alertas:",
-            "Ponto âmbar no ícone quando a saúde tiver alertas",
             "Autenticação:",
             "Autenticação",
             "Token Bearer",
@@ -4472,6 +4654,12 @@ mod tests {
             "Anônimo",
             "Testar conexão",
         ];
+        if cfg!(target_os = "macos") {
+            controls.extend(modes.map(|mode| (Tray, Role::RadioButton, mode)));
+        } else {
+            left_out.extend(modes);
+            left_out.push("Mostrar na barra:");
+        }
         for tab in SettingsTab::ALL {
             let (_, _, out) = settings_open_on(tab);
             for (home, role, name) in &controls {
@@ -4486,7 +4674,7 @@ mod tests {
             }
             let update = out.platform_output.accesskit_update.as_ref().unwrap();
             let painted = crate::widgets::tests::texts(&out);
-            for text in left_out {
+            for &text in &left_out {
                 assert!(
                     !update
                         .nodes
@@ -4764,6 +4952,198 @@ mod tests {
         assert_eq!(app.shared.generation.load(Ordering::Acquire), 0);
         assert_eq!(app.draft.endpoint, "https://draft.example");
         assert_eq!(app.config.endpoint, "https://connected.example");
+    }
+
+    thread_local! {
+        static SAVED_CONFIGS: std::cell::RefCell<Vec<Config>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    #[test]
+    fn the_bar_options_change_only_the_draft_until_saved_and_the_bar_reads_the_saved_ones() {
+        use egui::accesskit::{Role, Toggled};
+        let size = [1320., 860.];
+        let dot = "Ponto âmbar no ícone quando a saúde tiver alertas";
+        let (mut app, ctx, out) = settings_open_on(SettingsTab::Tray);
+        app.save_config = |config| {
+            SAVED_CONFIGS.with(|saved| saved.borrow_mut().push(config.clone()));
+            Ok(())
+        };
+        assert_eq!(
+            update_node(&out, Role::CheckBox, dot).toggled(),
+            Some(Toggled::True)
+        );
+        // macOS: os três modos, o padrão marcado; escolher Completo.
+        #[cfg(target_os = "macos")]
+        {
+            let modes = ["Só o ícone", "Ícone + CPU", "Completo"];
+            let state = |out: &egui::FullOutput| {
+                modes.map(|m| update_node(out, Role::RadioButton, m).toggled())
+            };
+            let (on, off) = (Some(Toggled::True), Some(Toggled::False));
+            assert_eq!(state(&out), [off, on, off], "the default");
+            for (mode, want, marks) in [
+                ("Completo", BarMode::Full, [off, off, on]),
+                ("Só o ícone", BarMode::Icon, [on, off, off]),
+                ("Completo", BarMode::Full, [off, off, on]),
+            ] {
+                let at = widget_rect(
+                    &frame(&mut app, &ctx, size, vec![]),
+                    Role::RadioButton,
+                    mode,
+                );
+                click_at(&mut app, &ctx, size, at.center());
+                assert_eq!(app.draft.bar_mode, want, "{mode}");
+                assert_eq!(state(&frame(&mut app, &ctx, size, vec![])), marks, "{mode}");
+            }
+        }
+        let at = widget_rect(&frame(&mut app, &ctx, size, vec![]), Role::CheckBox, dot);
+        click_at(&mut app, &ctx, size, at.center());
+        assert!(!app.draft.alert_dot);
+        let out = frame(&mut app, &ctx, size, vec![]);
+        assert_eq!(
+            update_node(&out, Role::CheckBox, dot).toggled(),
+            Some(Toggled::False)
+        );
+        let mode = if cfg!(target_os = "macos") {
+            BarMode::Full
+        } else {
+            BarMode::IconCpu
+        };
+        // Nada valeu antes de salvar: nem a config nem a da barra.
+        assert!(app.config.alert_dot && app.config.bar_mode == BarMode::IconCpu);
+        let bar = |app: &MonitorApp| {
+            let c = app.shared.config.read().unwrap();
+            (c.bar_mode, c.alert_dot)
+        };
+        assert_eq!(bar(&app), (BarMode::IconCpu, true));
+        assert!(SAVED_CONFIGS.with(|saved| saved.borrow().is_empty()));
+        let save = widget_rect(&out, Role::Button, "Salvar e conectar");
+        click_at(&mut app, &ctx, size, save.center());
+        let saved = SAVED_CONFIGS.with(|saved| saved.borrow().clone());
+        assert_eq!(saved.len(), 1, "{}", app.settings_message);
+        assert_eq!((saved[0].bar_mode, saved[0].alert_dot), (mode, false));
+        assert_eq!(
+            saved[0].endpoint, "https://draft.example",
+            "the whole draft"
+        );
+        // A barra e a bandeja releem `shared.config` a cada 1 s.
+        assert_eq!(bar(&app), (mode, false));
+        assert_eq!((app.config.bar_mode, app.config.alert_dot), (mode, false));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn each_bar_mode_previews_the_text_the_bar_would_show() {
+        use egui::accesskit::Role;
+        let size = [1320., 860.];
+        let modes = ["Só o ícone", "Ícone + CPU", "Completo"];
+        // O texto pintado em cada linha de modo, fora o nome dele.
+        let previews = |app: &mut MonitorApp, ctx: &egui::Context| {
+            let out = frame(app, ctx, size, vec![]);
+            modes.map(|mode| {
+                let row = widget_rect(&out, Role::RadioButton, mode);
+                crate::widgets::tests::shapes(&out)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Text(t) if row.contains(t.pos) && t.galley.text() != mode => {
+                            Some(t.galley.text().to_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+        };
+        let (mut app, ctx, _) = settings_open_on(SettingsTab::Tray);
+        assert_eq!(
+            previews(&mut app, &ctx),
+            ["", "—", "AI — | Docker —"],
+            "no data"
+        );
+        let mib = 1 << 20;
+        let usage = |cpu, memory| Usage {
+            cpu,
+            memory,
+            ..Default::default()
+        };
+        app.resources = ResourceSnapshot {
+            at: Some(Utc::now()),
+            containers: vec![
+                Container {
+                    name: "ai-memory".into(),
+                    state: "running".into(),
+                    usage: Some(usage(12.4, 421 * mib)),
+                    ..Default::default()
+                },
+                Container {
+                    name: "db".into(),
+                    state: "running".into(),
+                    usage: Some(usage(3., 312 * mib)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            previews(&mut app, &ctx),
+            ["", "12%", "AI 12% 421M | Docker 15% 733M"],
+            "fresh"
+        );
+    }
+
+    #[test]
+    fn the_proposals_select_says_its_choice_and_a_pick_changes_only_the_draft() {
+        use egui::accesskit::{Role, Toggled};
+        let size = [1320., 860.];
+        let mut app = app_with_unsaved_draft();
+        app.api.projects = ["demo", "outro"]
+            .map(|name| Project {
+                workspace_name: "fixture".into(),
+                project_name: name.into(),
+                ..Default::default()
+            })
+            .to_vec();
+        app.settings.tab = SettingsTab::Tray;
+        app.open_settings();
+        let ctx = styled();
+        ctx.enable_accesskit();
+        frame(&mut app, &ctx, size, vec![]);
+        let names = ["Desativado", "fixture / demo", "fixture / outro"];
+        let open = |app: &mut MonitorApp| {
+            let out = frame(app, &ctx, size, vec![]);
+            let select =
+                crate::widgets::tests::rect_of(&update_node(&out, Role::ComboBox, "Propostas"));
+            click_at(app, &ctx, size, select.center());
+            let out = frame(app, &ctx, size, vec![]);
+            let marks = names.map(|n| update_node(&out, Role::Button, n).toggled());
+            (out, marks)
+        };
+        let (on, off) = (Some(Toggled::True), Some(Toggled::False));
+        let pick = |app: &mut MonitorApp, out: &egui::FullOutput, name: &str| {
+            let at = crate::widgets::tests::rect_of(&update_node(out, Role::Button, name));
+            click_at(app, &ctx, size, at.center());
+        };
+        let value = |app: &mut MonitorApp| {
+            let out = frame(app, &ctx, size, vec![]);
+            update_node(&out, Role::ComboBox, "Propostas")
+                .value()
+                .map(str::to_owned)
+        };
+        assert_eq!(value(&mut app).as_deref(), Some("Desativado"));
+        let (out, marks) = open(&mut app);
+        assert_eq!(marks, [on, off, off]);
+        pick(&mut app, &out, "fixture / outro");
+        let outro = crate::client::Scope {
+            workspace: "fixture".into(),
+            project: "outro".into(),
+        };
+        assert_eq!(app.draft.proposal_watch, Some(outro));
+        assert_eq!(app.config.proposal_watch, None, "only the draft");
+        assert_eq!(value(&mut app).as_deref(), Some("fixture / outro"));
+        let (out, marks) = open(&mut app);
+        assert_eq!(marks, [off, off, on]);
+        pick(&mut app, &out, "Desativado");
+        assert_eq!(app.draft.proposal_watch, None);
+        assert_eq!(value(&mut app).as_deref(), Some("Desativado"));
     }
 
     /// Nós do AccessKit com este papel e texto (o rótulo, ou o valor nos de

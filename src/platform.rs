@@ -43,15 +43,12 @@ pub const LOCAL_SERVICE_HINT: &str = "Configure explicitamente o serviço. Docke
 #[cfg(not(target_os = "macos"))]
 pub const LOCAL_SERVICE_HINT: &str = "Configure explicitamente o serviço. Docker usa contexto com socket Unix e fixa o ID revisado. systemd aceita a unit oficial ai-memory.service; atualização nativa exige serviço parado, binário novo e SHA-256. Campos não são gravados em disco.";
 
-#[cfg(target_os = "macos")]
-pub const PROPOSAL_WATCH_LABEL: &str =
-    "Propostas na barra de menus (um projeto, até 200 pendentes)";
-#[cfg(not(target_os = "macos"))]
-pub const PROPOSAL_WATCH_LABEL: &str =
-    "Propostas no menu da bandeja (um projeto, até 200 pendentes)";
+/// A legenda do projeto das propostas, igual nos dois sistemas.
+pub const PROPOSAL_WATCH_LABEL: &str = "Um projeto, até 200 pendentes. Contagem aparece no menu.";
 
 /// Onde os alertas de saúde aparecem fora da janela (página Saúde).
+/// "Podem": o ponto é uma opção de Ajustes.
 #[cfg(target_os = "macos")]
-pub const HEALTH_ALERT_HINT: &str = "Alertas também aparecem como ! na barra de menus.";
+pub const HEALTH_ALERT_HINT: &str = "Alertas podem aparecer como ponto âmbar na barra de menus.";
 #[cfg(not(target_os = "macos"))]
-pub const HEALTH_ALERT_HINT: &str = "Alertas também aparecem como ponto âmbar no ícone da bandeja.";
+pub const HEALTH_ALERT_HINT: &str = "Alertas podem aparecer como ponto âmbar no ícone da bandeja.";

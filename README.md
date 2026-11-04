@@ -1,6 +1,6 @@
 # AI Monitor
 
-Monitor nativo em **Rust para macOS**, com CPU e memória do **ai-memory** e do **Docker diretamente na barra de menus**. A coleta continua com a janela fechada; o painel reúne processos, threads, sessões, handoffs abertos, contêineres e imagens.
+Monitor nativo em **Rust para macOS**, com a CPU do **ai-memory** **diretamente na barra de menus** (no modo completo, também a memória e o **Docker**). A coleta continua com a janela fechada; o painel reúne processos, threads, sessões, handoffs abertos, contêineres e imagens.
 
 Projeto independente, sem afiliação oficial com ai-memory, Docker ou Apple. Interface em português brasileiro. Licença [MIT](LICENSE).
 
@@ -14,7 +14,7 @@ A versão **0.6.2** passa o intervalo padrão de sessões/handoffs para 60 s, re
 
 1. Baixe **AI-Monitor-0.6.2-macos-universal.dmg** na [release v0.6.2](https://github.com/cristiano-vallory/ai-monitor/releases/tag/v0.6.2).
 2. Abra o `.dmg` e arraste **AI Monitor.app** para **Applications / Aplicativos**.
-3. Ejete o disco, abra o app em Aplicativos e procure **AI / Docker** na barra de menus.
+3. Ejete o disco, abra o app em Aplicativos e procure o ícone de pulso, com a CPU do ai-memory, na barra de menus.
 4. Escolha **Abrir painel** para configurar o servidor e o contêiner.
 
 O pacote Universal contém código nativo para **Apple Silicon e Intel**. Não exige Rust, Cargo, Xcode ou ferramentas de desenvolvimento para instalar ou executar. O mínimo declarado é macOS 12.0. A interface foi validada em Apple Silicon; o executável Intel foi verificado via Rosetta, sem validação em hardware Intel ou macOS antigos.
@@ -51,18 +51,32 @@ cargo clippy --all-targets --locked -- -D warnings
 
 `--diagnose` consulta fontes reais e imprime recursos e contagens, sem resumos de handoffs nem tokens. Nomes de processos, contêineres, imagens, portas e projetos em mensagens de erro podem fazer parte da saída; revise antes de compartilhar. Capturas de tela do painel também podem revelar conteúdo privado.
 
-`--trace-menu` emite até 120 leituras do indicador AppKit, visibilidade da janela e quantidade de amostras históricas no terminal, para verificar a atualização em segundo plano. Pode ser combinado com `--show-dashboard`; não registra conteúdo de sessões nem credenciais.
+`--trace-menu` emite até 120 leituras do indicador AppKit (texto, modo, esmaecido, ponto de alerta e estado da coleta), visibilidade da janela e quantidade de amostras históricas no terminal, para verificar a atualização em segundo plano. Pode ser combinado com `--show-dashboard`; não registra conteúdo de sessões, projetos nem credenciais.
+
+`--print-menu` imprime em JSON as linhas do menu da barra/bandeja de uma leitura sem dados (rótulo, habilitada, separador, dinâmica, visível e ação) e sai, sem abrir janela, bandeja, D-Bus ou rede. O smoke da bandeja no Linux compara essa saída com o menu publicado.
 
 ## Barra de menus do macOS
 
-Ao iniciar, o app fica na barra de menus, sem abrir o painel nem ocupar o Dock. Exemplo ilustrativo, sem dados de uma instalação real: `AI 35% 512M | Docker 62% 1.5G`. São CPU e memória do ai-memory, seguidos da **soma dos contêineres ativos, incluindo ai-memory quando executado nesse Docker**. `M` e `G` representam MiB e GiB. O menu e a dica ao passar o mouse mostram os valores completos e a idade da última coleta.
+Ao iniciar, o app fica na barra de menus, sem abrir o painel nem ocupar o Dock. O item é um ícone de pulso, que acompanha a barra clara ou escura, e o que vem ao lado dele se escolhe em **Ajustes → Barra de menus → Mostrar na barra**:
+
+- **Só o ícone**;
+- **Ícone + CPU** (padrão): a CPU do ai-memory, por exemplo `12%`;
+- **Completo**: CPU e memória do ai-memory, seguidos da **soma dos contêineres ativos, incluindo ai-memory quando executado nesse Docker**, por exemplo `AI 12% 421M | Docker 15% 733M` (exemplo ilustrativo; `M` e `G` são MiB e GiB). Em Macs com notch, itens largos somem quando a barra lota; os números completos ficam no menu e na dica.
+
+Sem uma amostra em dia, o texto vira `—` e o item fica esmaecido. Quando a saúde do ai-memory tem alertas, um **ponto âmbar** aparece no canto superior direito do ícone (desligável em **Ajustes → Barra de menus → Alertas**). A dica ao passar o mouse traz as linhas do menu, o resumo da saúde e as legendas (100% = 1 núcleo; M/G = MiB/GiB; Docker inclui o ai-memory).
 
 O indicador AI prioriza o contêiner configurado. Quando ele não está disponível, o coletor pode usar processos nativos identificados como ai-memory. Os números dos processos Docker Desktop no macOS ficam separados no painel.
 
-- **Saúde / Revisão / Administração:** atalhos diretos para essas páginas. O menu mostra handoffs abertos e propostas pendentes do projeto escolhido em Ajustes (`P200+` sinaliza o limite da lista).
-- **Abrir painel:** mostra a janela e restaura uma janela minimizada.
-- **Ocultar painel:** recolhe a janela e mantém a coleta ativa. O botão vermelho de fechar tem o mesmo comportamento.
-- **Sair do AI Monitor:** encerra o monitor e remove o indicador da barra.
+O menu segue a aparência do sistema:
+
+- **Cabeçalho:** AI Monitor e o estado da coleta (ao vivo, atrasada, Docker indisponível ou aguardando), com a idade.
+- **ai-memory** e **Docker · N ativos:** CPU e memória; uma faixa âmbar com os alertas da saúde, só quando há algum.
+- **N handoffs abertos:** abre **Sessões e handoffs**. **N propostas pendentes**, com o projeto escolhido em Ajustes (`200+` sinaliza o limite da lista): abre **Revisão**.
+- **Abrir painel** (⌘O): mostra a janela e restaura uma janela minimizada. **Saúde do ai-memory** e **Revisar propostas…**: abrem essas páginas.
+- **Ajustes…** (⌘,): abre o painel e, por cima, a janela de Ajustes.
+- **Sair do AI Monitor** (⌘Q): encerra o monitor e remove o indicador da barra.
+
+O botão vermelho de fechar recolhe a janela e mantém a coleta ativa.
 
 A barra é atualizada por um timer AppKit no loop principal, independente da renderização do painel, inclusive durante a abertura do menu. O botão de pausa do painel (`Pausar atualização da tela`) congela somente o painel; a barra continua acompanhando as fontes. O histórico de dez minutos é coletado em segundo plano e aparece ao reabrir a janela. Amostras atrasadas por mais de três intervalos (mínimo de dez segundos) são substituídas por `—`, sem aparentar uma medição atual. Falhas do Docker também aparecem como indisponíveis, sem virar zero.
 
@@ -86,7 +100,7 @@ A lateral tem oito páginas, em dois grupos: **Monitorar** (Visão geral, Sessõ
 
 Padrões: `http://127.0.0.1:49374`, contêiner `ai-memory`, recursos a cada 2 s, API a cada 60 s e inventário de imagens a cada 15 s. O intervalo da API é contado após cada varredura para evitar sobrecarregar o servidor. A execução de uma consulta pode alongar o intervalo; a interface informa a idade de cada coleta. O app reconecta automaticamente. No alto do painel, o chip de atualização mostra `Conectando…` antes da primeira coleta, `Ao vivo · atualizado há N s`, `Atrasado` (ou `API atrasada` / `Recursos atrasados`, quando a última coleta passa de três intervalos) ou `Pausado`. O botão de pausa ao lado, com o tooltip `Pausar atualização da tela`, congela a visualização; os coletores continuam trabalhando.
 
-Abra **Ajustes** com **⌘,** (no Linux, **Ctrl+,**), pelo item **Ajustes** no rodapé da lateral ou pelo botão **Abrir Ajustes** da faixa “Sem conexão com o ai-memory.”, que abre direto na aba **Conexão** (⌘, e o item da lateral abrem na última aba usada). É uma janela própria, de 780 × 620, com quatro abas: **Geral** (aparência e intervalos), **Conexão** (servidor, token, contêiner, Docker e diagnóstico), **Barra de menus** (no Linux, **Bandeja**; o projeto das propostas) e **Conta** (login humano). Ajuste os campos e clique em **Salvar e conectar**. **Restaurar padrões** devolve os campos aos valores padrão, sem mexer na aparência, e só vale depois de **Salvar e conectar**. Fechar a janela mantém o rascunho e a aba.
+Abra **Ajustes** com **⌘,** (no Linux, **Ctrl+,**), pelo item **Ajustes** no rodapé da lateral ou pelo botão **Abrir Ajustes** da faixa “Sem conexão com o ai-memory.”, que abre direto na aba **Conexão** (⌘, e o item da lateral abrem na última aba usada). É uma janela própria, de 780 × 620, com quatro abas: **Geral** (aparência e intervalos), **Conexão** (servidor, token, contêiner, Docker e diagnóstico), **Barra de menus** (no Linux, **Bandeja**; o que o item mostra, só no macOS, o projeto das propostas e o ponto de alerta) e **Conta** (login humano). Ajuste os campos e clique em **Salvar e conectar**. **Restaurar padrões** devolve os campos aos valores padrão, sem mexer na aparência, e só vale depois de **Salvar e conectar**. Fechar a janela mantém o rascunho e a aba.
 
 | Campo | Padrão | Limites ou comportamento |
 | --- | --- | --- |

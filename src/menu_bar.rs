@@ -1,154 +1,104 @@
 //! Status-bar presentation is independent of the dashboard's paint loop.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-use crate::model::{ResourceSnapshot, Usage, bytes, decimal, number};
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-use chrono::{DateTime, Utc};
-
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-#[derive(Clone, Debug, PartialEq)]
-pub struct MenuReading {
-    pub title: String,
-    pub ai: String,
-    pub docker: String,
-    pub freshness: String,
-    pub activity: String,
-    pub alert: bool,
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-impl MenuReading {
-    pub fn from_snapshot(
-        snapshot: &ResourceSnapshot,
-        container: &str,
-        interval: u64,
-        now: DateTime<Utc>,
-    ) -> Self {
-        let age = snapshot.at.map(|at| (now - at).num_seconds().max(0));
-        let fresh = age.is_some_and(|age| age <= (interval.saturating_mul(3).max(10)) as i64);
-        let ai = fresh.then(|| snapshot.ai_usage(container)).flatten();
-        let docker = fresh.then(|| snapshot.docker_total()).flatten();
-        Self {
-            title: format!(
-                "AI {}  |  Docker {}",
-                compact(ai.as_ref()),
-                compact(docker.as_ref())
-            ),
-            ai: detail("ai-memory", ai.as_ref()),
-            docker: detail("Docker (contêineres)", docker.as_ref()),
-            freshness: match age {
-                None => "Aguardando a primeira coleta…".into(),
-                Some(age) if !fresh => format!("Coleta atrasada: última atualização há {age} s"),
-                Some(age) if snapshot.docker_error.is_some() => {
-                    format!("Docker indisponível · tentativa há {age} s")
-                }
-                Some(age) => format!("Recursos atualizados há {age} s"),
-            },
-            activity: String::new(),
-            alert: false,
-        }
-    }
-    pub fn with_context(
-        mut self,
-        api: Option<&crate::model::ApiSnapshot>,
-        health: Option<&crate::health::Snapshot>,
-        config: &crate::model::Config,
-        now: DateTime<Utc>,
-    ) -> Self {
-        if let Some(health) = health {
-            self.alert = health.fresh(now) && !health.alerts().is_empty();
-            if self.alert {
-                self.title.push_str("  !");
-            }
-            self.freshness
-                .push_str(&format!(" · {}", health.menu_summary(now)));
-        }
-        let h = api
-            .and_then(|a| {
-                a.at.filter(|at| (now - *at).num_seconds() <= (config.api_seconds * 3) as i64)
-                    .and(a.handoff_total)
-            })
-            .map(number)
-            .unwrap_or("—".into());
-        let p = if let Some(health) = health {
-            if let Some(scope) = &config.proposal_watch {
-                let n = health
-                    .watched_pending(scope, now)
-                    .map(crate::health::pending_text)
-                    .unwrap_or("—".into());
-                self.title.push_str(&format!(" P{n}"));
-                format!("Propostas {n} · {}", scope.label())
-            } else {
-                "Propostas: selecione um projeto em Ajustes".into()
-            }
-        } else {
-            "Propostas: aguardando".into()
-        };
-        self.activity = format!("Handoffs abertos {h} · {p}");
-        self
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-fn compact(usage: Option<&Usage>) -> String {
-    usage
-        .map(|u| format!("{}% {}", decimal(u.cpu, 0), compact_bytes(u.memory)))
-        .unwrap_or("—% —".into())
-}
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-fn compact_bytes(n: u64) -> String {
-    if n >= 1 << 30 {
-        format!("{}G", decimal(n as f64 / (1u64 << 30) as f64, 1))
-    } else {
-        format!("{}M", decimal(n as f64 / (1u64 << 20) as f64, 0))
-    }
-}
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-fn detail(name: &str, usage: Option<&Usage>) -> String {
-    usage
-        .map(|u| {
-            format!(
-                "{name} · CPU {}% · memória {}",
-                decimal(u.cpu, 1),
-                bytes(u.memory)
-            )
-        })
-        .unwrap_or_else(|| format!("{name} · métricas indisponíveis"))
-}
+//! The item (pulse, the mode's text and the alert dot) and the menu render
+//! `menu::entries`; nothing here decides what the menu says.
 
 #[cfg(target_os = "macos")]
 mod native {
-    use super::*;
-    use crate::monitor::Shared;
-    use eframe::egui::{Context, ViewportCommand};
+    use crate::{
+        menu::{self, Entry, MenuAction, MenuReading, Row, State},
+        model::BarMode,
+        monitor::Shared,
+        theme,
+    };
+    use chrono::Utc;
+    use eframe::egui::{Color32, Context, ViewportCommand};
     use objc2::{
-        DefinedClass, MainThreadOnly, define_class, msg_send,
+        AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send,
         rc::Retained,
         runtime::{AnyObject, ProtocolObject},
         sel,
     };
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSFont, NSMenu, NSMenuItem, NSStatusBar,
-        NSStatusItem, NSVariableStatusItemLength,
+        NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+        NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBezierPath, NSBitmapImageRep,
+        NSBox, NSBoxType, NSCellImagePosition, NSColor, NSDeviceRGBColorSpace, NSFont,
+        NSFontAttributeName, NSFontWeight, NSFontWeightMedium, NSFontWeightRegular,
+        NSFontWeightSemibold, NSForegroundColorAttributeName, NSGraphicsContext, NSImage,
+        NSImageScaling, NSImageView, NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle, NSMenu,
+        NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStatusBar,
+        NSStatusBarButton, NSStatusItem, NSTextAlignment, NSTextField, NSTextTab, NSTitlePosition,
+        NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
-        MainThreadMarker, NSActivityOptions, NSObject, NSObjectProtocol, NSProcessInfo, NSRunLoop,
-        NSRunLoopCommonModes, NSString, NSTimer, ns_string,
+        MainThreadMarker, NSActivityOptions, NSArray, NSAttributedString, NSDictionary,
+        NSMutableAttributedString, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect,
+        NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer, ns_string,
     };
     use std::{
         cell::{Cell, RefCell},
         sync::{Arc, atomic::Ordering},
     };
 
+    /// O menu de MenuBar.dc.html: 318 de largura (o mínimo; as views seguem
+    /// o menu quando ele é mais largo), o texto a 15 das bordas (5 da margem
+    /// do menu e 10 da linha), onde terminam também os atalhos.
+    const WIDTH: f64 = 318.;
+    const INSET: f64 = 15.;
+    /// As colunas de CPU e memória das métricas, alinhadas à direita, a 14
+    /// uma da outra.
+    const CPU: f64 = 64.;
+    const MEMORY: f64 = 80.;
+    const GAP: f64 = 14.;
+    /// O ícone na barra e o ponto de alerta, em pontos.
+    const ICON: f64 = 15.;
+    const DOT: f64 = 6.;
+
+    /// O item nativo de cada linha de `menu::entries`, na mesma ordem.
+    enum Native {
+        Header {
+            item: Retained<NSMenuItem>,
+            dot: Retained<NSBox>,
+            state: Retained<NSTextField>,
+        },
+        Metric {
+            item: Retained<NSMenuItem>,
+            name: Retained<NSTextField>,
+            cpu: Retained<NSTextField>,
+            memory: Retained<NSTextField>,
+        },
+        Alert {
+            item: Retained<NSMenuItem>,
+            band: Retained<NSBox>,
+            icon: Option<Retained<NSImageView>>,
+            text: Retained<NSTextField>,
+        },
+        Separator(Retained<NSMenuItem>),
+        Action(Retained<NSMenuItem>),
+    }
+    impl Native {
+        fn item(&self) -> &NSMenuItem {
+            match self {
+                Native::Header { item, .. }
+                | Native::Metric { item, .. }
+                | Native::Alert { item, .. }
+                | Native::Separator(item)
+                | Native::Action(item) => item,
+            }
+        }
+    }
+
     struct MenuState {
         shared: Arc<Shared>,
         ctx: Context,
         visible: Cell<bool>,
         status: Retained<NSStatusItem>,
-        ai: Retained<NSMenuItem>,
-        docker: Retained<NSMenuItem>,
-        freshness: Retained<NSMenuItem>,
-        activity: Retained<NSMenuItem>,
-        previous: RefCell<Option<MenuReading>>,
+        /// O ponto de alerta, sobre o canto superior direito do pulso.
+        dot: Retained<NSBox>,
+        rows: Vec<Native>,
+        /// A ação de cada item habilitado, pela `tag` dele.
+        actions: Vec<MenuAction>,
+        /// A última leitura aplicada, com o modo e a aparência (escura?).
+        previous: RefCell<Option<(MenuReading, BarMode, bool)>>,
         trace_remaining: Cell<u32>,
     }
 
@@ -161,27 +111,28 @@ mod native {
         struct MenuActions;
         unsafe impl NSObjectProtocol for MenuActions {}
         impl MenuActions {
-            // These selectors use AppKit's target/action ABI: void (id sender).
-            #[unsafe(method(openPanel:))]
-            fn open_panel(&self,_sender:Option<&AnyObject>) {
-                self.show_dashboard();
-            }
-            #[unsafe(method(openHealth:))]
-            fn open_health(&self,_sender:Option<&AnyObject>) {self.ivars().shared.navigation.store(1,Ordering::Release);self.show_dashboard();}
-            #[unsafe(method(openReview:))]
-            fn open_review(&self,_sender:Option<&AnyObject>) {self.ivars().shared.navigation.store(2,Ordering::Release);self.show_dashboard();}
-            #[unsafe(method(openAdmin:))]
-            fn open_admin(&self,_sender:Option<&AnyObject>) {self.ivars().shared.navigation.store(3,Ordering::Release);self.show_dashboard();}
-            #[unsafe(method(hidePanel:))]
-            fn hide_panel(&self,_sender:Option<&AnyObject>) {
-                self.hide_dashboard();
-            }
-            #[unsafe(method(quitMonitor:))]
-            fn quit_monitor(&self,_sender:Option<&AnyObject>) {
-                self.ivars().shared.stop.store(true,Ordering::Relaxed);
-                // Explicit Quit uses the application's native termination path,
-                // independently of the dashboard's close-to-hide behavior.
-                NSApplication::sharedApplication(self.mtm()).terminate(None);
+            // AppKit's target/action ABI: void (id sender); the sender is the
+            // item, whose tag indexes `actions`.
+            #[unsafe(method(perform:))]
+            fn perform(&self, sender: Option<&NSMenuItem>) {
+                let state = self.ivars();
+                let Some(action) = sender.and_then(|s| state.actions.get(s.tag() as usize)) else {
+                    return;
+                };
+                match *action {
+                    MenuAction::Open(destination) => {
+                        if destination.code() != 0 {
+                            state.shared.navigation.store(destination.code(), Ordering::Release);
+                        }
+                        self.show_dashboard();
+                    }
+                    MenuAction::Quit => {
+                        state.shared.stop.store(true, Ordering::Relaxed);
+                        // Explicit Quit uses the application's native termination path,
+                        // independently of the dashboard's close-to-hide behavior.
+                        NSApplication::sharedApplication(self.mtm()).terminate(None);
+                    }
+                }
             }
             #[unsafe(method(refreshMetrics:))]
             fn refresh_metrics(&self,_timer:&NSTimer) {self.refresh();}
@@ -230,8 +181,9 @@ mod native {
         }
         fn refresh(&self) {
             let state = self.ivars();
+            let mtm = self.mtm();
             let now = Utc::now();
-            let reading = {
+            let current = {
                 // Never wait for a collector or a configuration change on AppKit.
                 let Ok(config) = state.shared.config.try_read() else {
                     return;
@@ -241,59 +193,460 @@ mod native {
                 };
                 let api = state.shared.api.try_lock().ok();
                 let health = state.shared.health.try_lock().ok();
-                MenuReading::from_snapshot(
+                let reading = MenuReading::from_snapshot(
                     &snapshot,
                     &config.container,
                     config.resource_seconds,
                     now,
                 )
-                .with_context(api.as_deref(), health.as_deref(), &config, now)
+                .with_context(api.as_deref(), health.as_deref(), &config, now);
+                (reading, config.bar_mode, dark(mtm))
+            };
+            let Some(button) = state.status.button(mtm) else {
+                return;
             };
             let mut previous = state.previous.borrow_mut();
-            if previous.as_ref() != Some(&reading) {
+            if previous.as_ref() != Some(&current) {
+                let (reading, mode, dark) = &current;
+                let title = menu::bar_title(reading, *mode);
                 if previous
                     .as_ref()
-                    .is_none_or(|old| old.title != reading.title)
-                    && let Some(button) = state.status.button(self.mtm())
+                    .is_none_or(|(r, m, _)| menu::bar_title(r, *m) != title)
                 {
-                    button.setTitle(&NSString::from_str(&reading.title));
+                    button.setTitle(&NSString::from_str(&title.text));
+                    button.setImagePosition(if title.text.is_empty() {
+                        NSCellImagePosition::ImageOnly
+                    } else {
+                        NSCellImagePosition::ImageLeft
+                    });
+                    // Esmaecido como o sistema esmaece: ícone e texto.
+                    button.setAppearsDisabled(title.dimmed);
                 }
-                state.ai.setTitle(&NSString::from_str(&reading.ai));
-                state.docker.setTitle(&NSString::from_str(&reading.docker));
-                state
-                    .freshness
-                    .setTitle(&NSString::from_str(&reading.freshness));
-                state
-                    .activity
-                    .setTitle(&NSString::from_str(&reading.activity));
-                if let Some(button) = state.status.button(self.mtm()) {
-                    button.setToolTip(Some(&NSString::from_str(&format!("AI Monitor\n{}\n{}\n{}\n{}\nCPU: 100% = 1 núcleo. M/G = MiB/GiB. Docker inclui ai-memory.",reading.ai,reading.docker,reading.freshness,reading.activity))));
+                button.setToolTip(Some(&NSString::from_str(&menu::tooltip(reading))));
+                state.dot.setHidden(!reading.alert_dot);
+                for (entry, row) in menu::entries(reading).iter().zip(&state.rows) {
+                    update(row, entry, *dark);
                 }
-                *previous = Some(reading);
+                *previous = Some(current);
             }
-            if let Some(button) = state.status.button(self.mtm())
-                && state.trace_remaining.get() > 0
-            {
+            // O botão muda de largura depois do título; o ponto acompanha.
+            place_dot(&button, &state.dot);
+            if state.trace_remaining.get() > 0 {
                 state.trace_remaining.set(state.trace_remaining.get() - 1);
-                let freshness = previous
+                let (reading, mode) = previous
                     .as_ref()
-                    .map(|r| r.freshness.as_str())
-                    .unwrap_or("");
+                    .map(|(r, m, _)| (Some(r), *m))
+                    .unwrap_or((None, BarMode::default()));
                 // Opt-in, bounded diagnostics read the actual AppKit state;
-                // no prompts, handoffs, credentials or paths are included.
+                // no prompts, handoffs, credentials, projects or paths.
                 println!(
                     "{}",
                     serde_json::json!({
                         "at":Utc::now(),"menu_title":button.title().to_string(),
+                        "bar_mode":mode,"dimmed":button.appearsDisabled(),
+                        "alert_dot":!state.dot.isHidden(),
                         "status_visible":state.status.isVisible(),
-                        "panel_visible":NSApplication::sharedApplication(self.mtm()).windows().iter()
+                        "panel_visible":NSApplication::sharedApplication(mtm).windows().iter()
                             .any(|w|w.title().to_string()=="AI Monitor"&&w.isVisible()),
                         "history_samples":state.shared.history.try_lock().ok().map(|h|h.len()),
-                        "freshness":freshness,
+                        "state":reading.map(|r| r.state.text()),
                     })
                 );
             }
         }
+    }
+
+    /// A aparência do sistema (o menu e o item a seguem; a de Ajustes vale
+    /// só para as janelas do app).
+    fn dark(mtm: MainThreadMarker) -> bool {
+        // SAFETY: AppKit's appearance name constants.
+        let (aqua, dark) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+        NSApplication::sharedApplication(mtm)
+            .effectiveAppearance()
+            .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark]))
+            .is_some_and(|name| &*name == dark)
+    }
+    fn palette(dark: bool) -> &'static theme::Palette {
+        if dark { &theme::DARK } else { &theme::LIGHT }
+    }
+    fn color(c: Color32, alpha: f64) -> Retained<NSColor> {
+        let channel = |v: u8| v as f64 / 255.;
+        NSColor::colorWithSRGBRed_green_blue_alpha(
+            channel(c.r()),
+            channel(c.g()),
+            channel(c.b()),
+            alpha,
+        )
+    }
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+        NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
+    }
+    fn label(
+        mtm: MainThreadMarker,
+        size: f64,
+        weight: NSFontWeight,
+        color: &NSColor,
+        alignment: NSTextAlignment,
+        frame: NSRect,
+    ) -> Retained<NSTextField> {
+        let field = NSTextField::labelWithString(ns_string!(""), mtm);
+        field.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
+            size, weight,
+        )));
+        field.setTextColor(Some(color));
+        field.setAlignment(alignment);
+        field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        field.setFrame(frame);
+        field
+    }
+    /// Um retângulo preenchido de cantos `radius` (NSBox custom: fundo e raio
+    /// sem camada).
+    fn fill(mtm: MainThreadMarker, frame: NSRect, radius: f64) -> Retained<NSBox> {
+        let fill = NSBox::initWithFrame(NSBox::alloc(mtm), frame);
+        fill.setBoxType(NSBoxType::Custom);
+        fill.setTitlePosition(NSTitlePosition::NoTitle);
+        fill.setBorderWidth(0.);
+        fill.setCornerRadius(radius);
+        fill.setContentViewMargins(NSSize::new(0., 0.));
+        fill
+    }
+    /// Uma linha informativa: uma view de `height` que o menu estica até a
+    /// largura dele; cada filha diz com `autoresizing` como acompanha.
+    fn view_item(mtm: MainThreadMarker, height: f64, children: &[&NSView]) -> Retained<NSMenuItem> {
+        let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0., 0., WIDTH, height));
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        for child in children {
+            view.addSubview(child);
+        }
+        let item = item(mtm, "", None);
+        item.setView(Some(&view));
+        item
+    }
+
+    /// O item nativo de `entry`, ainda sem os valores (`update`). As ações
+    /// entram em `actions`, e a `tag` do item é o índice.
+    fn build(mtm: MainThreadMarker, entry: &Entry, actions: &mut Vec<MenuAction>) -> Native {
+        // SAFETY: AppKit's font weight constants.
+        let (regular, semibold) = unsafe { (NSFontWeightRegular, NSFontWeightSemibold) };
+        let left = NSTextAlignment::Left;
+        let right = NSTextAlignment::Right;
+        match &entry.row {
+            Row::Header(_) => {
+                let name = label(
+                    mtm,
+                    13.,
+                    semibold,
+                    &NSColor::labelColor(),
+                    left,
+                    rect(INSET, 4., 150., 17.),
+                );
+                name.setStringValue(ns_string!("AI Monitor"));
+                let state = label(
+                    mtm,
+                    11.5,
+                    regular,
+                    &NSColor::secondaryLabelColor(),
+                    right,
+                    rect(0., 5., 0., 15.),
+                );
+                let dot = fill(mtm, rect(0., 0., DOT, DOT), DOT / 2.);
+                // O estado fica preso à borda direita quando o menu alarga.
+                state.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+                dot.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+                Native::Header {
+                    item: view_item(mtm, 26., &[&name, &dot, &state]),
+                    dot,
+                    state,
+                }
+            }
+            Row::Metric { name, .. } => {
+                // A grade do artboard: 4 acima da linha do ai-memory, 3 entre
+                // as duas e 6 abaixo da do Docker.
+                let (height, y) = if name == "ai-memory" {
+                    (21., 1.)
+                } else {
+                    (24., 6.)
+                };
+                let name = label(
+                    mtm,
+                    12.5,
+                    regular,
+                    &NSColor::labelColor(),
+                    left,
+                    rect(INSET, y, WIDTH - 2. * INSET - CPU - MEMORY - 2. * GAP, 16.),
+                );
+                let cpu = label(
+                    mtm,
+                    12.5,
+                    regular,
+                    &NSColor::labelColor(),
+                    right,
+                    rect(WIDTH - INSET - MEMORY - GAP - CPU, y, CPU, 16.),
+                );
+                let memory = label(
+                    mtm,
+                    12.5,
+                    regular,
+                    &NSColor::secondaryLabelColor(),
+                    right,
+                    rect(WIDTH - INSET - MEMORY, y, MEMORY, 16.),
+                );
+                // O nome ganha a largura extra; as colunas ficam à direita.
+                name.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                cpu.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+                memory.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+                Native::Metric {
+                    item: view_item(mtm, height, &[&name, &cpu, &memory]),
+                    name,
+                    cpu,
+                    memory,
+                }
+            }
+            Row::Alert(_) => {
+                // A faixa: 2 acima e 4 abaixo, a 5 das bordas do menu, raio 6;
+                // estica com ele.
+                let band = fill(mtm, rect(5., 4., WIDTH - 10., 27.), 6.);
+                band.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                // SF Symbol (macOS 11+); sem ele, a faixa fica só com o texto.
+                let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    ns_string!("exclamationmark.triangle"),
+                    None,
+                )
+                .map(|image| {
+                    let icon = NSImageView::imageViewWithImage(&image, mtm);
+                    icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                    icon.setFrame(rect(13., 11., 13., 13.));
+                    icon
+                });
+                let text = label(
+                    mtm,
+                    12.,
+                    regular,
+                    &NSColor::labelColor(),
+                    left,
+                    rect(13. + 13. + 6., 9.5, WIDTH - 32. - 13., 16.),
+                );
+                text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                let mut children: Vec<&NSView> = vec![&band];
+                if let Some(icon) = &icon {
+                    children.push(icon);
+                }
+                children.push(&text);
+                Native::Alert {
+                    item: view_item(mtm, 33., &children),
+                    band,
+                    icon,
+                    text,
+                }
+            }
+            Row::Separator => Native::Separator(NSMenuItem::separatorItem(mtm)),
+            Row::Action { label, action, .. } => {
+                let native = item(mtm, label, Some(sel!(perform:)));
+                native.setTag(actions.len() as isize);
+                // Os atalhos do artboard (⌘O, ⌘, e ⌘Q), com o menu aberto.
+                let key = match action {
+                    MenuAction::Open(menu::Destination::Panel) => "o",
+                    MenuAction::Open(menu::Destination::Settings) => ",",
+                    MenuAction::Quit => "q",
+                    MenuAction::Open(_) => "",
+                };
+                native.setKeyEquivalent(&NSString::from_str(key));
+                actions.push(*action);
+                Native::Action(native)
+            }
+        }
+    }
+
+    /// Aplica `entry` ao item nativo dela, com as cores da aparência.
+    fn update(native: &Native, entry: &Entry, dark: bool) {
+        let p = palette(dark);
+        native.item().setHidden(!entry.visible);
+        match (native, &entry.row) {
+            (Native::Header { dot, state, .. }, Row::Header(reading)) => {
+                state.setStringValue(&NSString::from_str(&reading.text()));
+                state.sizeToFit();
+                let size = state.frame().size;
+                // A largura que o menu deu à view, não a mínima.
+                let width = native
+                    .item()
+                    .view()
+                    .map_or(WIDTH, |view| view.frame().size.width);
+                state.setFrameOrigin(NSPoint::new(width - INSET - size.width, 5.));
+                dot.setFrameOrigin(NSPoint::new(
+                    width - INSET - size.width - 6. - DOT,
+                    5. + (size.height - DOT) / 2.,
+                ));
+                let tone = match reading {
+                    State::Live(_) => p.acc,
+                    State::Late(_) => p.warn,
+                    State::DockerDown(_) => p.bad,
+                    State::Waiting => p.text2,
+                };
+                dot.setFillColor(&color(tone, 1.));
+            }
+            (
+                Native::Metric {
+                    name: field,
+                    cpu,
+                    memory,
+                    ..
+                },
+                Row::Metric { name, value },
+            ) => {
+                field.setStringValue(&NSString::from_str(name));
+                let (c, m) = match value {
+                    Some((c, m)) => (c.as_str(), m.as_str()),
+                    None => ("indisponível", ""),
+                };
+                cpu.setStringValue(&NSString::from_str(c));
+                let ink = if value.is_some() {
+                    NSColor::labelColor()
+                } else {
+                    NSColor::secondaryLabelColor()
+                };
+                cpu.setTextColor(Some(&ink));
+                memory.setStringValue(&NSString::from_str(m));
+            }
+            (
+                Native::Alert {
+                    band, icon, text, ..
+                },
+                Row::Alert(alert),
+            ) => {
+                text.setStringValue(&NSString::from_str(alert));
+                text.setTextColor(Some(&color(p.warn, 1.)));
+                band.setFillColor(&color(p.warn, if dark { 0.14 } else { 0.12 }));
+                if let Some(icon) = icon {
+                    icon.setContentTintColor(Some(&color(p.warn, 1.)));
+                }
+            }
+            (Native::Action(item), Row::Action { label, detail, .. }) if entry.dynamic => {
+                match detail {
+                    Some(detail) => item.setAttributedTitle(Some(&detail_title(label, detail))),
+                    None => {
+                        item.setAttributedTitle(None);
+                        item.setTitle(&NSString::from_str(label));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// O rótulo com `detail` à direita, em text2 e 12 (o projeto das
+    /// propostas), numa parada de tabulação no fim da linha.
+    fn detail_title(label: &str, detail: &str) -> Retained<NSAttributedString> {
+        // SAFETY: an empty options dictionary is valid for NSTextTab.
+        let tab = unsafe {
+            NSTextTab::initWithTextAlignment_location_options(
+                NSTextTab::alloc(),
+                NSTextAlignment::Right,
+                WIDTH - 2. * INSET,
+                &NSDictionary::new(),
+            )
+        };
+        let style = NSMutableParagraphStyle::new();
+        style.setTabStops(Some(&NSArray::from_slice(&[&*tab])));
+        let part = |text: &str, font: &NSFont, color: &NSColor| {
+            // SAFETY: AppKit's attribute keys with values of their types.
+            unsafe {
+                let keys = [
+                    NSFontAttributeName,
+                    NSForegroundColorAttributeName,
+                    NSParagraphStyleAttributeName,
+                ];
+                let values: [&AnyObject; 3] = [font.as_ref(), color.as_ref(), (*style).as_ref()];
+                NSAttributedString::initWithString_attributes(
+                    NSAttributedString::alloc(),
+                    &NSString::from_str(text),
+                    Some(&NSDictionary::from_slices(&keys, &values)),
+                )
+            }
+        };
+        let title = NSMutableAttributedString::new();
+        title.appendAttributedString(&part(
+            label,
+            &NSFont::menuFontOfSize(0.),
+            &NSColor::labelColor(),
+        ));
+        title.appendAttributedString(&part(
+            &format!("\t{detail}"),
+            &NSFont::menuFontOfSize(12.),
+            &NSColor::secondaryLabelColor(),
+        ));
+        Retained::into_super(title)
+    }
+
+    /// O pulso de `menu::PULSE` como imagem template de 15 pt (1×, 2× e 3×):
+    /// o AppKit o pinta com a cor da barra, clara ou escura.
+    fn pulse() -> Retained<NSImage> {
+        let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(ICON, ICON));
+        for scale in [1., 2., 3.] {
+            let px = (ICON * scale) as isize;
+            // SAFETY: null planes make AppKit allocate the pixels; 8-bit RGBA.
+            let rep = unsafe {
+                NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                    NSBitmapImageRep::alloc(),
+                    std::ptr::null_mut(),
+                    px,
+                    px,
+                    8,
+                    4,
+                    true,
+                    false,
+                    NSDeviceRGBColorSpace,
+                    0,
+                    0,
+                )
+            };
+            let Some(rep) = rep else {
+                continue;
+            };
+            if let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep) {
+                NSGraphicsContext::saveGraphicsState_class();
+                NSGraphicsContext::setCurrentContext(Some(&context));
+                let unit = px as f64 / 24.;
+                let path = NSBezierPath::bezierPath();
+                for (i, &(x, y)) in menu::PULSE.iter().enumerate() {
+                    // O path do artboard desce; o bitmap sobe.
+                    let point = NSPoint::new(x as f64 * unit, (24. - y as f64) * unit);
+                    if i == 0 {
+                        path.moveToPoint(point);
+                    } else {
+                        path.lineToPoint(point);
+                    }
+                }
+                path.setLineWidth(menu::PULSE_WIDTH as f64 * unit);
+                path.setLineCapStyle(NSLineCapStyle::Round);
+                path.setLineJoinStyle(NSLineJoinStyle::Round);
+                NSColor::blackColor().setStroke();
+                path.stroke();
+                NSGraphicsContext::restoreGraphicsState_class();
+            }
+            rep.setSize(NSSize::new(ICON, ICON));
+            image.addRepresentation(&rep);
+        }
+        image.setTemplate(true);
+        image
+    }
+
+    /// O ponto de 6 no canto superior direito do pulso, onde o botão o
+    /// desenha agora (o lado do ícone muda com o modo).
+    fn place_dot(button: &NSStatusBarButton, dot: &NSBox) {
+        let Some(cell) = button.cell() else {
+            return;
+        };
+        let image = cell.imageRectForBounds(button.bounds());
+        let (cx, cy) = (
+            image.origin.x + image.size.width / 2.,
+            image.origin.y + image.size.height / 2.,
+        );
+        let top = if button.isFlipped() {
+            cy - ICON / 2.
+        } else {
+            cy + ICON / 2. - DOT
+        };
+        dot.setFrame(rect(cx + ICON / 2. - DOT, top, DOT, DOT));
     }
 
     pub struct MenuBar {
@@ -310,15 +663,28 @@ mod native {
                 NSStatusBar::systemStatusBar().removeStatusItem(&status);
                 return None;
             };
+            // SAFETY: AppKit's font weight constant.
+            let medium = unsafe { NSFontWeightMedium };
             button.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
-                11., 0.,
+                12.5, medium,
             )));
+            button.setImage(Some(&pulse()));
+            let (r, g, b) = menu::ALERT_DOT;
+            let dot = fill(mtm, rect(0., 0., DOT, DOT), DOT / 2.);
+            dot.setFillColor(&color(Color32::from_rgb(r, g, b), 1.));
+            dot.setHidden(true);
+            button.addSubview(&dot);
             let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("AI Monitor"));
             menu.setAutoenablesItems(false);
-            let ai = item(mtm, "ai-memory · aguardando", None);
-            let docker = item(mtm, "Docker · aguardando", None);
-            let freshness = item(mtm, "Aguardando a primeira coleta…", None);
-            let activity = item(mtm, "Handoffs / propostas: aguardando", None);
+            // Sem a coluna de marcação: o texto começa onde começam as views.
+            menu.setShowsStateColumn(false);
+            // A estrutura vem de uma leitura vazia; `refresh` aplica a real.
+            let mut actions = Vec::new();
+            let empty = MenuReading::from_snapshot(&Default::default(), "ai-memory", 2, Utc::now());
+            let rows: Vec<Native> = menu::entries(&empty)
+                .iter()
+                .map(|entry| build(mtm, entry, &mut actions))
+                .collect();
             let actions = MenuActions::new(
                 mtm,
                 MenuState {
@@ -326,10 +692,9 @@ mod native {
                     ctx,
                     visible: Cell::new(show_dashboard),
                     status: status.clone(),
-                    ai: ai.clone(),
-                    docker: docker.clone(),
-                    freshness: freshness.clone(),
-                    activity: activity.clone(),
+                    dot,
+                    rows,
+                    actions,
                     previous: RefCell::new(None),
                     trace_remaining: Cell::new(if std::env::args().any(|a| a == "--trace-menu") {
                         120
@@ -338,33 +703,15 @@ mod native {
                     }),
                 },
             );
-            menu.addItem(&item(mtm, "AI Monitor", None));
-            menu.addItem(&ai);
-            menu.addItem(&docker);
-            menu.addItem(&freshness);
-            menu.addItem(&activity);
-            menu.addItem(&item(mtm, "CPU: 100% = 1 núcleo · M/G = MiB/GiB", None));
-            menu.addItem(&item(
-                mtm,
-                "Docker = contêineres ativos, incluindo ai-memory",
-                None,
-            ));
-            menu.addItem(&NSMenuItem::separatorItem(mtm));
-            for (title, selector) in [
-                ("Abrir painel", sel!(openPanel:)),
-                ("Saúde", sel!(openHealth:)),
-                ("Revisão", sel!(openReview:)),
-                ("Administração", sel!(openAdmin:)),
-                ("Ocultar painel", sel!(hidePanel:)),
-                ("Sair do AI Monitor", sel!(quitMonitor:)),
-            ] {
-                let entry = item(mtm, title, Some(selector));
-                // SAFETY: the retained target implements each selector with the
-                // action ABI above and outlives the menu and its timer.
-                unsafe {
-                    entry.setTarget(Some(&actions));
+            for row in &actions.ivars().rows {
+                if let Native::Action(entry) = row {
+                    // SAFETY: the retained target implements perform: with the
+                    // action ABI above and outlives the menu and its timer.
+                    unsafe {
+                        entry.setTarget(Some(&actions));
+                    }
                 }
-                menu.addItem(&entry);
+                menu.addItem(row.item());
             }
             status.setMenu(Some(&menu));
             // SAFETY: refreshMetrics: takes exactly one NSTimer argument. Both
@@ -433,182 +780,3 @@ mod native {
 }
 #[cfg(target_os = "macos")]
 pub use native::MenuBar;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::Container;
-    fn snapshot() -> ResourceSnapshot {
-        ResourceSnapshot {
-            at: Some(Utc::now()),
-            containers: vec![
-                Container {
-                    name: "ai-memory".into(),
-                    state: "running".into(),
-                    usage: Some(Usage {
-                        cpu: 235.14,
-                        memory: 512 * 1024 * 1024,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Container {
-                    name: "db".into(),
-                    state: "running".into(),
-                    usage: Some(Usage {
-                        cpu: 12.,
-                        memory: 1024 * 1024 * 1024,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
-    }
-    #[test]
-    fn shows_both_sources_without_capping_multicore_cpu() {
-        let snapshot = snapshot();
-        let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", 2, Utc::now());
-        assert_eq!(reading.title, "AI 235% 512M  |  Docker 247% 1,5G");
-        assert!(reading.ai.contains("CPU 235,1%"), "{}", reading.ai);
-        assert!(reading.docker.contains("1,5 GiB"), "{}", reading.docker);
-    }
-    #[test]
-    fn compact_bytes_switches_unit_at_one_gib_with_pt_br_separators() {
-        assert_eq!(compact_bytes((1 << 30) - 1), "1.024M");
-        assert_eq!(compact_bytes(1 << 30), "1,0G");
-        assert_eq!(compact_bytes(0), "0M");
-        let usage = Usage {
-            cpu: 1234.56,
-            memory: 3 << 29,
-            ..Default::default()
-        };
-        assert_eq!(compact(Some(&usage)), "1.235% 1,5G");
-        assert_eq!(
-            detail("ai-memory", Some(&usage)),
-            "ai-memory · CPU 1.234,6% · memória 1,5 GiB"
-        );
-    }
-    #[test]
-    fn failures_and_old_samples_do_not_masquerade_as_current_numbers() {
-        let mut snapshot = snapshot();
-        snapshot.docker_error = Some("offline".into());
-        let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", 2, Utc::now());
-        assert_eq!(reading.title, "AI —% —  |  Docker —% —");
-        assert!(reading.freshness.contains("indisponível"));
-        snapshot.docker_error = None;
-        snapshot.at = Some(Utc::now() - chrono::Duration::seconds(30));
-        let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", 2, Utc::now());
-        assert_eq!(reading.title, "AI —% —  |  Docker —% —");
-        assert!(reading.freshness.contains("atrasada"));
-    }
-    #[test]
-    fn zero_is_distinct_from_unavailable_and_interval_controls_freshness() {
-        let mut snapshot = ResourceSnapshot {
-            at: Some(Utc::now() - chrono::Duration::seconds(20)),
-            ..Default::default()
-        };
-        let reading = MenuReading::from_snapshot(&snapshot, "ai-memory", 10, Utc::now());
-        assert_eq!(reading.title, "AI —% —  |  Docker 0% 0M");
-        snapshot.at = None;
-        assert!(
-            MenuReading::from_snapshot(&snapshot, "ai-memory", 10, Utc::now())
-                .freshness
-                .contains("primeira")
-        );
-    }
-
-    #[test]
-    fn menu_reading_composes_health_alerts_and_proposal_watch_counts() {
-        let now = Utc::now();
-        let snap = snapshot();
-        let scope = crate::client::Scope {
-            workspace: "ws".into(),
-            project: "proj".into(),
-        };
-        let cfg = crate::model::Config {
-            proposal_watch: Some(scope.clone()),
-            ..Default::default()
-        };
-        let api = crate::model::ApiSnapshot {
-            at: Some(now),
-            handoff_total: Some(3),
-            ..Default::default()
-        };
-        let health = crate::health::Snapshot {
-            at: Some(now),
-            status: Some(serde_json::json!({"consolidation":{"failed":1}})),
-            pending: Some(200),
-            pending_scope: Some(scope),
-            ..Default::default()
-        };
-        let reading = MenuReading::from_snapshot(&snap, "ai-memory", 2, now).with_context(
-            Some(&api),
-            Some(&health),
-            &cfg,
-            now,
-        );
-        assert!(reading.title.ends_with("  ! P200+"), "{}", reading.title);
-        assert_eq!(
-            reading.activity,
-            "Handoffs abertos 3 · Propostas 200+ · ws / proj"
-        );
-        assert!(reading.freshness.contains("Consolidações com falha"));
-    }
-
-    #[test]
-    fn open_handoffs_group_thousands() {
-        let now = Utc::now();
-        let api = crate::model::ApiSnapshot {
-            at: Some(now),
-            handoff_total: Some(1234),
-            ..Default::default()
-        };
-        let reading = MenuReading::from_snapshot(&snapshot(), "ai-memory", 2, now).with_context(
-            Some(&api),
-            None,
-            &crate::model::Config::default(),
-            now,
-        );
-        assert_eq!(
-            reading.activity,
-            "Handoffs abertos 1.234 · Propostas: aguardando"
-        );
-    }
-
-    #[test]
-    fn alert_requires_fresh_health_with_alerts() {
-        let now = Utc::now();
-        let snap = snapshot();
-        let cfg = crate::model::Config::default();
-        let alerts = serde_json::json!({"consolidation": {"failed": 1}});
-        for (at, status, want) in [
-            (Some(now), Some(alerts.clone()), true),
-            (
-                Some(now),
-                Some(serde_json::json!({"consolidation": {"failed": 0}})),
-                false,
-            ),
-            (Some(now), None, false),
-            (
-                Some(now - chrono::Duration::seconds(crate::health::INTERVAL as i64 * 4)),
-                Some(alerts),
-                false,
-            ),
-        ] {
-            let health = crate::health::Snapshot {
-                at,
-                status: status.clone(),
-                ..Default::default()
-            };
-            let reading = MenuReading::from_snapshot(&snap, "ai-memory", 2, now).with_context(
-                None,
-                Some(&health),
-                &cfg,
-                now,
-            );
-            assert_eq!(reading.alert, want, "at={at:?} status={status:?}");
-        }
-    }
-}

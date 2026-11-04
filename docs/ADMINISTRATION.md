@@ -269,12 +269,15 @@ ao trocar operação/conexão ou ao clicar **Limpar resultado privado**. Isso n�
 
 ### Menu e acompanhamento
 
-O menu tem os atalhos **Saúde**, **Revisão** e **Administração**; mostra handoffs abertos.
-Selecione um projeto em **Ajustes → Barra de menus** (no Linux, **Ajustes →
-Bandeja**), no seletor de projeto (legenda "Propostas na barra de menus", ou
-"Propostas no menu da bandeja" no Linux), para acompanhar pendentes a cada ciclo de
-saúde, com a janela fechada. `P200+` significa que a listagem atingiu o limite;
-`—` significa indisponível/atrasado, nunca zero presumido.
+O menu da barra (no Linux, da bandeja) tem os atalhos **Saúde do ai-memory** e
+**Revisar propostas…**; a linha **N handoffs abertos** abre **Sessões e handoffs**,
+e a de propostas, **Revisão**. Com alertas de saúde, o menu mostra uma faixa âmbar
+e o ícone, um ponto âmbar (desligável em Ajustes). Selecione um projeto em
+**Ajustes → Barra de menus** (no Linux, **Ajustes → Bandeja**), no seletor
+**Propostas** (legenda "Um projeto, até 200 pendentes. Contagem aparece no menu."),
+para acompanhar pendentes a cada ciclo de saúde, com a janela fechada. `200+`
+significa que a listagem atingiu o limite; `—` significa indisponível/atrasado,
+nunca zero presumido.
 A contagem é do projeto e da identidade conectada, não um total global. Na
 lateral do painel, o mesmo número aparece em âmbar ao lado de **Revisão** quando
 há pendentes; sem leitura válida ou com zero, não aparece.

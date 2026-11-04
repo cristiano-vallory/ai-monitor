@@ -17,6 +17,41 @@ pub struct Config {
     pub remember_token: bool,
     pub proposal_watch: Option<crate::client::Scope>,
     pub theme: Appearance,
+    /// O que o item da barra de menus mostra (só o macOS usa).
+    pub bar_mode: BarMode,
+    /// Ponto âmbar no ícone da barra/bandeja quando a saúde tem alertas.
+    #[serde(deserialize_with = "alert_dot")]
+    pub alert_dot: bool,
+}
+
+/// Item da barra de menus do macOS: só o ícone, o ícone e a CPU do
+/// ai-memory, ou CPU e memória do ai-memory e do Docker. Como `Appearance`,
+/// um valor desconhecido ou de tipo errado vira o padrão sem derrubar o resto.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarMode {
+    Icon,
+    #[default]
+    IconCpu,
+    Full,
+}
+impl<'de> Deserialize<'de> for BarMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match serde_json::Value::deserialize(deserializer)?.as_str() {
+                Some("icon") => Self::Icon,
+                Some("full") => Self::Full,
+                _ => Self::IconCpu,
+            },
+        )
+    }
+}
+/// `alert_dot` no disco: só um booleano conta; o resto vira o padrão (ligado)
+/// sem derrubar a leitura da configuração.
+fn alert_dot<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_bool()
+        .unwrap_or(true))
 }
 
 /// Aparência escolhida em Ajustes. Um valor desconhecido ou de tipo errado
@@ -90,6 +125,8 @@ impl Default for Config {
             remember_token: false,
             proposal_watch: None,
             theme: Appearance::System,
+            bar_mode: BarMode::IconCpu,
+            alert_dot: true,
         }
     }
 }
@@ -152,11 +189,19 @@ impl Config {
         config
     }
     pub fn load() -> Self {
+        Self::load_with(|e| crate::keychain::load(e).ok().flatten())
+    }
+    /// `load` sem o Keychain/chaveiro (no Linux, o Secret Service é D-Bus):
+    /// a config do disco e do ambiente, sem o token guardado.
+    pub fn load_without_keychain() -> Self {
+        Self::load_with(|_| None)
+    }
+    fn load_with(keychain: impl FnOnce(&str) -> Option<String>) -> Self {
         Self::load_from(
             std::fs::read(Self::path()).ok().as_deref(),
             std::env::var("AI_MEMORY_SERVER_URL").ok(),
             std::env::var_os("AI_MEMORY_AUTH_TOKEN"),
-            |e| crate::keychain::load(e).ok().flatten(),
+            keychain,
         )
     }
     pub fn apply_keychain_token(&mut self, load: impl FnOnce() -> Option<String>) {
@@ -1162,6 +1207,101 @@ mod tests {
         let disk = format!(r#"{{{CUSTOM},"theme":"light"}}"#);
         let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
         assert_eq!(loaded.theme, Appearance::Light);
+    }
+
+    #[test]
+    fn bar_mode_and_alert_dot_default_without_the_fields_and_each_value_roundtrips() {
+        let defaults = Config::default();
+        assert_eq!(defaults.bar_mode, BarMode::IconCpu);
+        assert!(defaults.alert_dot);
+        // Config antiga, sem os campos.
+        let old = format!("{{{CUSTOM}}}");
+        let loaded = Config::from_sources(Some(old.as_bytes()), None, None);
+        assert_custom_fields_kept(&loaded, "config without the bar fields");
+        assert_eq!(loaded.bar_mode, BarMode::IconCpu);
+        assert!(loaded.alert_dot);
+        for (mode, wire) in [
+            (BarMode::Icon, "icon"),
+            (BarMode::IconCpu, "icon-cpu"),
+            (BarMode::Full, "full"),
+        ] {
+            // Um membro novo do enum tem de aparecer nesta matriz.
+            match mode {
+                BarMode::Icon | BarMode::IconCpu | BarMode::Full => {}
+            }
+            for dot in [false, true] {
+                let config = Config {
+                    bar_mode: mode,
+                    alert_dot: dot,
+                    ..Config::from_sources(Some(old.as_bytes()), None, None)
+                };
+                let json = serde_json::to_value(&config).unwrap();
+                assert_eq!(
+                    (&json["bar_mode"], &json["alert_dot"]),
+                    (&wire.into(), &dot.into())
+                );
+                let bytes = serde_json::to_vec(&config).unwrap();
+                let loaded = Config::from_sources(Some(&bytes), None, None);
+                assert_custom_fields_kept(&loaded, wire);
+                assert_eq!(
+                    (loaded.bar_mode, loaded.alert_dot),
+                    (mode, dot),
+                    "{wire} {dot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_or_mistyped_bar_fields_become_the_defaults_without_discarding_the_rest() {
+        // Fora do padrão nos dois campos, para que voltar ao padrão se veja.
+        for bad in [
+            r#""purple""#,
+            "42",
+            "null",
+            "true",
+            "[]",
+            r#"{"a":1}"#,
+            r#""Full""#,
+            r#""icon_cpu""#,
+        ] {
+            let disk = format!(r#"{{{CUSTOM},"bar_mode":{bad},"alert_dot":false}}"#);
+            let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+            assert_custom_fields_kept(&loaded, bad);
+            assert_eq!(loaded.bar_mode, BarMode::IconCpu, "bar_mode={bad}");
+            assert!(!loaded.alert_dot, "bar_mode={bad} must not reset alert_dot");
+        }
+        for bad in [
+            r#""false""#,
+            "0",
+            "1",
+            "null",
+            "[]",
+            r#"{"a":1}"#,
+            r#""no""#,
+        ] {
+            let disk = format!(r#"{{{CUSTOM},"bar_mode":"full","alert_dot":{bad}}}"#);
+            let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+            assert_custom_fields_kept(&loaded, bad);
+            assert!(loaded.alert_dot, "alert_dot={bad}");
+            assert_eq!(
+                loaded.bar_mode,
+                BarMode::Full,
+                "alert_dot={bad} must not reset bar_mode"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_from_a_newer_client_keeps_its_known_fields() {
+        // O que um cliente antigo faz com a config nova: campo desconhecido é
+        // ignorado (sem `deny_unknown_fields`), o resto vale.
+        let disk = format!(
+            r#"{{{CUSTOM},"bar_mode":"icon","alert_dot":false,"bar_layout":{{"rows":3}},"future":[1,2]}}"#
+        );
+        let loaded = Config::from_sources(Some(disk.as_bytes()), None, None);
+        assert_custom_fields_kept(&loaded, "unknown keys");
+        assert_eq!((loaded.bar_mode, loaded.alert_dot), (BarMode::Icon, false));
     }
 
     #[test]

@@ -143,14 +143,11 @@ impl eframe::App for WindowApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
-                Action::CloseWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
                 Action::Exit => {
                     self.shared.stop.store(true, Ordering::Relaxed);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                Action::OpenWindow(_) | Action::Ignore => {}
+                Action::OpenWindow(_) => {}
             }
         }
         self.inner.borrow_mut().update(ctx, frame);
@@ -269,7 +266,7 @@ pub fn run(config: Config) -> eframe::Result {
                 }
             }
             Action::Exit => break,
-            Action::FocusAndNavigate(_) | Action::CloseWindow | Action::Ignore => {}
+            Action::FocusAndNavigate(_) => {}
         }
     }
     shared.stop.store(true, Ordering::Relaxed);
@@ -325,5 +322,101 @@ mod tests {
                 "each fresh egui Context must receive the window theme"
             );
         }
+    }
+
+    /// Janelas de Ajustes embutidas (o título é a aba, "Geral" de início).
+    fn settings_windows(out: &egui::FullOutput) -> usize {
+        out.platform_output
+            .accesskit_update
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.role() == egui::accesskit::Role::Window && n.label() == Some("Geral")
+            })
+            .count()
+    }
+    fn window(shared: &Arc<Shared>, control: &Arc<Control>, ctx: &egui::Context) -> WindowApp {
+        let slot = Rc::new(RefCell::new(None));
+        WindowApp {
+            inner: prepare_window(ctx, &slot, shared),
+            control: control.clone(),
+            shared: shared.clone(),
+        }
+    }
+    fn run(window: &mut WindowApp, ctx: &egui::Context) -> egui::FullOutput {
+        let mut frame = eframe::Frame::_new_kittest();
+        ctx.run(egui::RawInput::default(), |ctx| {
+            eframe::App::update(window, ctx, &mut frame)
+        })
+    }
+
+    #[test]
+    fn ajustes_takes_the_focus_again_after_the_open_window_takes_it() {
+        use egui::ViewportCommand::Focus;
+        let shared = Shared::unstarted(crate::model::Config::default());
+        let control = Control::new();
+        let ctx = egui::Context::default();
+        // Ajustes como janela própria (viewport imediata), como no eframe.
+        ctx.set_embed_viewports(false);
+        egui::Context::set_immediate_viewport_renderer(|ctx, viewport| {
+            let mut raw = egui::RawInput {
+                viewport_id: viewport.ids.this,
+                ..Default::default()
+            };
+            raw.viewports.insert(viewport.ids.this, Default::default());
+            let mut show = viewport.viewport_ui_cb;
+            let _ = ctx.run(raw, |ctx| show(ctx));
+        });
+        let focus = |out: &egui::FullOutput, id| {
+            out.viewport_output
+                .get(&id)
+                .is_some_and(|v| v.commands.contains(&Focus))
+        };
+        let (root, settings) = (egui::ViewportId::ROOT, crate::app::settings_id());
+        let mut open = window(&shared, &control, &ctx);
+        run(&mut open, &ctx);
+        control.send(Command::Open(crate::menu::Destination::Settings.code()));
+        // `FocusAndNavigate` foca a principal no mesmo frame em que Ajustes
+        // abre; o eframe trata esse Focus depois do pass de Ajustes.
+        let out = run(&mut open, &ctx);
+        assert!(
+            focus(&out, root) && focus(&out, settings),
+            "both, this frame"
+        );
+        let out = run(&mut open, &ctx);
+        assert!(
+            !focus(&out, root) && focus(&out, settings),
+            "then Ajustes alone"
+        );
+    }
+
+    #[test]
+    fn ajustes_opens_settings_over_a_new_window_and_over_the_open_one() {
+        let settings = crate::menu::Destination::Settings.code();
+        // Janela fechada: `open_window` grava o código antes de criar a
+        // janela, e o `attach` de `prepare_window` não o apaga.
+        let shared = Shared::unstarted(crate::model::Config::default());
+        let control = Control::new();
+        shared.navigation.store(settings, Ordering::Release);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut new = window(&shared, &control, &ctx);
+        assert_eq!(settings_windows(&run(&mut new, &ctx)), 1, "new window");
+        // Janela aberta: o comando chega pelo Control.
+        let shared = Shared::unstarted(crate::model::Config::default());
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut open = window(&shared, &control, &ctx);
+        assert_eq!(settings_windows(&run(&mut open, &ctx)), 0, "precondition");
+        control.send(Command::Open(0));
+        assert_eq!(
+            settings_windows(&run(&mut open, &ctx)),
+            0,
+            "the panel alone"
+        );
+        control.send(Command::Open(settings));
+        assert_eq!(settings_windows(&run(&mut open, &ctx)), 1, "open window");
     }
 }
