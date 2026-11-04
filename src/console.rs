@@ -920,8 +920,9 @@ fn local_offset(
     ui.data_mut(|d| d.insert_temp(id, offset));
     offset..(offset + 100).min(total)
 }
-/// A página local das listas de Explorar e de `show_values`, dentro de
-/// cartões: "N–M de T" e Anterior/Próxima.
+/// A página local das listas de Explorar e de `show_values`, sempre sobre
+/// surf (cartões, corpo de Ajustes, prévia da folha): "N–M de T" e
+/// Anterior/Próxima.
 fn local_page(ui: &mut egui::Ui, total: usize) -> std::ops::Range<usize> {
     local_offset(ui, total, |ui, offset| {
         let label = range_label(offset, (total - offset).min(100), Some(total));
