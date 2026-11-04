@@ -237,7 +237,7 @@ pub enum Row {
     /// "Saúde: …" com os alertas; só visível quando há algum.
     Alert(String),
     Separator,
-    /// Uma ação; `detail` vai à direita (o projeto das propostas).
+    /// Uma ação; `detail` vem logo depois do rótulo (o projeto das propostas).
     Action {
         label: String,
         detail: Option<String>,
@@ -440,7 +440,7 @@ fn handoffs(open: Option<usize>) -> String {
         None => "Handoffs abertos: —".into(),
     }
 }
-/// O texto das propostas e o projeto, que vai à direita.
+/// O texto das propostas e o projeto, que vem logo depois dele.
 fn proposals(p: &Proposals) -> (String, Option<String>) {
     match p {
         Proposals::Waiting => ("Propostas: aguardando".into(), None),

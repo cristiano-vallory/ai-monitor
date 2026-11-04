@@ -171,7 +171,8 @@ fn icon_base(
 }
 /// Grava os dois ícones simbólicos em `base/icons` (no tema hicolor e soltos,
 /// para hosts que não leem o tema) e devolve esse `IconThemePath`; `None`
-/// se a gravação falhar (a bandeja fica só com o pixmap).
+/// se a gravação falhar (a bandeja fica só com o pixmap). O último trecho
+/// do caminho tem de ser `icons`: o Plasma só acha o tema assim.
 fn install_icons(base: &Path) -> Option<PathBuf> {
     let root = base.join("icons");
     for dir in [root.join("hicolor/scalable/status"), root.clone()] {
